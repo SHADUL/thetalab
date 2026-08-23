@@ -1,0 +1,266 @@
+@import "tailwindcss";
+@import "@fontsource-variable/instrument-sans";
+@import "@fontsource-variable/jetbrains-mono";
+
+/* ─────────────────────────────────────────────────────────────
+   Design tokens. Every colour, radius and elevation in the app
+   resolves to one of these. Nothing is chosen per-component.
+   ───────────────────────────────────────────────────────────── */
+:root {
+  --c-bg:        #F3F5F9;   /* page canvas — faint blue cast */
+  --c-surface:   #FFFFFF;   /* raised surface               */
+  --c-surface-2: #F8FAFC;   /* recessed / inset surface     */
+  --c-surface-3: #EDF1F7;   /* wells, segmented tracks      */
+  --c-line:      #E2E7EF;   /* hairline                     */
+  --c-line-2:    #CFD7E3;   /* stronger divider, inputs     */
+
+  --c-text:      #0F1729;   /* primary                      */
+  --c-text-2:    #5A6478;   /* secondary                    */
+  --c-muted:     #8590A5;   /* labels                       */
+  --c-faint:     #AEB7C6;   /* disabled, empty              */
+
+  --c-gain:      #067A55;
+  --c-gain-soft: rgba(6,122,85,.09);
+  --c-loss:      #C8342B;
+  --c-loss-soft: rgba(200,52,43,.08);
+  --c-accent:      #1D4ED8;
+  --c-accent-2:    #2563EB;
+  --c-accent-soft: rgba(29,78,216,.08);
+  --c-accent-ink:  #FFFFFF;
+  --c-warn:      #9A6B12;
+  --c-warn-soft: rgba(154,107,18,.09);
+
+  --c-grid:      #E7ECF3;   /* chart gridlines              */
+
+  --e-1: 0 1px 2px rgba(17,19,24,.04);
+  --e-2: 0 1px 2px rgba(17,19,24,.04), 0 8px 24px -16px rgba(17,19,24,.18);
+  --e-3: 0 1px 3px rgba(17,19,24,.06), 0 18px 40px -22px rgba(17,19,24,.28);
+}
+
+[data-theme="dark"] {
+  --c-bg:        #0A0E14;
+  --c-surface:   #121821;
+  --c-surface-2: #0E141C;
+  --c-surface-3: #19212C;
+  --c-line:      #1F2833;
+  --c-line-2:    #2A3542;
+
+  --c-text:      #E8EAEE;
+  --c-text-2:    #9BA3AF;
+  --c-muted:     #737B87;
+  --c-faint:     #4C545F;
+
+  --c-gain:      #2DBE85;
+  --c-gain-soft: rgba(45,190,133,.12);
+  --c-loss:      #F0685C;
+  --c-loss-soft: rgba(240,104,92,.12);
+  --c-accent:      #5B8DEF;
+  --c-accent-2:    #6FA0FF;
+  --c-accent-soft: rgba(91,141,239,.14);
+  --c-accent-ink:  #08111F;
+  --c-warn:      #D6A648;
+  --c-warn-soft: rgba(214,166,72,.12);
+
+  --c-grid:      #1D222A;
+
+  --e-1: 0 1px 2px rgba(0,0,0,.4);
+  --e-2: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+  --e-3: 0 1px 3px rgba(0,0,0,.5), 0 18px 40px -22px rgba(0,0,0,.9);
+}
+
+@theme inline {
+  --color-bg: var(--c-bg);
+  --color-surface: var(--c-surface);
+  --color-surface2: var(--c-surface-2);
+  --color-surface3: var(--c-surface-3);
+  --color-line: var(--c-line);
+  --color-line2: var(--c-line-2);
+  --color-ink: var(--c-text);
+  --color-ink2: var(--c-text-2);
+  --color-muted: var(--c-muted);
+  --color-faint: var(--c-faint);
+  --color-gain: var(--c-gain);
+  --color-loss: var(--c-loss);
+  --color-accent: var(--c-accent);
+  --color-accent2: var(--c-accent-2);
+  --color-warn: var(--c-warn);
+  --font-display: "Instrument Sans Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-num: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--c-bg);
+  color: var(--c-text);
+  font-family: var(--font-display);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Numerals: tabular everywhere, so columns align to the pixel. */
+.n {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -.03em;
+  font-weight: 450;
+}
+.n-lg { font-weight: 500; letter-spacing: -.045em; }
+
+.lbl {
+  font-size: 10px;
+  letter-spacing: .085em;
+  text-transform: uppercase;
+  color: var(--c-muted);
+  font-weight: 550;
+  line-height: 1.4;
+}
+
+/* Surface hierarchy — three levels, deliberately different.
+   Not every block is a floating card. */
+.panel   { background: var(--c-surface); border: 1px solid var(--c-line); border-radius: 12px; }
+.panel-e { background: var(--c-surface); border: 1px solid var(--c-line); border-radius: 14px; box-shadow: var(--e-2); }
+.inset   { background: var(--c-surface-2); border: 1px solid var(--c-line); border-radius: 10px; }
+.rule    { border-top: 1px solid var(--c-line); }
+
+.hairline-y > * + * { border-top: 1px solid var(--c-line); }
+
+/* Controls */
+.ctl {
+  background: var(--c-surface);
+  border: 1px solid var(--c-line-2);
+  border-radius: 9px;
+  color: var(--c-text);
+  padding: 9px 11px;
+  font-size: 13.5px;
+  transition: border-color .16s ease-out, box-shadow .16s ease-out, background .16s ease-out;
+}
+.ctl:hover { border-color: var(--c-muted); }
+.ctl:focus, .ctl:focus-visible {
+  outline: none;
+  border-color: var(--c-accent);
+  box-shadow: 0 0 0 3px var(--c-accent-soft);
+}
+.seg-track { background: var(--c-surface-3); border-radius: 9px; padding: 3px; display: flex; gap: 2px; }
+.seg {
+  flex: 1; border: 0; background: transparent; color: var(--c-text-2);
+  font-family: inherit; font-size: 12.5px; font-weight: 500; padding: 7px 10px;
+  border-radius: 7px; cursor: pointer; display: inline-flex; align-items: center;
+  justify-content: center; gap: 6px; white-space: nowrap;
+  transition: color .16s ease-out, background .16s ease-out, box-shadow .16s ease-out;
+}
+.seg:hover { color: var(--c-text); }
+.seg[data-on="true"] {
+  background: var(--c-surface); color: var(--c-accent); font-weight: 600;
+  box-shadow: var(--e-1);
+}
+.btn {
+  border: 1px solid var(--c-line-2); background: var(--c-surface); color: var(--c-text);
+  border-radius: 9px; padding: 8px 13px; font-size: 12.5px; font-weight: 500;
+  font-family: inherit; cursor: pointer; display: inline-flex; align-items: center;
+  justify-content: center; gap: 6px;
+  transition: border-color .16s ease-out, background .16s ease-out, color .16s ease-out;
+}
+.btn:hover { border-color: var(--c-muted); }
+.btn-primary {
+  background: var(--c-accent); border-color: var(--c-accent); color: var(--c-accent-ink);
+  font-weight: 600; padding: 10px 18px; font-size: 13.5px;
+  box-shadow: 0 1px 2px rgba(29,78,216,.18);
+}
+.btn-primary:hover { background: var(--c-accent-2); border-color: var(--c-accent-2); }
+.btn-primary:active { transform: translateY(.5px); }
+a:focus-visible, button:focus-visible, input:focus-visible,
+select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+div:focus, section:focus, header:focus { outline: none; }
+
+.link-quiet { color: var(--c-muted); transition: color .16s ease-out; }
+.link-quiet:hover { color: var(--c-accent); }
+
+input[type=number]::-webkit-inner-spin-button,
+input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+select.ctl { appearance: none; padding-right: 30px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--c-muted) 50%),
+                    linear-gradient(135deg, var(--c-muted) 50%, transparent 50%);
+  background-position: calc(100% - 15px) calc(50% + 1px), calc(100% - 10px) calc(50% + 1px);
+  background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; cursor: pointer; }
+
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--c-line-2); border-radius: 8px;
+  border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--c-muted); background-clip: content-box; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+
+
+/* ─────────────────────────────────────────────────────────────
+   Workspace grid. Real media queries rather than utility soup,
+   so the region order is readable in one place.
+
+   mobile   : chain first — it is the surface you touch most
+   laptop   : main column + sticky risk rail
+   wide     : chain becomes a full-height left rail
+   ───────────────────────────────────────────────────────────── */
+.workspace {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "chain" "risk" "wizard" "payoff" "positions";
+  align-items: start;
+}
+.area-chain     { grid-area: chain; min-width: 0; }
+.area-risk      { grid-area: risk; min-width: 0; }
+.area-wizard    { grid-area: wizard; min-width: 0; }
+.area-payoff    { grid-area: payoff; min-width: 0; }
+.area-positions { grid-area: positions; min-width: 0; }
+
+@media (min-width: 1024px) {
+  .workspace {
+    grid-template-columns: minmax(0, 1fr) 318px;
+    grid-template-areas:
+      "chain      risk"
+      "wizard     risk"
+      "payoff     risk"
+      "positions  risk";
+  }
+  .area-risk { position: sticky; top: 12px; }
+}
+
+@media (min-width: 1360px) {
+  .workspace {
+    grid-template-columns: 352px minmax(0, 1fr) 330px;
+    grid-template-areas:
+      "chain wizard    risk"
+      "chain payoff    risk"
+      "chain positions risk";
+  }
+  .area-chain { position: sticky; top: 12px; }
+}
+
+/* Chain scroll body — taller when it owns a full column. */
+.chain-scroll { max-height: 46vh; overflow-y: auto; }
+@media (min-width: 1360px) { .chain-scroll { max-height: calc(100vh - 300px); } }
+
+/* Compact session navigator */
+.daynav { display: flex; align-items: stretch; gap: 2px; }
+.daynav-step {
+  display: flex; flex-direction: column; justify-content: center; gap: 1px;
+  border: 1px solid var(--c-line); background: var(--c-surface);
+  border-radius: 9px; padding: 6px 10px; cursor: pointer; min-width: 84px;
+  transition: border-color .16s ease-out, background .16s ease-out;
+}
+.daynav-step:hover:not(:disabled) { border-color: var(--c-accent); background: var(--c-accent-soft); }
+.daynav-step:disabled { opacity: .38; cursor: default; }
+.daynav-step .cap { font-size: 9px; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--c-muted); font-weight: 600; display: flex; align-items: center; gap: 3px; }
+.daynav-step .val { font-family: var(--font-num); font-size: 12px; font-variant-numeric: tabular-nums;
+  color: var(--c-text); letter-spacing: -.03em; }
+.daynav-now { flex: 1; text-align: center; padding: 4px 8px; }

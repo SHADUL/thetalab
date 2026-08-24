@@ -72,7 +72,7 @@ function Empty({ children }) {
 export default function AnalysisPanel({
   tab, setTab, stats, payoff, spot, sigma, legs, hasLegs,
   targetSpot, setTargetSpot, ivShift, setIvShift, targetDate, setTargetDate,
-  targetPnl, targetDates, targetIsExpiry, nearExpiry, mixedExpiries,
+  targetPnl, yDomain, targetDates, targetIsExpiry, nearExpiry, mixedExpiries,
   dates, dayIdx, mtm, oiRows, straddleSeries, maxPain,
   wizard, collapsed, setCollapsed, theme,
 }) {
@@ -176,7 +176,8 @@ export default function AnalysisPanel({
                       axisLine={{ stroke: K.grid }} tickLine={false}
                       interval="preserveStartEnd" minTickGap={52} />
                     <YAxis width={52} tick={{ fill: K.muted, fontSize: 10.5 }} axisLine={false}
-                      tickLine={false} tickFormatter={fmtAxis} />
+                      tickLine={false} tickFormatter={fmtAxis}
+                      domain={yDomain} allowDataOverflow={false} />
                     <Tooltip cursor={{ stroke: K.faint, strokeDasharray: "3 3" }}
                       contentStyle={tipStyle} itemStyle={{ padding: "1px 0" }}
                       labelFormatter={(v) => `NIFTY ${fi(v)}`}

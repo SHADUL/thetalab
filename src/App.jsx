@@ -5,7 +5,7 @@ import { impliedVol, greeks as bsGreeks, lotSize, ncdf } from "./lib/options";
 import {
   atmStrike, oiTotals, oiProfile, maxPain as calcMaxPain, synthFuture, straddlePremium,
   atmImpliedVol, strikeRows, tagExpiries, rollingStraddle, mtmSeries, payoffCurve,
-  pnlAt, breakevens,
+  payoffDomain, pnlAt, breakevens,
 } from "./lib/chain";
 import { makeDemo } from "./lib/demo";
 import Landing from "./components/Landing";
@@ -35,7 +35,13 @@ export default function App() {
   const [analysisHid, setAnalysisHid] = useState(false);
   const [ivShift, setIvShift] = useState(0);
   const [targetSpotRaw, setTargetSpot] = useState(null);
-  const [targetDate, setTargetDate] = useState(null);
+  const [targetDate, setTargetDateRaw] = useState(null);
+  /* Whether the target date is the user's own choice or just following the
+     session in view. Without the distinction, a target that once landed on
+     expiry stays there forever -- the expiry is always a valid option, so a
+     "keep it if it is still selectable" rule never lets go, and the two payoff
+     curves silently collapse back onto each other. */
+  const [targetPinned, setTargetPinned] = useState(false);
   const importRef = useRef(null);
 
   const [theme, setTheme] = useState(() => {
@@ -310,9 +316,38 @@ export default function App() {
   const bookExpiries = useMemo(
     () => [...new Set(active.map((l) => l.expiry))].sort(), [active]);
 
+  /* Fixed while you step the tape. Built from the strikes held and the whole
+     spot path of this expiry — none of which depend on the session in view —
+     so the payoff stays put and the spot marker is what moves. Open legs are
+     used rather than active ones, so the frame does not jump on the session a
+     leg happens to come into play. */
+  const payoffDom = useMemo(() => {
+    if (!ex) return null;
+    return payoffDomain({
+      strikes: legs.filter((l) => !l.closedDate).map((l) => l.strike),
+      spots: ex.dates.map((d) => ex.spot[d]),
+    });
+  }, [ex, legs]);
+
   const payoff = useMemo(
-    () => payoffCurve({ legs: payoffLegs, spot, sigma, ivShift }),
-    [payoffLegs, spot, sigma, ivShift]);
+    () => payoffCurve({ legs: payoffLegs, domain: payoffDom, ivShift }),
+    [payoffLegs, payoffDom, ivShift]);
+
+  /* The vertical scale is snapped to a round step so it does not creep as the
+     target curve decays into the expiry curve day by day. */
+  const yDomain = useMemo(() => {
+    if (!payoff.length) return undefined;
+    let lo = Infinity, hi = -Infinity;
+    payoff.forEach((p) => {
+      lo = Math.min(lo, p.exp, p.tgt); hi = Math.max(hi, p.exp, p.tgt);
+    });
+    const pad = Math.max((hi - lo) * 0.1, 1);
+    lo -= pad; hi += pad;
+    const raw = (hi - lo) / 4;
+    const mag = 10 ** Math.floor(Math.log10(Math.max(raw, 1)));
+    const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((v) => v >= raw) || mag * 10;
+    return [Math.floor(lo / step) * step, Math.ceil(hi / step) * step];
+  }, [payoff]);
 
   const stats = useMemo(() => {
     if (!payoff.length) return null;
@@ -364,16 +399,23 @@ export default function App() {
     return [...all].sort();
   }, [bundle, legs, expiry, today]);
 
-  /* Target defaults to the session in view, not to expiry.
-     Defaulting to expiry made the two payoff curves identical -- at expiry
-     both are intrinsic -- so the dashed target line sat exactly on top of the
-     solid one and the chart looked like it had a single curve. Anchored on
-     today it shows what the position is worth right now, with time value still
-     in it, which is the comparison the chart exists to make. */
+  /* Target follows the session in view unless the user has picked one.
+     Anchored on today the dashed curve shows what the position is worth right
+     now, with time value still in it — the comparison the chart exists to
+     make. Anchored on expiry both curves are intrinsic and identical, which is
+     why that cannot be the default. */
   useEffect(() => {
     if (!targetDates.length) return;
-    setTargetDate((t) => (t && targetDates.includes(t) ? t : targetDates[0]));
-  }, [targetDates]);
+    setTargetDateRaw((t) =>
+      (targetPinned && t && targetDates.includes(t) ? t : targetDates[0]));
+  }, [targetDates, targetPinned]);
+
+  const setTargetDate = useCallback((d) => {
+    setTargetPinned(true);
+    setTargetDateRaw(d);
+  }, []);
+  /* A different expiry is a different question; stop holding the old answer. */
+  useEffect(() => { setTargetPinned(false); }, [expiry]);
 
   const mtm = useMemo(
     () => mtmSeries(
@@ -500,7 +542,7 @@ export default function App() {
             tab={tab} setTab={setTab} stats={stats} payoff={payoff} spot={spot} sigma={sigma}
             legs={active} hasLegs={hasLegs} targetSpot={targetSpot} setTargetSpot={setTargetSpot}
             ivShift={ivShift} setIvShift={setIvShift} targetDate={targetDate ?? ""}
-            setTargetDate={setTargetDate} targetPnl={targetPnl}
+            setTargetDate={setTargetDate} targetPnl={targetPnl} yDomain={yDomain}
             targetDates={targetDates} targetIsExpiry={!!targetDate && targetDate >= nearExpiry}
             nearExpiry={nearExpiry} mixedExpiries={bookExpiries.length > 1}
             dates={dates} dayIdx={dayIdx} mtm={mtm} oiRows={oiRows}

@@ -260,11 +260,15 @@ function legValue(l, S, T, ivShift) {
  * `ivShift` scales each leg's own solved IV. Both curves hold that vol constant
  * as spot moves, which is the sticky-strike simplification stated in the UI
  * footnote — a real surface steepens as price falls.
+ *
+ * `domain` comes from payoffDomain() and is fixed across the session tape, so
+ * stepping a day moves the spot marker rather than the whole chart.
  */
-export function payoffCurve({ legs, spot, sigma, ivShift = 0, points = 141 }) {
-  if (!legs?.length || !spot) return [];
-  const span = Math.max(sigma ? sigma * 2.8 : spot * 0.07, spot * 0.05);
-  const lo = spot - span, hi = spot + span, out = [];
+export function payoffCurve({ legs, domain, ivShift = 0, points = 141 }) {
+  if (!legs?.length || !domain) return [];
+  const [lo, hi] = domain;
+  if (!(hi > lo)) return [];
+  const out = [];
   for (let i = 0; i < points; i++) {
     const S = lo + ((hi - lo) * i) / (points - 1);
     let exp = 0, tgt = 0;
@@ -288,6 +292,28 @@ export function pnlAt(legs, S, ivShift = 0) {
     v += (l.side === "SELL" ? -1 : 1) * (legValue(l, S, l.tTgt ?? 0, ivShift) - l.entryPrice) * l.q;
   });
   return v;
+}
+
+/**
+ * The price range the payoff is drawn over.
+ *
+ * Deliberately independent of the session in view. Deriving it from today's
+ * spot and today's sigma made the chart lurch on every step: spot slides the
+ * window sideways, and sigma collapses toward expiry, so the last sessions
+ * zoomed hard onto a curve that had not actually changed. A payoff is a
+ * property of the POSITION, not of the day you look at it from — it should sit
+ * still while the spot marker travels across it.
+ *
+ * The window spans every strike held and every level the index reached over
+ * this expiry's sessions, so the whole structure and the whole path stay in
+ * frame on every session. It moves only when the book or the expiry changes.
+ */
+export function payoffDomain({ strikes = [], spots = [], pad = 0.12 }) {
+  const pts = [...strikes, ...spots].filter((v) => v != null && v > 0);
+  if (!pts.length) return null;
+  const lo = Math.min(...pts), hi = Math.max(...pts);
+  const margin = Math.max((hi - lo) * pad, lo * 0.025);
+  return [Math.round(lo - margin), Math.round(hi + margin)];
 }
 
 /** Breakevens: where the expiry payoff crosses zero, by linear interpolation. */

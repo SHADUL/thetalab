@@ -72,7 +72,7 @@ function Empty({ children }) {
 export default function AnalysisPanel({
   tab, setTab, stats, payoff, spot, sigma, legs, hasLegs,
   targetSpot, setTargetSpot, ivShift, setIvShift, targetDate, setTargetDate,
-  targetPnl, yDomain, targetDates, targetIsExpiry, nearExpiry, mixedExpiries, symbol = "NIFTY",
+  targetPnl, yDomain, xDomain, targetDates, targetIsExpiry, nearExpiry, mixedExpiries, symbol = "NIFTY",
   dates, dayIdx, mtm, oiRows, straddleSeries, maxPain,
   wizard, collapsed, setCollapsed, theme,
 }) {
@@ -170,10 +170,15 @@ export default function AnalysisPanel({
                         fillOpacity={n === 1 ? 0.05 : 0.035} strokeOpacity={0}
                         label={{ value: `±${n}σ`, fill: K.muted, fontSize: 9.5, position: "insideTopRight" }} />
                     ))}
-                    {/* 141 points on a category axis would label nearly every
-                        one; a minimum gap keeps the scale readable. */}
-                    <XAxis dataKey="S" tick={{ fill: K.muted, fontSize: 10.5 }} tickFormatter={fi}
-                      axisLine={{ stroke: K.grid }} tickLine={false}
+                    {/* A NUMBER axis, not a category one. Spot, the breakevens
+                        and each leg's strike are arbitrary values that will not
+                        coincide with any of the 141 sampled prices, and on a
+                        category axis a reference line only draws where its x
+                        matches a category exactly — so all of them silently
+                        vanished. Positioning by value puts them back. */}
+                    <XAxis dataKey="S" type="number" domain={xDomain ?? ["dataMin", "dataMax"]}
+                      allowDataOverflow={false} tick={{ fill: K.muted, fontSize: 10.5 }}
+                      tickFormatter={fi} axisLine={{ stroke: K.grid }} tickLine={false}
                       interval="preserveStartEnd" minTickGap={52} />
                     <YAxis width={52} tick={{ fill: K.muted, fontSize: 10.5 }} axisLine={false}
                       tickLine={false} tickFormatter={fmtAxis}
@@ -258,8 +263,17 @@ export default function AnalysisPanel({
                       <ReferenceLine x={maxPain} stroke={K.warn} strokeDasharray="4 3"
                         label={{ value: `max pain ${fi(maxPain)}`, fill: K.warn, fontSize: 10, position: "top" }} />
                     )}
-                    <ReferenceLine x={Math.round(spot / 50) * 50} stroke={K.ink2} strokeWidth={1.2}
-                      label={{ value: "spot", fill: K.ink2, fontSize: 10, position: "top" }} />
+                    {/* The OI profile is a genuine category axis of strikes, so
+                        this has to land on one that exists — the grid is 50 on
+                        NIFTY and 100 on SENSEX, so it is snapped to the nearest
+                        strike actually plotted rather than assuming either. */}
+                    {oiRows?.length > 0 && (
+                      <ReferenceLine stroke={K.ink2} strokeWidth={1.2}
+                        x={oiRows.reduce((a, r) =>
+                          Math.abs(r.strike - spot) < Math.abs(a - spot) ? r.strike : a,
+                          oiRows[0].strike)}
+                        label={{ value: "spot", fill: K.ink2, fontSize: 10, position: "top" }} />
+                    )}
                   </BarChart>
                 </ResponsiveContainer>
               </div>

@@ -636,7 +636,7 @@ export default function App() {
             tab={tab} setTab={setTab} stats={stats} payoff={payoff} spot={spot} sigma={sigma}
             legs={active} hasLegs={hasLegs} targetSpot={targetSpot} setTargetSpot={setTargetSpot}
             ivShift={ivShift} setIvShift={setIvShift} targetDate={targetDate ?? ""}
-            setTargetDate={setTargetDate} targetPnl={targetPnl} yDomain={yDomain}
+            setTargetDate={setTargetDate} targetPnl={targetPnl} yDomain={yDomain} xDomain={payoffDom}
             targetDates={targetDates} targetIsExpiry={!!targetDate && targetDate >= nearExpiry}
             nearExpiry={nearExpiry} mixedExpiries={bookExpiries.length > 1}
             dates={dates} dayIdx={dayIdx} mtm={mtm} oiRows={oiRows}

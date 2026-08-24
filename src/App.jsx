@@ -348,21 +348,31 @@ export default function App() {
     return m;
   }, [payoffLegs, targetSpot, ivShift, hasLegs]);
 
-  /* Every session still ahead of us across the whole book, so a target date can
-     be set past the near expiry when a longer-dated leg is still running. */
+  /* Every session still ahead of us across the whole book, plus the expiry
+     dates themselves. The expiries matter on their own account: the data stops
+     a few sessions short of a running contract, so without them there would be
+     no way to ask what the position is worth at settlement. */
   const targetDates = useMemo(() => {
     if (!bundle || !today) return [];
     const keys = new Set(legs.map((l) => l.expiry).filter(Boolean));
     if (expiry) keys.add(expiry);
     const all = new Set();
-    keys.forEach((k) => (bundle.expiries[k]?.dates ?? [])
-      .forEach((d) => { if (d >= today) all.add(d); }));
+    keys.forEach((k) => {
+      (bundle.expiries[k]?.dates ?? []).forEach((d) => { if (d >= today) all.add(d); });
+      if (k >= today) all.add(k);
+    });
     return [...all].sort();
   }, [bundle, legs, expiry, today]);
 
+  /* Target defaults to the session in view, not to expiry.
+     Defaulting to expiry made the two payoff curves identical -- at expiry
+     both are intrinsic -- so the dashed target line sat exactly on top of the
+     solid one and the chart looked like it had a single curve. Anchored on
+     today it shows what the position is worth right now, with time value still
+     in it, which is the comparison the chart exists to make. */
   useEffect(() => {
     if (!targetDates.length) return;
-    setTargetDate((t) => (t && targetDates.includes(t) ? t : targetDates[targetDates.length - 1]));
+    setTargetDate((t) => (t && targetDates.includes(t) ? t : targetDates[0]));
   }, [targetDates]);
 
   const mtm = useMemo(

@@ -1,6 +1,34 @@
 @import "tailwindcss";
-@import "@fontsource-variable/geist";
+@import "@fontsource-variable/archivo";
+@import "@fontsource-variable/public-sans";
 @import "@fontsource-variable/geist-mono";
+
+/* ─────────────────────────────────────────────────────────────
+   Typefaces.
+
+   The intended pairing is Söhne for display and GrowwSans for body. Neither
+   ships here: Söhne is a commercial licence from Klim Type Foundry and
+   GrowwSans is Groww's in-house font, so there is no distributable copy of
+   either to bundle. Both are named FIRST in the stacks below, so they take
+   over the moment the files exist — either installed on the viewer's machine,
+   or self-hosted by uncommenting the @font-face block below and dropping the
+   licensed .woff2 files into public/fonts/.
+
+   Until then the substitutes carry the same brief: Archivo is an
+   Akzidenz-Grotesk descendant, the family Söhne itself derives from, and
+   Public Sans is a neo-grotesque of the same temperature as GrowwSans.
+
+@font-face {
+  font-family: "Söhne";
+  src: url("/fonts/soehne-variable.woff2") format("woff2-variations");
+  font-weight: 100 900; font-display: swap;
+}
+@font-face {
+  font-family: "GrowwSans";
+  src: url("/fonts/groww-sans-variable.woff2") format("woff2-variations");
+  font-weight: 100 900; font-display: swap;
+}
+   ───────────────────────────────────────────────────────────── */
 
 /* ─────────────────────────────────────────────────────────────
    Design tokens. Every colour, radius and elevation in the app
@@ -84,7 +112,12 @@
   --color-accent: var(--c-accent);
   --color-accent2: var(--c-accent-2);
   --color-warn: var(--c-warn);
-  --font-display: "Geist Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-sans: "GrowwSans", "Groww Sans", "Public Sans Variable",
+               system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-display: "Söhne", "Soehne", "Archivo Variable",
+                  system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-body: "GrowwSans", "Groww Sans", "Public Sans Variable",
+               system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
   --font-num: "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
@@ -94,7 +127,7 @@ body {
   margin: 0;
   background: var(--c-bg);
   color: var(--c-text);
-  font-family: var(--font-display);
+  font-family: var(--font-body);
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
@@ -110,6 +143,7 @@ body {
 .n-lg { font-weight: 500; letter-spacing: -.045em; }
 
 .lbl {
+  font-family: var(--font-display);
   font-size: 10px;
   letter-spacing: .085em;
   text-transform: uppercase;
@@ -283,7 +317,7 @@ select.ctl { appearance: none; padding-right: 30px;
 }
 .cal-nav:hover:not(:disabled) { background: var(--c-surface-3); color: var(--c-accent); }
 .cal-nav:disabled { opacity: .25; cursor: default; }
-.cal-title { flex: 1; text-align: center; font-size: 12.5px; font-weight: 650;
+.cal-title { font-family: var(--font-display); flex: 1; text-align: center; font-size: 12.5px; font-weight: 650;
   letter-spacing: -.01em; }
 
 .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 1px; }
@@ -362,7 +396,7 @@ select.ctl { appearance: none; padding-right: 30px;
   padding: 7px 10px; border-bottom: 1px solid var(--c-line); background: var(--c-surface-2);
 }
 .panel-head.is-tabs { padding: 0 10px 0 0; align-items: stretch; }
-.panel-title { font-size: 12.5px; font-weight: 650; letter-spacing: -.015em; white-space: nowrap;
+.panel-title { font-family: var(--font-display); font-size: 12.5px; font-weight: 650; letter-spacing: -.015em; white-space: nowrap;
   display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .panel-title-sub { font-size: 11px; color: var(--c-muted); font-weight: 500; }
 /* Reads as the chain's own title until you reach for it. */
@@ -483,6 +517,7 @@ select.ctl { appearance: none; padding-right: 30px;
 }
 .chain-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .chain-table thead th {
+  font-family: var(--font-display);
   position: sticky; top: 0; z-index: 5; background: var(--c-surface);
   padding: 6px 10px; border-bottom: 1px solid var(--c-line-2);
   font-size: 10px; letter-spacing: .07em; text-transform: uppercase;
@@ -555,6 +590,7 @@ tr.is-atm-row .ch-cell { border-top: 1px solid color-mix(in srgb, var(--c-accent
   scrollbar-width: none; min-width: 0; }
 .tabrail::-webkit-scrollbar { display: none; }
 .tab {
+  font-family: var(--font-display);
   flex: none; padding: 9px 12px; border: 0; background: transparent; cursor: pointer;
   font-family: inherit; font-size: 12px; font-weight: 550; color: var(--c-muted);
   border-bottom: 2px solid transparent; white-space: nowrap;
@@ -571,7 +607,7 @@ tr.is-atm-row .ch-cell { border-top: 1px solid color-mix(in srgb, var(--c-accent
 }
 .metric { padding: 6px 10px; border-right: 1px solid var(--c-line); min-width: 0; }
 .metric:last-child { border-right: 0; }
-.metric-k { font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase;
+.metric-k { font-family: var(--font-display); font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase;
   color: var(--c-muted); font-weight: 600; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; }
 /* The figure holds the row's rhythm, so it never wraps; the percentage that
@@ -654,6 +690,7 @@ tr.is-atm-row .ch-cell { border-top: 1px solid color-mix(in srgb, var(--c-accent
 .postable-wrap { overflow-x: auto; }
 .postable { width: 100%; border-collapse: collapse; min-width: 760px; }
 .postable thead th {
+  font-family: var(--font-display);
   padding: 6px 8px; border-bottom: 1px solid var(--c-line-2); text-align: left;
   font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase;
   color: var(--c-muted); font-weight: 600; white-space: nowrap;

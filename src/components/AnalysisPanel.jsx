@@ -184,9 +184,10 @@ export default function AnalysisPanel({
                     <ReferenceLine y={0} stroke={K.faint} />
                     <Area dataKey="pos" stroke="none" fill="url(#pGain)" isAnimationActive={false} />
                     <Area dataKey="neg" stroke="none" fill="url(#pLoss)" isAnimationActive={false} />
-                    <Line dataKey="exp" stroke={K.gain} strokeWidth={2} dot={false} isAnimationActive={false} />
-                    <Line dataKey="tgt" stroke={K.accent} strokeWidth={1.8} strokeDasharray="5 4"
-                      dot={false} isAnimationActive={false} />
+                    <Line dataKey="exp" stroke={K.gain} strokeWidth={2.4} dot={false}
+                      strokeLinecap="round" isAnimationActive={false} />
+                    <Line dataKey="tgt" stroke={K.accent} strokeWidth={2.2} strokeDasharray="7 5"
+                      dot={false} strokeLinecap="round" isAnimationActive={false} />
                     {legs.map((l) => (
                       <ReferenceLine key={l.id} x={l.strike}
                         stroke={l.side === "SELL" ? K.loss : K.gain} strokeOpacity={0.35} strokeWidth={1} />

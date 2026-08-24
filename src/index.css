@@ -516,9 +516,16 @@ tr.is-atm-row .ch-cell { border-top: 1px solid color-mix(in srgb, var(--c-accent
   overflow: hidden; text-overflow: ellipsis; }
 /* The figure holds the row's rhythm, so it never wraps; the percentage that
    qualifies it drops to its own line rather than truncating the number. */
-.metric-v { font-size: 12.5px; font-weight: 550; color: var(--c-text); margin-top: 1px;
+.metric-v { font-size: 12.5px; font-weight: 600; color: var(--c-text); margin-top: 1px;
   white-space: nowrap; }
 .metric-sub { display: block; font-size: 10px; opacity: .75; margin-top: -1px; }
+
+/* Gain/loss colouring lives here rather than on a utility class. These elements
+   set their own `color`, and a same-specificity utility declared earlier in the
+   sheet loses to it — which is why the tone was being applied in the markup but
+   never actually painting. A modifier on the element's own class wins cleanly. */
+.metric-v.is-up, .stat-v.is-up { color: var(--c-gain); font-weight: 700; }
+.metric-v.is-down, .stat-v.is-down { color: var(--c-loss); font-weight: 700; }
 
 .tabbody { position: relative; }
 .chart-wrap { position: relative; height: 300px; padding: 4px 6px 0 0; }
@@ -526,6 +533,15 @@ tr.is-atm-row .ch-cell { border-top: 1px solid color-mix(in srgb, var(--c-accent
 .chart-empty { height: 300px; display: flex; flex-direction: column; align-items: center;
   justify-content: center; text-align: center; padding: 0 28px; }
 .wizard-slot { padding: 0; }
+
+.chart-legend {
+  position: absolute; top: 5px; left: 58px; z-index: 3;
+  display: flex; gap: 14px; flex-wrap: wrap; pointer-events: none;
+}
+.legend-key {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px;
+  color: var(--c-muted); white-space: nowrap; pointer-events: auto; cursor: help;
+}
 
 .target-chip {
   position: absolute; left: 50%; transform: translateX(-50%); bottom: 34px;

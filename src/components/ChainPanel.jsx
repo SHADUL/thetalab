@@ -277,12 +277,12 @@ export default function ChainPanel({
               <span className="n stat-v">{pcr != null ? fm(pcr, 2) : "—"}</span>
             </span>
             <span className="stat gap-1.5">
-              <span className="n stat-v text-loss">{cnt(oi?.callOI)}</span>
+              <span className="n stat-v is-down">{cnt(oi?.callOI)}</span>
               <span className="n stat-sub text-loss">({scnt(oi?.dCall)})</span>
               <span className="oi-swatch is-call" />
               <span className="stat-k">OI</span>
               <span className="oi-swatch is-put" />
-              <span className="n stat-v text-gain">{cnt(oi?.putOI)}</span>
+              <span className="n stat-v is-up">{cnt(oi?.putOI)}</span>
               <span className="n stat-sub text-gain">({scnt(oi?.dPut)})</span>
             </span>
             <span className="stat">

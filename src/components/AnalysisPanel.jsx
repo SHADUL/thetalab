@@ -28,7 +28,7 @@ const TABS = [
 const Metric = ({ label, value, sub, tone }) => (
   <div className="metric">
     <div className="metric-k">{label}</div>
-    <div className={cx("n metric-v", tone === "up" ? "text-gain" : tone === "down" ? "text-loss" : "")}>
+    <div className={cx("n metric-v", tone === "up" && "is-up", tone === "down" && "is-down")}>
       {value}
       {sub && <span className="metric-sub">{sub}</span>}
     </div>
@@ -47,6 +47,18 @@ function Stepper({ value, onChange, step = 1, fmtv, suffix, width = 62 }) {
     </span>
   );
 }
+
+/* The two curves are the whole point of the chart and neither is self-evident,
+   so they are named on it rather than left to be guessed at. */
+const LineKey = ({ color, dashed, label, hint }) => (
+  <span className="legend-key" title={hint}>
+    <svg width="18" height="4" aria-hidden>
+      <line x1="0" y1="2" x2="18" y2="2" stroke={color} strokeWidth="2.5"
+        strokeDasharray={dashed ? "4 3" : undefined} strokeLinecap="round" />
+    </svg>
+    {label}
+  </span>
+);
 
 function Empty({ children }) {
   return (
@@ -132,6 +144,13 @@ export default function AnalysisPanel({
             {tab === "payoff" && (hasLegs ? (
               <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}
                 transition={{ duration: 0.35 }} className="chart-wrap">
+                <div className="chart-legend">
+                  <LineKey color={K.gain} label={`At expiry · ${shortDate(nearExpiry)}`}
+                    hint="What the position settles at, priced at the nearest leg expiry" />
+                  <LineKey color={K.accent} dashed
+                    label={`At target date · ${shortDate(targetDate)}`}
+                    hint="What the position is worth on the target date set below, with time value still in it" />
+                </div>
                 <ResponsiveContainer>
                   <ComposedChart data={payoff} margin={{ top: 26, right: 14, left: 2, bottom: 2 }}>
                     <defs>

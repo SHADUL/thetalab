@@ -9,7 +9,11 @@
 
 import { bs, impliedVol } from "./options";
 
-const round50 = (x) => Math.round(x / 50) * 50;
+/* Strike grids differ by index — NIFTY is 50 points, SENSEX 100 — and the
+   spread widths below have to scale with the grid too, or a SENSEX condor
+   built on NIFTY-sized wings would be a fraction of a percent wide. */
+const roundTo = (x, step) => Math.round(x / step) * step;
+const widths = (step, mults) => mults.map((m) => m * step);
 
 /** Solve IV once per strike/right so candidate generation stays cheap. */
 export function ivSurface(chain, strikes, spot, T) {
@@ -35,7 +39,7 @@ const ok = (...ls) => (ls.every(Boolean) ? ls : null);
  * Directional views get spreads and outrights; range views get the premium
  * sellers and their defined-risk equivalents.
  */
-export function generate({ surf, strikes, spot, view, lower, upper, lots = 1 }) {
+export function generate({ surf, strikes, spot, view, lower, upper, lots = 1, step = 50 }) {
   const near = strikes.filter((k) => Math.abs(k - spot) / spot <= 0.07);
   if (!near.length) return [];
   const atm = near.reduce((a, b) => (Math.abs(b - spot) < Math.abs(a - spot) ? b : a), near[0]);
@@ -65,38 +69,38 @@ export function generate({ surf, strikes, spot, view, lower, upper, lots = 1 }) 
       if (c <= p) return;
       push(`Short Strangle ${p}-${c}`, "Short Strangle",
         ok(leg("SELL", "PE", p, lots, surf), leg("SELL", "CE", c, lots, surf)));
-      [200, 300].forEach((w) => {
+      widths(step, [4, 6]).forEach((w) => {
         push(`Iron Condor ${p}-${c}`, "Iron Condor",
           ok(leg("SELL", "PE", p, lots, surf), leg("BUY", "PE", p - w, lots, surf),
              leg("SELL", "CE", c, lots, surf), leg("BUY", "CE", c + w, lots, surf)));
       });
     }));
 
-    below.slice(0, 3).forEach((k) => [200, 300].forEach((w) =>
+    below.slice(0, 3).forEach((k) => widths(step, [4, 6]).forEach((w) =>
       push(`Iron Fly ${k} ±${w}`, "Iron Fly",
         ok(leg("SELL", "CE", k, lots, surf), leg("SELL", "PE", k, lots, surf),
            leg("BUY", "CE", k + w, lots, surf), leg("BUY", "PE", k - w, lots, surf)))));
 
-    below.slice(0, 4).forEach((k) => [100, 200].forEach((w) =>
+    below.slice(0, 4).forEach((k) => widths(step, [2, 4]).forEach((w) =>
       push(`Call Butterfly ${k}`, "Butterfly",
         ok(leg("BUY", "CE", k - w, lots, surf), leg("SELL", "CE", k, 2 * lots, surf),
            leg("BUY", "CE", k + w, lots, surf)))));
   }
 
   if (bullish || rangeView) {
-    below.slice(0, 6).forEach((p) => [200, 300, 400].forEach((w) =>
+    below.slice(0, 6).forEach((p) => widths(step, [4, 6, 8]).forEach((w) =>
       push(`Bull Put Spread ${p - w}-${p}`, "Bull Put Spread",
         ok(leg("SELL", "PE", p, lots, surf), leg("BUY", "PE", p - w, lots, surf)))));
   }
   if (bearish || rangeView) {
-    above.slice(0, 6).forEach((c) => [200, 300, 400].forEach((w) =>
+    above.slice(0, 6).forEach((c) => widths(step, [4, 6, 8]).forEach((w) =>
       push(`Bear Call Spread ${c}-${c + w}`, "Bear Call Spread",
         ok(leg("SELL", "CE", c, lots, surf), leg("BUY", "CE", c + w, lots, surf)))));
   }
   if (bullish) {
     below.slice(0, 4).forEach((k) => {
       push(`Long Call ${k}`, "Long Call", ok(leg("BUY", "CE", k, lots, surf)));
-      [200, 300, 400].forEach((w) =>
+      widths(step, [4, 6, 8]).forEach((w) =>
         push(`Bull Call Spread ${k}-${k + w}`, "Bull Call Spread",
           ok(leg("BUY", "CE", k, lots, surf), leg("SELL", "CE", k + w, lots, surf))));
     });
@@ -104,7 +108,7 @@ export function generate({ surf, strikes, spot, view, lower, upper, lots = 1 }) 
   if (bearish) {
     above.slice(0, 4).forEach((k) => {
       push(`Long Put ${k}`, "Long Put", ok(leg("BUY", "PE", k, lots, surf)));
-      [200, 300, 400].forEach((w) =>
+      widths(step, [4, 6, 8]).forEach((w) =>
         push(`Bear Put Spread ${k - w}-${k}`, "Bear Put Spread",
           ok(leg("BUY", "PE", k, lots, surf), leg("SELL", "PE", k - w, lots, surf))));
     });
@@ -203,7 +207,7 @@ export function rank(cands, ctx, sortBy = "profit") {
   return scored.sort((a, b) => key(b) - key(a));
 }
 
-export const defaultBounds = (spot, sigma) => {
+export const defaultBounds = (spot, sigma, step = 50) => {
   const s = sigma || spot * 0.012;
-  return { lower: round50(spot - s), upper: round50(spot + s) };
+  return { lower: roundTo(spot - s, step), upper: roundTo(spot + s, step) };
 };

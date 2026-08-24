@@ -17,8 +17,8 @@ const SORTS = [
 ];
 
 export default function StrategyWizard({ chain, strikes, spot, sigma, tYears, dates, dayIdx,
-  expiry, lotQty, defaultLots, onLoad }) {
-  const init = defaultBounds(spot, sigma);
+  expiry, lotQty, defaultLots, step = 50, symbol = "NIFTY", onLoad }) {
+  const init = defaultBounds(spot, sigma, step);
   const [view, setView] = useState("between");
   const [lower, setLower] = useState(init.lower);
   const [upper, setUpper] = useState(init.upper);
@@ -41,12 +41,12 @@ export default function StrategyWizard({ chain, strikes, spot, sigma, tYears, da
   const results = useMemo(() => {
     if (!ran || !spot) return [];
     const surf = ivSurface(chain, strikes, spot, tYears);
-    const cands = generate({ surf, strikes, spot, view,
+    const cands = generate({ surf, strikes, spot, view, step,
       lower: Math.min(lo, hi), upper: Math.max(lo, hi), lots: Number(defaultLots) || 1 });
     const out = rank(cands, { spot, targetT, lotQty, lower: Math.min(lo, hi), upper: Math.max(lo, hi) }, sortBy);
     out.dropped = rank.dropped || [];
     return out;
-  }, [ran, chain, strikes, spot, tYears, view, lo, hi, targetT, lotQty, sortBy, defaultLots]);
+  }, [ran, chain, strikes, spot, tYears, view, lo, hi, targetT, lotQty, sortBy, defaultLots, step]);
 
   const Field = ({ label, children, hint }) => (
     <div className="min-w-0">
@@ -75,7 +75,7 @@ export default function StrategyWizard({ chain, strikes, spot, sigma, tYears, da
       </div>
 
       <div className="grid gap-3 sm:gap-4">
-        <Field label="My view is NIFTY">
+        <Field label={`My view is ${symbol}`}>
           <div className="seg-track max-w-[360px]" role="tablist" aria-label="Market view">
             {VIEWS.map((v) => (
               <button key={v.id} role="tab" aria-selected={view === v.id} data-on={view === v.id}
@@ -138,7 +138,7 @@ export default function StrategyWizard({ chain, strikes, spot, sigma, tYears, da
           <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
             transition={{ duration: 0.4 }} className="mt-5">
             <p className="text-[13px] text-ink2 mb-3">
-              <b>{results.length}</b> structures for NIFTY{" "}
+              <b>{results.length}</b> structures for {symbol}{" "}
               {view === "between" ? <>between <b className="n">{fi(lo)}</b>–<b className="n">{fi(hi)}</b></>
                 : view === "above" ? <>above <b className="n">{fi(lower)}</b></>
                 : <>below <b className="n">{fi(lower)}</b></>}{" "}

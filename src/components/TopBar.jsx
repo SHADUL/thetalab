@@ -11,7 +11,8 @@ import DatePicker from "./DatePicker";
    closing price would be a lie about the resolution of the underlying source. */
 
 export default function TopBar({
-  symbol, dates, dayIdx, setDayIdx, expirySet, autoRun, setAutoRun, theme, toggleTheme,
+  symbol, instruments = [], onPickSymbol, switching,
+  dates, dayIdx, setDayIdx, expirySet, autoRun, setAutoRun, theme, toggleTheme,
 }) {
   const last = dates.length - 1;
   const cur = dates[dayIdx];
@@ -35,7 +36,13 @@ export default function TopBar({
         <span className="text-[13px] font-bold tracking-[-0.02em] shrink-0">
           theta<span className="text-accent">lab</span>
         </span>
-        <span className="inst n">{symbol}</span>
+        {instruments.length > 1 ? (
+          <select className="inst-sel n" value={symbol} aria-label="Instrument"
+            onChange={(e) => onPickSymbol(e.target.value)}>
+            {instruments.map((i) => <option key={i} value={i}>{i}</option>)}
+          </select>
+        ) : <span className="inst n">{symbol}</span>}
+        {switching && <span className="inst-load">loading…</span>}
       </div>
 
       <div className="flex items-center gap-1.5 flex-wrap">

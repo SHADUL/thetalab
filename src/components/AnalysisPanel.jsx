@@ -72,7 +72,7 @@ function Empty({ children }) {
 export default function AnalysisPanel({
   tab, setTab, stats, payoff, spot, sigma, legs, hasLegs,
   targetSpot, setTargetSpot, ivShift, setIvShift, targetDate, setTargetDate,
-  targetPnl, yDomain, targetDates, targetIsExpiry, nearExpiry, mixedExpiries,
+  targetPnl, yDomain, targetDates, targetIsExpiry, nearExpiry, mixedExpiries, symbol = "NIFTY",
   dates, dayIdx, mtm, oiRows, straddleSeries, maxPain,
   wizard, collapsed, setCollapsed, theme,
 }) {
@@ -180,7 +180,7 @@ export default function AnalysisPanel({
                       domain={yDomain} allowDataOverflow={false} />
                     <Tooltip cursor={{ stroke: K.faint, strokeDasharray: "3 3" }}
                       contentStyle={tipStyle} itemStyle={{ padding: "1px 0" }}
-                      labelFormatter={(v) => `NIFTY ${fi(v)}`}
+                      labelFormatter={(v) => `${symbol} ${fi(v)}`}
                       formatter={(v, n) => [sgn(v), n === "exp" ? "At expiry" : "At target date"]} />
                     <ReferenceLine y={0} stroke={K.faint} />
                     <Area dataKey="pos" stroke="none" fill="url(#pGain)" isAnimationActive={false} />
@@ -198,7 +198,7 @@ export default function AnalysisPanel({
                         label={{ value: fi(b), fill: K.warn, fontSize: 10, position: "insideBottomLeft" }} />
                     ))}
                     <ReferenceLine x={Math.round(targetSpot ?? spot)} stroke={K.ink2} strokeWidth={1.2}
-                      label={{ value: `Nifty Spot : ${fm(targetSpot ?? spot, 1)}`,
+                      label={{ value: `${symbol} Spot : ${fm(targetSpot ?? spot, 1)}`,
                         fill: K.ink2, fontSize: 10.5, position: "top" }} />
                   </ComposedChart>
                 </ResponsiveContainer>

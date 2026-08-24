@@ -44,7 +44,11 @@ export const greeks = (S, K, T, v, isCall) => {
   };
 };
 
-/* NIFTY lot size history — add a row when NSE revises it. */
+/* NIFTY lot size history — a fallback only.
+   Bundles now carry the market lot per expiry, taken straight from the
+   exchange's own bhavcopy, which is both authoritative and per-symbol (NIFTY
+   75 then 65, SENSEX 20, BANKEX 30). This table is what older bundles built
+   before that change fall back to, and it only ever described NIFTY. */
 export const LOTS = [
   { from: "1900-01-01", size: 75 },
   { from: "2026-01-01", size: 65 },

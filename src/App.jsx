@@ -19,10 +19,24 @@ import StrategyWizard from "./components/StrategyWizard";
 const STORE = "thetalab-book-v2";
 const STORE_V1 = "nifty-sim-legs-v1";
 
+/* Each index is its own bundle, its own exchange and its own book. NIFTY comes
+   from NSE's bhavcopy, SENSEX from BSE's — different files, different lot sizes
+   and different strike spacing, all of which travel inside the bundle itself. */
+const INSTRUMENTS = [
+  { id: "NIFTY", file: "/chain_bundle.json" },
+  { id: "SENSEX", file: "/sensex_bundle.json" },
+];
+
 export default function App() {
   const [bundle, setBundle] = useState(null);
+  const [instrument, setInstrument] = useState("NIFTY");
+  const [available, setAvailable] = useState(["NIFTY"]);
   const [demo, setDemo] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [switching, setSwitching] = useState(false);
+  /* Bundles are tens of megabytes; keep each one once it has been parsed so
+     flipping between indices is instant rather than a fresh download. */
+  const bundleCache = useRef({});
   const [expiry, setExpiry] = useState(null);
   const [dayIdx, setDayIdx] = useState(0);
   const [legs, setLegs] = useState([]);
@@ -54,13 +68,41 @@ export default function App() {
     localStorage.setItem("thetalab-theme", theme);
   }, [theme]);
 
-  /* If a bundle ships alongside the site, load it without asking. */
+  /* Load whichever index is selected, and find out which others exist.
+     An instrument whose bundle has not been built is simply not offered. */
   useEffect(() => {
-    fetch("/chain_bundle.json")
-      .then((r) => (r.ok ? r.json() : Promise.reject()))
-      .then((b) => load(b))
+    let alive = true;
+    const cached = bundleCache.current[instrument];
+    if (cached) { load(cached); return; }
+    setSwitching(true);
+    const entry = INSTRUMENTS.find((i) => i.id === instrument) ?? INSTRUMENTS[0];
+    fetch(entry.file)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(entry.file))))
+      .then((b) => {
+        if (!alive) return;
+        bundleCache.current[instrument] = b;
+        load(b);
+      })
       .catch(() => {})
-      .finally(() => setLoading(false));
+      .finally(() => { if (alive) { setLoading(false); setSwitching(false); } });
+    return () => { alive = false; };
+  }, [instrument]);
+
+  /* A missing bundle cannot be detected by status code alone: this is a single
+     page app, so both the dev server and Vercel rewrite any unknown path to
+     index.html and answer 200 with HTML. The content type is what actually
+     distinguishes a bundle that exists from the app being served back. */
+  useEffect(() => {
+    let alive = true;
+    Promise.all(INSTRUMENTS.map((i) =>
+      fetch(i.file, { method: "HEAD" })
+        .then((r) => (r.ok && /json/i.test(r.headers.get("content-type") || "") ? i.id : null))
+        .catch(() => null)))
+      .then((ids) => {
+        const found = ids.filter(Boolean);
+        if (alive && found.length) setAvailable(found);
+      });
+    return () => { alive = false; };
   }, []);
 
   /* NSE lists NIFTY options years ahead; those far-dated chains are sparse and
@@ -139,6 +181,13 @@ export default function App() {
     catch { /* private mode — not worth interrupting for */ }
   }, [legs]);
 
+  /* Legs belong to an index. A NIFTY short and a SENSEX short are not a
+     position in anything — different underlying, different lot, different
+     exchange — so the book is filtered to the instrument on screen. They share
+     one stored list, each leg stamped with the symbol it was opened on. */
+  const book = useMemo(
+    () => legs.filter((l) => (l.symbol ?? "NIFTY") === instrument), [legs, instrument]);
+
   /* ── session in view ───────────────────────────────────────────────── */
   const ex = bundle && expiry ? bundle.expiries[expiry] : null;
   const dates = useMemo(() => ex?.dates ?? [], [ex]);
@@ -149,7 +198,12 @@ export default function App() {
   const chain = useMemo(() => (today && ex ? ex.chain[today] ?? {} : {}), [ex, today]);
   const prevChain = useMemo(
     () => (dayIdx > 0 && ex ? ex.chain[dates[dayIdx - 1]] ?? null : null), [ex, dates, dayIdx]);
-  const lotQty = lotSize(today ?? "2026-01-01");
+  /* The exchange states the market lot in the bhavcopy, so the bundle carries
+     it; the date table is only a fallback for older bundles built without it. */
+  const lotFor = useCallback(
+    (expKey, date) => bundle?.expiries?.[expKey]?.lot ?? lotSize(date ?? "2026-01-01"),
+    [bundle]);
+  const lotQty = lotFor(expiry, today);
 
   const tYears = useMemo(() => {
     if (!today || !expiry) return 0;
@@ -210,7 +264,7 @@ export default function App() {
      the context is built once per expiry rather than once per leg. */
   const legCtx = useMemo(() => {
     if (!bundle || !today) return {};
-    const keys = new Set(legs.map((l) => l.expiry).filter(Boolean));
+    const keys = new Set(book.map((l) => l.expiry).filter(Boolean));
     if (expiry) keys.add(expiry);
     const m = {};
     keys.forEach((k) => {
@@ -225,18 +279,18 @@ export default function App() {
       };
     });
     return m;
-  }, [bundle, legs, expiry, today, spot]);
+  }, [bundle, book, expiry, today, spot]);
 
   const live = useMemo(() => {
     if (!today) return [];
-    return legs.map((l) => {
+    return book.map((l) => {
       const lex = l.expiry ?? expiry;
       const c = legCtx[lex];
       const closed = l.closedDate && today >= l.closedDate;
       const quoted = c ? (l.right === "CE" ? c.chain[String(l.strike)]?.c
                                            : c.chain[String(l.strike)]?.p) ?? null : null;
       const cur = closed ? l.closePrice : quoted;
-      const q = l.lots * multiplier * lotSize(l.entryDate);
+      const q = l.lots * multiplier * lotFor(lex, l.entryDate);
       const isCall = l.right === "CE";
       const iv = cur != null && !closed && c && c.T > 0
         ? impliedVol(cur, c.fwd, l.strike, c.T, isCall) : null;
@@ -256,7 +310,7 @@ export default function App() {
         active: l.entryDate <= today && !closed && lex >= today,
       };
     });
-  }, [legs, today, legCtx, multiplier, expiry]);
+  }, [book, today, legCtx, multiplier, expiry, lotFor]);
 
   /* Legs the payoff is actually built from: open, and not switched off. */
   const active = useMemo(() => live.filter((l) => l.active && !l.off), [live]);
@@ -324,10 +378,10 @@ export default function App() {
   const payoffDom = useMemo(() => {
     if (!ex) return null;
     return payoffDomain({
-      strikes: legs.filter((l) => !l.closedDate).map((l) => l.strike),
+      strikes: book.filter((l) => !l.closedDate).map((l) => l.strike),
       spots: ex.dates.map((d) => ex.spot[d]),
     });
-  }, [ex, legs]);
+  }, [ex, book]);
 
   const payoff = useMemo(
     () => payoffCurve({ legs: payoffLegs, domain: payoffDom, ivShift }),
@@ -389,7 +443,7 @@ export default function App() {
      no way to ask what the position is worth at settlement. */
   const targetDates = useMemo(() => {
     if (!bundle || !today) return [];
-    const keys = new Set(legs.map((l) => l.expiry).filter(Boolean));
+    const keys = new Set(book.map((l) => l.expiry).filter(Boolean));
     if (expiry) keys.add(expiry);
     const all = new Set();
     keys.forEach((k) => {
@@ -397,7 +451,7 @@ export default function App() {
       if (k >= today) all.add(k);
     });
     return [...all].sort();
-  }, [bundle, legs, expiry, today]);
+  }, [bundle, book, expiry, today]);
 
   /* Target follows the session in view unless the user has picked one.
      Anchored on today the dashed curve shows what the position is worth right
@@ -419,16 +473,16 @@ export default function App() {
 
   const mtm = useMemo(
     () => mtmSeries(
-      legs.filter((l) => !l.off).map((l) => ({ ...l, expiry: l.expiry ?? expiry })),
-      dates, priceOf, lotSize, (d) => ex?.spot?.[d],
+      book.filter((l) => !l.off).map((l) => ({ ...l, expiry: l.expiry ?? expiry })),
+      dates, priceOf, (d) => lotFor(expiry, d), (d) => ex?.spot?.[d],
     ).map((r) => ({ ...r, pnl: r.pnl == null ? null : r.pnl * multiplier })),
-    [legs, dates, priceOf, ex, multiplier, expiry]);
+    [book, dates, priceOf, ex, multiplier, expiry, lotFor]);
 
   /* ── actions ───────────────────────────────────────────────────────── */
   const addLeg = (strike, right, side) => {
     const p = priceOf(expiry, today, strike, right); if (p == null) return;
     setLegs((L) => [...L, {
-      id: Date.now() + Math.random(), side, right, strike, expiry,
+      id: Date.now() + Math.random(), symbol: instrument, side, right, strike, expiry,
       lots: Number(defaultLots) || 1, entryDate: today, entryPrice: p,
       closedDate: null, closePrice: null, off: false,
     }]);
@@ -442,8 +496,11 @@ export default function App() {
   const exitLeg = (id) => setLegs((L) => L.map((l) =>
     l.id === id && !l.closedDate ? closeAt(l) : l));
   /* Only legs quoted on this session can be closed at a real price. */
+  const mine = (l) => (l.symbol ?? "NIFTY") === instrument;
   const exitAll = () => setLegs((L) => L.map((l) =>
-    l.closedDate || priceOf(l.expiry ?? expiry, today, l.strike, l.right) == null ? l : closeAt(l)));
+    !mine(l) || l.closedDate || priceOf(l.expiry ?? expiry, today, l.strike, l.right) == null
+      ? l : closeAt(l)));
+  const clearBook = () => setLegs((L) => L.filter((l) => !mine(l)));
   const removeLeg = (id) => setLegs((L) => L.filter((l) => l.id !== id));
   const toggleLeg = (id) => setLegs((L) => L.map((l) =>
     l.id === id ? { ...l, off: !l.off } : l));
@@ -452,9 +509,11 @@ export default function App() {
      is open on THAT expiry and leaves the rest of the book alone. */
   const loadStrategy = (strategyLegs) => {
     setLegs((L) => [
-      ...L.filter((l) => (l.expiry ?? expiry) !== expiry || l.closedDate),
+      ...L.filter((l) => (l.symbol ?? "NIFTY") !== instrument
+                      || (l.expiry ?? expiry) !== expiry || l.closedDate),
       ...strategyLegs.map((l, i) => ({
-        id: Date.now() + i, side: l.side, right: l.right, strike: l.strike, expiry,
+        id: Date.now() + i, symbol: instrument, side: l.side, right: l.right,
+        strike: l.strike, expiry,
         lots: l.lots, entryDate: today, entryPrice: l.price,
         closedDate: null, closePrice: null, off: false,
       })),
@@ -472,11 +531,12 @@ export default function App() {
   };
 
   const onSave = () => {
-    const blob = new Blob([JSON.stringify({ expiry, date: today, legs }, null, 2)],
+    const blob = new Blob([JSON.stringify({ symbol: instrument, expiry, date: today,
+      legs: book }, null, 2)],
       { type: "application/json" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `thetalab-${expiry}-${today}.json`;
+    a.download = `thetalab-${instrument}-${expiry}-${today}.json`;
     a.click();
     URL.revokeObjectURL(a.href);
   };
@@ -493,7 +553,10 @@ export default function App() {
     r.onload = () => {
       try {
         const p = JSON.parse(r.result);
-        if (Array.isArray(p?.legs)) setLegs(p.legs);
+        if (Array.isArray(p?.legs)) {
+          const incoming = p.legs.map((l) => ({ ...l, symbol: instrument }));
+          setLegs((L) => [...L.filter((l) => !mine(l)), ...incoming]);
+        }
       } catch (err) { alert("Could not read that strategy: " + err.message); }
     };
     r.readAsText(f);
@@ -509,7 +572,8 @@ export default function App() {
       <input ref={importRef} type="file" accept="application/json"
         onChange={onImportFile} className="hidden" />
 
-      <TopBar symbol={bundle.symbol ?? "NIFTY"} dates={dates} dayIdx={dayIdx}
+      <TopBar symbol={instrument} instruments={available} onPickSymbol={setInstrument}
+        switching={switching} dates={dates} dayIdx={dayIdx}
         setDayIdx={setDayIdx} expirySet={expirySet} autoRun={autoRun} setAutoRun={setAutoRun}
         theme={theme} toggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))} />
 
@@ -548,9 +612,11 @@ export default function App() {
             dates={dates} dayIdx={dayIdx} mtm={mtm} oiRows={oiRows}
             straddleSeries={straddleSeries} maxPain={maxPain}
             collapsed={analysisHid} setCollapsed={setAnalysisHid} theme={theme}
+            symbol={instrument}
             wizard={
               <StrategyWizard chain={chain} strikes={ex.strikes} spot={spot} sigma={sigma}
                 tYears={tYears} dates={dates} dayIdx={dayIdx} expiry={expiry}
+                step={bundle.strike_step ?? 50} symbol={instrument}
                 lotQty={lotQty} defaultLots={defaultLots} onLoad={loadStrategy} />
             } />
         </div>
@@ -559,7 +625,7 @@ export default function App() {
           <PositionsPanel
             legs={live} today={today} lotQty={lotQty} defaultLots={defaultLots}
             setDefaultLots={setDefaultLots} setLots={setLots} exitLeg={exitLeg}
-            removeLeg={removeLeg} toggleLeg={toggleLeg} clear={() => setLegs([])}
+            removeLeg={removeLeg} toggleLeg={toggleLeg} clear={clearBook}
             exitAll={exitAll} multiplier={multiplier} setMultiplier={setMultiplier}
             onSave={onSave} onShare={onShare} targetPnlByLeg={targetPnlByLeg}
             targetDate={targetDate ?? today}
@@ -568,7 +634,8 @@ export default function App() {
       </div>
 
       <p className="disclaimer">
-        End-of-day prices from NSE&rsquo;s official F&amp;O bhavcopy — one session is the smallest
+        End-of-day prices from {bundle.exchange ?? "NSE"}&rsquo;s official F&amp;O bhavcopy — one
+        session is the smallest
         step that exists in this data, which is why there are no intraday controls. Implied
         volatility is solved from each observed premium, and the target curve holds that
         volatility constant as spot moves; real IV shifts with price, so treat the dashed line as

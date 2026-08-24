@@ -44,6 +44,15 @@ export default function App() {
   const [multiplier, setMultiplier] = useState(1);
   const [autoRun, setAutoRun] = useState(false);
   const [basis, setBasis] = useState("spot");
+  /* Which price a session is read and traded at.
+     "settle" is the exchange's settlement price — computed after the close for
+     every contract, internally consistent across strikes, and the right thing
+     to value a chain with. "open" is the session's first trade: the price you
+     could actually have entered at that morning. Settlement is only known once
+     the day is over, so choosing a strike at its settlement price means
+     choosing it already knowing how the day went — near the money that gap runs
+     to tens of percent of the premium. Open is the default for that reason. */
+  const [priceBasis, setPriceBasis] = useState("open");
   const [tab, setTab] = useState("payoff");
   const [chainHid, setChainHid] = useState(false);
   const [analysisHid, setAnalysisHid] = useState(false);
@@ -216,7 +225,16 @@ export default function App() {
 
 
   /* ── chain analytics ───────────────────────────────────────────────── */
-  const synthFut = useMemo(() => synthFuture(chain, ex?.strikes, spot), [chain, ex, spot]);
+  /* The forward is deliberately read off settlement even when the desk is
+     trading the open. Put-call parity needs a call and a put struck at the same
+     instant; opens are two separate trades that can be minutes apart, and the
+     parity between them drifts hundreds of points as a result — enough to push
+     an at-the-money delta to 0.76. Settlement is the one cross-strike
+     consistent series, so it anchors the forward, and every implied vol and
+     delta is solved against that. Displayed and traded premiums still follow
+     the basis; only the reference they are measured against is held steady. */
+  const synthFut = useMemo(
+    () => synthFuture(chain, ex?.strikes, spot), [chain, ex, spot]);
   const reference = basis === "synth" && synthFut != null ? synthFut : spot;
   const atm = useMemo(() => atmStrike(ex?.strikes, reference), [ex, reference]);
 
@@ -225,9 +243,11 @@ export default function App() {
      the payoff curve, which is charted on the index scale. */
   const fwd = synthFut ?? spot;
 
-  const atmIV = useMemo(() => atmImpliedVol(chain, atm, fwd, tYears), [chain, atm, fwd, tYears]);
+  const atmIV = useMemo(
+    () => atmImpliedVol(chain, atm, fwd, tYears, priceBasis), [chain, atm, fwd, tYears, priceBasis]);
   const sigma = atmIV && spot ? spot * atmIV * Math.sqrt(tYears) : null;
-  const straddle = useMemo(() => straddlePremium(chain, atm), [chain, atm]);
+  const straddle = useMemo(
+    () => straddlePremium(chain, atm, priceBasis), [chain, atm, priceBasis]);
   const oi = useMemo(() => oiTotals(chain, prevChain), [chain, prevChain]);
   const maxPain = useMemo(() => calcMaxPain(chain, ex?.strikes ?? []), [chain, ex]);
   /* The expiry tabs are the chains live on this session — not every expiry in
@@ -252,17 +272,23 @@ export default function App() {
   }, [ex, spot, sigma]);
 
   const rows = useMemo(
-    () => strikeRows(chain, windowStrikes, fwd, tYears), [chain, windowStrikes, fwd, tYears]);
+    () => strikeRows(chain, windowStrikes, fwd, tYears, priceBasis),
+    [chain, windowStrikes, fwd, tYears, priceBasis]);
   const oiRows = useMemo(
     () => oiProfile(chain, windowStrikes, prevChain), [chain, windowStrikes, prevChain]);
-  const straddleSeries = useMemo(() => rollingStraddle(ex), [ex]);
+  const straddleSeries = useMemo(
+    () => rollingStraddle(ex, null, priceBasis), [ex, priceBasis]);
 
   /* ── legs, marked to the session in view ───────────────────────────── */
   /* Any leg, any expiry, any session. */
   const priceOf = useCallback((expKey, date, strike, right) => {
     const r = bundle?.expiries?.[expKey]?.chain?.[date]?.[String(strike)];
-    return r ? (right === "CE" ? r.c ?? null : r.p ?? null) : null;
-  }, [bundle]);
+    if (!r) return null;
+    const k = right === "CE"
+      ? (priceBasis === "open" ? "c0" : "c")
+      : (priceBasis === "open" ? "p0" : "p");
+    return r[k] ?? null;
+  }, [bundle, priceBasis]);
 
   /* Each expiry in the book prices off its own forward and its own tenor, so
      the context is built once per expiry rather than once per leg. */
@@ -291,8 +317,7 @@ export default function App() {
       const lex = l.expiry ?? expiry;
       const c = legCtx[lex];
       const closed = l.closedDate && today >= l.closedDate;
-      const quoted = c ? (l.right === "CE" ? c.chain[String(l.strike)]?.c
-                                           : c.chain[String(l.strike)]?.p) ?? null : null;
+      const quoted = priceOf(lex, today, l.strike, l.right);
       const cur = closed ? l.closePrice : quoted;
       const q = l.lots * multiplier * lotFor(lex, l.entryDate);
       const isCall = l.right === "CE";
@@ -314,7 +339,7 @@ export default function App() {
         active: l.entryDate <= today && !closed && lex >= today,
       };
     });
-  }, [book, today, legCtx, multiplier, expiry, lotFor]);
+  }, [book, today, legCtx, multiplier, expiry, lotFor, priceOf]);
 
   /* Legs the payoff is actually built from: open, and not switched off. */
   const active = useMemo(() => live.filter((l) => l.active && !l.off), [live]);
@@ -602,6 +627,7 @@ export default function App() {
             spot={reference} held={held} onAdd={addLeg} lots={Number(defaultLots) || 1}
             atmIV={atmIV} straddle={straddle} pcr={oi?.pcr} oi={oi} maxPain={maxPain}
             basis={basis} setBasis={setBasis} synthFut={synthFut}
+            priceBasis={priceBasis} setPriceBasis={setPriceBasis}
             onPickExpiry={pickExpiry} collapsed={chainHid} setCollapsed={setChainHid} />
         </div>
 
@@ -638,6 +664,11 @@ export default function App() {
       </div>
 
       <p className="disclaimer">
+        <b>
+          {priceBasis === "open"
+            ? "Prices are each session's opening trade — the price you could have entered at that morning. "
+            : "Prices are the exchange's settlement price, which is only known after the close: selecting a strike at it means selecting it already knowing how the day went. "}
+        </b>{" "}
         End-of-day prices from {bundle.exchange ?? "NSE"}&rsquo;s official F&amp;O bhavcopy — one
         session is the smallest
         step that exists in this data, which is why there are no intraday controls. Implied

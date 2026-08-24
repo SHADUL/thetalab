@@ -8,6 +8,16 @@
 
 import { bs, impliedVol, greeks as bsGreeks } from "./options";
 
+/* One strike's price on whichever basis the desk is reading.
+   "open" is the session's first trade, "settle" the exchange's settlement.
+   Everything that quotes a premium goes through here, so the whole panel
+   describes a single moment rather than mixing the morning with the close. */
+const px = (row, side, basis) => {
+  if (!row) return null;
+  const k = basis === "open" ? (side === "c" ? "c0" : "p0") : side;
+  return row[k] ?? null;
+};
+
 /* ── strikes ─────────────────────────────────────────────────────────── */
 
 export const atmStrike = (strikes, ref) =>
@@ -78,7 +88,7 @@ export function maxPain(chain, strikes) {
  * strike alone: illiquid wings carry NSE's theoretical settlement marks, which
  * imply a different forward, so a single strike is a fragile reading.
  */
-export function synthFuture(chain, strikes, ref, span = 5) {
+export function synthFuture(chain, strikes, ref, span = 5, basis = "settle") {
   if (!chain || !strikes?.length || !ref) return null;
   const near = [...strikes]
     .sort((a, b) => Math.abs(a - ref) - Math.abs(b - ref))
@@ -86,7 +96,8 @@ export function synthFuture(chain, strikes, ref, span = 5) {
   const fwds = near
     .map((k) => {
       const r = chain[String(k)];
-      return r && r.c != null && r.p != null ? k + (r.c - r.p) : null;
+      const c = px(r, "c", basis), p = px(r, "p", basis);
+      return c != null && p != null ? k + (c - p) : null;
     })
     .filter((f) => f != null)
     .sort((a, b) => a - b);
@@ -96,19 +107,20 @@ export function synthFuture(chain, strikes, ref, span = 5) {
 }
 
 /** ATM straddle premium — the market's own quote for the expected move. */
-export function straddlePremium(chain, atm) {
+export function straddlePremium(chain, atm, basis = "settle") {
   const r = chain?.[String(atm)];
-  if (!r || r.c == null || r.p == null) return null;
-  return r.c + r.p;
+  const c = px(r, "c", basis), p = px(r, "p", basis);
+  return c != null && p != null ? c + p : null;
 }
 
 /** ATM implied vol, averaged across the call and the put at that strike. */
-export function atmImpliedVol(chain, atm, spot, T) {
+export function atmImpliedVol(chain, atm, spot, T, basis = "settle") {
   const r = chain?.[String(atm)];
   if (!r || !spot || !T) return null;
+  const c = px(r, "c", basis), p = px(r, "p", basis);
   const vs = [];
-  if (r.c != null) { const v = impliedVol(r.c, spot, atm, T, true); if (v) vs.push(v); }
-  if (r.p != null) { const v = impliedVol(r.p, spot, atm, T, false); if (v) vs.push(v); }
+  if (c != null) { const v = impliedVol(c, spot, atm, T, true); if (v) vs.push(v); }
+  if (p != null) { const v = impliedVol(p, spot, atm, T, false); if (v) vs.push(v); }
   return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null;
 }
 
@@ -119,10 +131,20 @@ export function atmImpliedVol(chain, atm, spot, T) {
  * solved from that strike's own traded premium, so the column reflects what
  * the market actually paid rather than a smooth model curve laid over it.
  */
-export function strikeRows(chain, strikes, spot, T) {
+export function strikeRows(chain, strikes, spot, T, basis = "settle") {
+  const open = basis === "open";
   return strikes.map((s) => {
     const r = chain?.[String(s)] || {};
-    const out = { strike: s, c: r.c ?? null, p: r.p ?? null, co: r.co ?? 0, po: r.po ?? 0 };
+    /* At the open there is simply no price for a contract that had not traded
+       yet. Falling back to the settlement would hand back the look-ahead this
+       exists to remove, so it stays absent. */
+    const out = {
+      strike: s,
+      c: (open ? r.c0 : r.c) ?? null,
+      p: (open ? r.p0 : r.p) ?? null,
+      co: r.co ?? 0, po: r.po ?? 0,
+      settleC: r.c ?? null, settleP: r.p ?? null,
+    };
     if (spot && T > 0) {
       if (out.c != null) {
         out.cIV = impliedVol(out.c, spot, s, T, true);
@@ -184,14 +206,14 @@ export function tagExpiries(expiries, today) {
  * ATM straddle premium across every session of the run-up. Its decay is the
  * clearest single picture of what a premium seller was actually paid for.
  */
-export function rollingStraddle(ex, upto) {
+export function rollingStraddle(ex, upto, basis = "settle") {
   if (!ex) return [];
   const out = [];
   ex.dates.forEach((d, i) => {
     if (upto != null && i > upto) return;
     const spot = ex.spot[d];
     const atm = atmStrike(ex.strikes, spot);
-    const prem = straddlePremium(ex.chain[d], atm);
+    const prem = straddlePremium(ex.chain[d], atm, basis);
     if (prem != null) out.push({ date: d, i, spot, atm, premium: prem });
   });
   return out;

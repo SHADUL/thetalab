@@ -118,7 +118,7 @@ function ExpiryTabs({ expiries, expiry, tags, today, onPick }) {
 export default function ChainPanel({
   expiries, allExpiries, expiry, tags, today, rows, atm, spot, held, onAdd, lots,
   atmIV, straddle, pcr, oi, maxPain, basis, setBasis, synthFut, onPickExpiry,
-  collapsed, setCollapsed,
+  priceBasis, setPriceBasis, collapsed, setCollapsed,
 }) {
   const [hover, setHover] = useState(null);
   /* Matches the reference chain out of the box — premium and delta only. The
@@ -260,6 +260,18 @@ export default function ChainPanel({
                   <input type="radio" name="atm-basis" checked={basis === k}
                     onChange={() => setBasis(k)}
                     disabled={k === "synth" && synthFut == null} />
+                  <span className="radio-dot" />{label}
+                </label>
+              ))}
+            </span>
+            <span className="stat gap-2">
+              <span className="stat-k">Price:</span>
+              {[["open", "Open", "The session's first traded price — what you could actually have entered at that morning"],
+                ["settle", "Close", "The exchange's settlement price, computed after the close. Consistent across every strike, but only known once the day is over"]]
+                .map(([k, label, hint]) => (
+                <label key={k} className={cx("radio", priceBasis === k && "is-on")} title={hint}>
+                  <input type="radio" name="price-basis" checked={priceBasis === k}
+                    onChange={() => setPriceBasis(k)} />
                   <span className="radio-dot" />{label}
                 </label>
               ))}

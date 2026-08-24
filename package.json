@@ -12,8 +12,8 @@
     "size": "du -h public/chain_bundle.json 2>/dev/null || echo 'no bundle in public/'"
   },
   "dependencies": {
-    "@fontsource-variable/instrument-sans": "^5.3.0",
-    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@fontsource-variable/geist": "^5.3.0",
+    "@fontsource-variable/geist-mono": "^5.3.0",
     "@phosphor-icons/react": "^2.1.10",
     "@tailwindcss/vite": "^4.3.3",
     "framer-motion": "^13.1.1",

@@ -58,16 +58,19 @@ export default function App() {
   }, []);
 
   /* NSE lists NIFTY options years ahead; those far-dated chains are sparse and
-     any IV solved from them is meaningless. Offer only expiries that actually
-     completed inside the data. */
+     any implied vol solved from them is meaningless.
+     This used to demand that an expiry had COMPLETED inside the data, which
+     threw out the cycle currently running — the one a desk actually trades. It
+     is screened on substance instead: enough sessions to step through and a
+     chain wide enough to build on. The far-dated junk that motivated the
+     original rule is already gone, dropped at build time by max_dte. */
   const usableExpiries = (b) => {
     const keys = Object.keys(b.expiries).sort();
-    const lastData = keys.reduce((mx, k) => {
-      const d = b.expiries[k].dates;
-      return d[d.length - 1] > mx ? d[d.length - 1] : mx;
-    }, "");
-    const complete = keys.filter((k) => k <= lastData && b.expiries[k].dates.length >= 2);
-    return complete.length ? complete : keys;
+    const solid = keys.filter((k) => {
+      const e = b.expiries[k];
+      return e.dates.length >= 2 && e.strikes.length >= 20;
+    });
+    return solid.length ? solid : keys;
   };
 
   /* Which expiries were actually quoted on each session. The bundle is stored
@@ -87,8 +90,16 @@ export default function App() {
     const usable = usableExpiries(b);
     setBundle({ ...b, _usable: usable, _byDate: indexByDate(b, usable) });
     setDemo(isDemo);
-    setExpiry(usable[usable.length - 1]);
-    setDayIdx(0);
+    /* Open where a desk would: the most recent session in the data, on the
+       front expiry running at that point — not the start of the oldest run-up. */
+    const lastData = usable.reduce((mx, k) => {
+      const d = b.expiries[k].dates;
+      return d[d.length - 1] > mx ? d[d.length - 1] : mx;
+    }, "");
+    const front = usable.find((k) => k >= lastData) ?? usable[usable.length - 1];
+    const d = b.expiries[front].dates;
+    setExpiry(front);
+    setDayIdx(Math.max(0, d.indexOf(lastData) >= 0 ? d.indexOf(lastData) : d.length - 1));
   };
   const onFile = (e) => {
     const f = e.target.files?.[0]; if (!f) return;
@@ -166,6 +177,9 @@ export default function App() {
 
   const tags = useMemo(
     () => tagExpiries(bundle?._usable ?? [], today), [bundle, today]);
+
+  /* Which calendar days are themselves an expiry — the picker marks them. */
+  const expirySet = useMemo(() => new Set(bundle?._usable ?? []), [bundle]);
 
   const windowStrikes = useMemo(() => {
     if (!ex || !spot) return [];
@@ -444,7 +458,7 @@ export default function App() {
         onChange={onImportFile} className="hidden" />
 
       <TopBar symbol={bundle.symbol ?? "NIFTY"} dates={dates} dayIdx={dayIdx}
-        setDayIdx={setDayIdx} autoRun={autoRun} setAutoRun={setAutoRun}
+        setDayIdx={setDayIdx} expirySet={expirySet} autoRun={autoRun} setAutoRun={setAutoRun}
         theme={theme} toggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))} />
 
       <MarketStrip ohlc={ohlc} prevClose={prevClose} spot={spot} synthFut={synthFut}

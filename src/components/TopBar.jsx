@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { CaretDoubleLeft, CaretDoubleRight, Play, Pause, Sun, Moon,
          SkipBack, SkipForward } from "@phosphor-icons/react";
 import { cx } from "../lib/format";
+import DatePicker from "./DatePicker";
 
 /* The reference desk this is modelled on steps in minutes as well as days
    (-2h, -15m, 1m+, SOD, EOD). Those are deliberately absent here: this project
@@ -10,12 +11,10 @@ import { cx } from "../lib/format";
    closing price would be a lie about the resolution of the underlying source. */
 
 export default function TopBar({
-  symbol, dates, dayIdx, setDayIdx, autoRun, setAutoRun, theme, toggleTheme,
+  symbol, dates, dayIdx, setDayIdx, expirySet, autoRun, setAutoRun, theme, toggleTheme,
 }) {
   const last = dates.length - 1;
   const cur = dates[dayIdx];
-  const fmtLong = (s) => new Date(s + "T00:00:00").toLocaleDateString("en-IN",
-    { weekday: "short", day: "numeric", month: "short", year: "numeric" });
 
   /* Auto-run walks the session tape and parks itself on expiry. */
   useEffect(() => {
@@ -48,12 +47,8 @@ export default function TopBar({
           <CaretDoubleLeft size={11} weight="bold" />Day
         </Step>
 
-        <select value={cur} onChange={(e) => setDayIdx(dates.indexOf(e.target.value))}
-          className="datesel n" aria-label="Session">
-          {dates.map((d, i) => (
-            <option key={d} value={d}>{fmtLong(d)}{i === last ? " · expiry" : ""}</option>
-          ))}
-        </select>
+        <DatePicker value={cur} dates={dates} expirySet={expirySet}
+          onPick={(d) => setDayIdx(dates.indexOf(d))} />
 
         <Step onClick={() => setDayIdx(Math.min(last, dayIdx + 1))} disabled={dayIdx >= last}
           title="Next session">

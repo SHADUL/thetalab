@@ -58,10 +58,14 @@ export default function App() {
   const [targetPinned, setTargetPinned] = useState(false);
   const importRef = useRef(null);
 
+  /* Light by default, whatever the operating system prefers. A chain is read
+     as a dense grid of small figures and that is what the palette is tuned
+     for; the dark theme is a deliberate choice rather than something a desk
+     gets handed because the OS happens to be in dark mode at the time. A
+     choice made with the toggle still sticks. */
   const [theme, setTheme] = useState(() => {
     if (typeof window === "undefined") return "light";
-    return localStorage.getItem("thetalab-theme")
-      || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    return localStorage.getItem("thetalab-theme") || "light";
   });
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);

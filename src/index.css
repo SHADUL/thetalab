@@ -511,7 +511,7 @@ select.ctl { appearance: none; padding-right: 30px;
   font-size: 10px; letter-spacing: .07em; text-transform: uppercase;
   color: var(--c-muted); font-weight: 600;
 }
-.chain-table thead th:nth-child(2) { width: 116px; }
+.chain-table thead th.text-center { width: 108px; }
 
 .ch-cell {
   position: relative; height: 40px; padding: 0 10px;
@@ -536,12 +536,24 @@ select.ctl { appearance: none; padding-right: 30px;
 .ch-iv { font-size: 10.5px; color: var(--c-muted); min-width: 30px; }
 .ch-act { display: inline-flex; align-items: center; gap: 4px; min-width: 62px; }
 .ch-inner.is-rtl .ch-act { justify-content: flex-end; }
-.ch-oibar {
-  position: absolute; bottom: 0; height: 2px; opacity: .5; z-index: 1;
-  transition: width .25s ease-out;
+/* Open interest column. The bar grows away from the strike — calls leftward,
+   puts rightward — so the two profiles build outward from the centre of the
+   chain rather than both running the same way. */
+.ch-oi {
+  border-bottom: 1px solid var(--c-line);
+  padding: 0 6px; width: 19%; vertical-align: middle;
 }
-.ch-oibar[data-side="CE"] { background: var(--c-loss); }
-.ch-oibar[data-side="PE"] { background: var(--c-gain); }
+.ch-oi-bar {
+  display: block; height: 15px; border-radius: 3px; min-width: 2px;
+  transition: width .28s ease-out;
+}
+.ch-oi.is-call { text-align: right; }
+.ch-oi.is-call .ch-oi-bar { margin-left: auto; background: var(--c-loss); opacity: .34; }
+.ch-oi.is-put  { text-align: left; }
+.ch-oi.is-put  .ch-oi-bar { margin-right: auto; background: var(--c-gain); opacity: .34; }
+.chain-table tbody tr:hover .ch-oi-bar { opacity: .55; }
+.ch-oi-h { white-space: nowrap; }
+.ch-oi-h .oi-swatch { vertical-align: middle; }
 
 .bs-pill {
   width: 22px; height: 21px; border-radius: 6px; font-size: 11px; font-weight: 700;

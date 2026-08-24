@@ -123,7 +123,7 @@ export default function ChainPanel({
   const [hover, setHover] = useState(null);
   /* Matches the reference chain out of the box — premium and delta only. The
      OI and IV columns are a click away in Add ons rather than always on. */
-  const [cols, setCols] = useState({ oi: false, iv: false, delta: true });
+  const [cols, setCols] = useState({ oi: true, iv: false, delta: true });
   const body = useRef(null);
 
   /* Centre the chain on the money whenever the session or expiry changes —
@@ -151,6 +151,18 @@ export default function ChainPanel({
 
   const maxOI = useMemo(
     () => Math.max(1, ...rows.map((r) => Math.max(r.co || 0, r.po || 0))), [rows]);
+
+  /* Open interest as a bar, in its own column, growing outward from the strike
+     it belongs to — calls to the left, puts to the right, so the two build away
+     from the centre and the shape of where the position sits is readable down
+     the column. Length is relative to the largest OI on screen, so the profile
+     rescales with whatever part of the chain is in view. */
+  const OIBar = ({ value, side }) => (
+    <td className={cx("ch-oi", side === "CE" ? "is-call" : "is-put")}
+      title={`${side === "CE" ? "Call" : "Put"} open interest: ${cnt(value)}`}>
+      <span className="ch-oi-bar" style={{ width: `${Math.min((value / maxOI) * 100, 100)}%` }} />
+    </td>
+  );
 
   /* One side of one strike. Slots are fixed-width and always rendered, so
      revealing B/S on hover never nudges a price by a pixel. */
@@ -202,12 +214,6 @@ export default function ChainPanel({
           )}
           {(rtl ? [...cells].reverse() : cells)}
         </span>
-        {cols.oi && (
-          <span className="ch-oibar" style={{
-            width: `${((right === "CE" ? r.co : r.po) / maxOI) * 100}%`,
-            [rtl ? "right" : "left"]: 0,
-          }} data-side={right} />
-        )}
       </td>
     );
   };
@@ -308,7 +314,17 @@ export default function ChainPanel({
               <thead>
                 <tr>
                   <th className="text-right">Call LTP{cols.delta && " (Δ)"}</th>
+                  {cols.oi && (
+                    <th className="text-right ch-oi-h">
+                      Call OI <i className="oi-swatch is-call" />
+                    </th>
+                  )}
                   <th className="text-center">Strike</th>
+                  {cols.oi && (
+                    <th className="text-left ch-oi-h">
+                      <i className="oi-swatch is-put" /> Put OI
+                    </th>
+                  )}
                   <th className="text-left">Put LTP{cols.delta && " (Δ)"}</th>
                 </tr>
               </thead>
@@ -319,6 +335,7 @@ export default function ChainPanel({
                     <tr key={r.strike} data-atm={r.strike === atm}
                       className={cx(r.strike === atm && "is-atm-row")}>
                       <Side r={r} right="CE" />
+                      {cols.oi && <OIBar value={r.co} side="CE" />}
                       <td className={cx("ch-strike", r.strike === atm && "is-atm")}>
                         <span className="n ch-strike-n">{r.strike}</span>
                         {diff != null && (
@@ -327,6 +344,7 @@ export default function ChainPanel({
                           </span>
                         )}
                       </td>
+                      {cols.oi && <OIBar value={r.po} side="PE" />}
                       <Side r={r} right="PE" />
                     </tr>
                   );

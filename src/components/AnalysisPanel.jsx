@@ -70,7 +70,7 @@ function Empty({ children }) {
 }
 
 export default function AnalysisPanel({
-  tab, setTab, stats, payoff, spot, sigma, legs, hasLegs,
+  tab, setTab, stats, payoff, spot, sigma, hasLegs,
   targetSpot, setTargetSpot, ivShift, setIvShift, targetDate, setTargetDate,
   targetPnl, yDomain, xDomain, targetDates, targetIsExpiry, nearExpiry, mixedExpiries, symbol = "NIFTY",
   dates, dayIdx, mtm, oiRows, straddleSeries, maxPain,
@@ -194,10 +194,15 @@ export default function AnalysisPanel({
                       strokeLinecap="round" isAnimationActive={false} />
                     <Line dataKey="tgt" stroke={K.accent} strokeWidth={2.2} strokeDasharray="7 5"
                       dot={false} strokeLinecap="round" isAnimationActive={false} />
-                    {legs.map((l) => (
-                      <ReferenceLine key={l.id} x={l.strike}
-                        stroke={l.side === "SELL" ? K.loss : K.gain} strokeOpacity={0.35} strokeWidth={1} />
-                    ))}
+                    {/* One vertical line per leg used to be drawn here. A
+                        four-leg condor turned that into eight lines on one
+                        chart once the axis fix below made them actually
+                        render — spot, two breakevens, four strikes, cluttering
+                        exactly the reading the chart exists to make easy. Each
+                        strike is already visible in the Positions table and in
+                        the shape of the curve itself, so nothing is lost by
+                        leaving it off the chart; spot and the breakevens are
+                        the levels worth marking directly on the price axis. */}
                     {stats?.bes?.map((b) => (
                       <ReferenceLine key={b} x={b} stroke={K.warn} strokeDasharray="3 3"
                         label={{ value: fi(b), fill: K.warn, fontSize: 10, position: "insideBottomLeft" }} />

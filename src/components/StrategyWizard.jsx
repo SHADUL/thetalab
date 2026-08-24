@@ -57,16 +57,18 @@ export default function StrategyWizard({ chain, strikes, spot, sigma, tYears, da
   const inputCls = "ctl n w-full !text-[15px] font-medium";
 
   return (
-    <section className="panel-e p-4 sm:p-6">
-      <div className="mb-5">
-        <div className="flex items-center gap-2 mb-2.5">
-          <MagicWand size={15} weight="regular" className="text-accent" />
-          <span className="lbl !text-accent">Strategy wizard</span>
+    /* Rendered inside the analysis panel's Strategy tab, so this carries its
+       own padding but not a second card surface. */
+    <div className="p-4">
+      <div className="mb-4">
+        <div className="flex items-center gap-2 mb-1.5">
+          <MagicWand size={14} weight="regular" className="text-accent" />
+          <span className="lbl !text-accent">Strategy finder</span>
         </div>
-        <h2 className="text-[19px] sm:text-[21px] font-semibold tracking-[-0.024em] leading-tight">
+        <h2 className="text-[16px] font-semibold tracking-[-0.02em] leading-tight">
           Tell us your market view.
         </h2>
-        <p className="text-[13.5px] text-ink2 mt-1 max-w-[46ch] leading-relaxed">
+        <p className="text-[12.5px] text-ink2 mt-1 max-w-[52ch] leading-relaxed">
           Every structure is constructed and priced off this session's chain, with each leg's
           volatility solved from its own traded premium.
         </p>
@@ -248,6 +250,6 @@ export default function StrategyWizard({ chain, strikes, spot, sigma, tYears, da
           </motion.div>
         )}
       </AnimatePresence>
-    </section>
+    </div>
   );
 }

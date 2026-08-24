@@ -1,0 +1,279 @@
+/* Chain-level analytics: the numbers a desk reads off the top of an option
+   chain before it looks at any single strike.
+
+   Everything here is derived from the bundle's own observed premiums and open
+   interest. Nothing is assumed, and nothing is fetched — if a figure cannot be
+   computed from the session in view it comes back null so the UI can say so
+   rather than print a confident wrong number. */
+
+import { bs, impliedVol, greeks as bsGreeks } from "./options";
+
+/* ── strikes ─────────────────────────────────────────────────────────── */
+
+export const atmStrike = (strikes, ref) =>
+  !ref || !strikes?.length ? null
+    : strikes.reduce((a, b) => (Math.abs(b - ref) < Math.abs(a - ref) ? b : a), strikes[0]);
+
+/* ── open interest ───────────────────────────────────────────────────── */
+
+/** Total call/put OI for a session, and the put-call ratio built from them. */
+export function oiTotals(chain, prev) {
+  let callOI = 0, putOI = 0, dCall = 0, dPut = 0, any = false;
+  Object.entries(chain || {}).forEach(([k, r]) => {
+    const co = r.co ?? 0, po = r.po ?? 0;
+    if (r.co != null || r.po != null) any = true;
+    callOI += co; putOI += po;
+    const p = prev?.[k];
+    if (p) { dCall += co - (p.co ?? 0); dPut += po - (p.po ?? 0); }
+  });
+  if (!any) return null;
+  return { callOI, putOI, dCall, dPut, pcr: callOI ? putOI / callOI : null };
+}
+
+/** Per-strike OI with the session-on-session change, for the OI profile. */
+export function oiProfile(chain, strikes, prev) {
+  return strikes.map((s) => {
+    const r = chain?.[String(s)] || {}, p = prev?.[String(s)] || {};
+    return {
+      strike: s,
+      callOI: r.co ?? 0, putOI: r.po ?? 0,
+      dCall: (r.co ?? 0) - (p.co ?? 0), dPut: (r.po ?? 0) - (p.po ?? 0),
+    };
+  });
+}
+
+/**
+ * Max pain — the strike at which option writers pay out least in total, and so
+ * the level the largest open position has the most interest in seeing settle.
+ * It is a statement about where money sits, not a forecast.
+ */
+export function maxPain(chain, strikes) {
+  if (!chain || !strikes?.length) return null;
+  let best = null, bestPain = Infinity, sawOI = false;
+  strikes.forEach((settle) => {
+    let pain = 0;
+    strikes.forEach((k) => {
+      const r = chain[String(k)];
+      if (!r) return;
+      if (r.co || r.po) sawOI = true;
+      pain += (r.co ?? 0) * Math.max(settle - k, 0);   // calls the writer owes
+      pain += (r.po ?? 0) * Math.max(k - settle, 0);   // puts the writer owes
+    });
+    if (pain < bestPain) { bestPain = pain; best = settle; }
+  });
+  return sawOI ? best : null;
+}
+
+/**
+ * Synthetic future from put-call parity: F = K + (C − P).
+ *
+ * This is the forward the options themselves are pricing, and it is the correct
+ * reference to solve implied vol against — not the index level. On NIFTY the
+ * two routinely differ by a few tenths of a percent, and pricing a chain off
+ * spot when the options are quoting a forward 150 points lower makes every deep
+ * in-the-money call look like it is trading below intrinsic, which floors its
+ * solved vol and pins its delta at 1.00.
+ *
+ * The median across the strikes nearest the money is used rather than the ATM
+ * strike alone: illiquid wings carry NSE's theoretical settlement marks, which
+ * imply a different forward, so a single strike is a fragile reading.
+ */
+export function synthFuture(chain, strikes, ref, span = 5) {
+  if (!chain || !strikes?.length || !ref) return null;
+  const near = [...strikes]
+    .sort((a, b) => Math.abs(a - ref) - Math.abs(b - ref))
+    .slice(0, span);
+  const fwds = near
+    .map((k) => {
+      const r = chain[String(k)];
+      return r && r.c != null && r.p != null ? k + (r.c - r.p) : null;
+    })
+    .filter((f) => f != null)
+    .sort((a, b) => a - b);
+  if (!fwds.length) return null;
+  const m = Math.floor(fwds.length / 2);
+  return fwds.length % 2 ? fwds[m] : (fwds[m - 1] + fwds[m]) / 2;
+}
+
+/** ATM straddle premium — the market's own quote for the expected move. */
+export function straddlePremium(chain, atm) {
+  const r = chain?.[String(atm)];
+  if (!r || r.c == null || r.p == null) return null;
+  return r.c + r.p;
+}
+
+/** ATM implied vol, averaged across the call and the put at that strike. */
+export function atmImpliedVol(chain, atm, spot, T) {
+  const r = chain?.[String(atm)];
+  if (!r || !spot || !T) return null;
+  const vs = [];
+  if (r.c != null) { const v = impliedVol(r.c, spot, atm, T, true); if (v) vs.push(v); }
+  if (r.p != null) { const v = impliedVol(r.p, spot, atm, T, false); if (v) vs.push(v); }
+  return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null;
+}
+
+/* ── per-strike rows ─────────────────────────────────────────────────── */
+
+/**
+ * One row per strike with each side's premium, solved IV and delta. Delta is
+ * solved from that strike's own traded premium, so the column reflects what
+ * the market actually paid rather than a smooth model curve laid over it.
+ */
+export function strikeRows(chain, strikes, spot, T) {
+  return strikes.map((s) => {
+    const r = chain?.[String(s)] || {};
+    const out = { strike: s, c: r.c ?? null, p: r.p ?? null, co: r.co ?? 0, po: r.po ?? 0 };
+    if (spot && T > 0) {
+      if (out.c != null) {
+        out.cIV = impliedVol(out.c, spot, s, T, true);
+        out.cDelta = out.cIV ? bsGreeks(spot, s, T, out.cIV, true).delta : null;
+      }
+      if (out.p != null) {
+        out.pIV = impliedVol(out.p, spot, s, T, false);
+        out.pDelta = out.pIV ? bsGreeks(spot, s, T, out.pIV, false).delta : null;
+      }
+    }
+    return out;
+  });
+}
+
+/* ── expiry labelling ────────────────────────────────────────────────── */
+
+const DAY = 86400000;
+export const dte = (expiry, today) =>
+  Math.max(Math.round((new Date(expiry) - new Date(today)) / DAY), 0);
+
+/**
+ * Tag expiries the way a chain does: current week, next week, current month,
+ * next month. Monthly is the last expiry falling inside that calendar month,
+ * which is how NSE's monthly contract is defined.
+ */
+export function tagExpiries(expiries, today) {
+  if (!today) return {};
+  const future = expiries.filter((e) => e >= today).sort();
+  const tags = {};
+  if (future[0]) tags[future[0]] = "CW";
+  if (future[1]) tags[future[1]] = "NW";
+
+  const monthOf = (d) => d.slice(0, 7);
+  const thisMonth = monthOf(today);
+  const nextMonth = (() => {
+    const d = new Date(today + "T00:00:00");
+    d.setMonth(d.getMonth() + 1);
+    return d.toISOString().slice(0, 7);
+  })();
+
+  const lastIn = (m) => {
+    const inM = future.filter((e) => monthOf(e) === m);
+    return inM.length ? inM[inM.length - 1] : null;
+  };
+  const cm = lastIn(thisMonth), nm = lastIn(nextMonth);
+  // A weekly tag is the more specific statement, so it wins the label.
+  if (cm && !tags[cm]) tags[cm] = "CM";
+  if (nm && !tags[nm]) tags[nm] = "NM";
+  return tags;
+}
+
+/* ── session series ──────────────────────────────────────────────────── */
+
+/**
+ * ATM straddle premium across every session of the run-up. Its decay is the
+ * clearest single picture of what a premium seller was actually paid for.
+ */
+export function rollingStraddle(ex, upto) {
+  if (!ex) return [];
+  const out = [];
+  ex.dates.forEach((d, i) => {
+    if (upto != null && i > upto) return;
+    const spot = ex.spot[d];
+    const atm = atmStrike(ex.strikes, spot);
+    const prem = straddlePremium(ex.chain[d], atm);
+    if (prem != null) out.push({ date: d, i, spot, atm, premium: prem });
+  });
+  return out;
+}
+
+/**
+ * Mark-to-market of the open legs across every session, so the P&L path is
+ * visible rather than just its endpoint. Legs are only marked from the session
+ * they were entered, and stop moving once closed.
+ */
+export function mtmSeries(legs, ex, lotSizeFor) {
+  if (!ex || !legs?.length) return [];
+  return ex.dates.map((d) => {
+    let pnl = 0, marked = false;
+    legs.forEach((l) => {
+      if (l.entryDate > d) return;
+      const closed = l.closedDate && d >= l.closedDate;
+      const px = closed ? l.closePrice : ex.chain[d]?.[String(l.strike)]?.[l.right === "CE" ? "c" : "p"];
+      if (px == null) return;
+      marked = true;
+      const q = l.lots * lotSizeFor(l.entryDate);
+      pnl += (l.side === "SELL" ? l.entryPrice - px : px - l.entryPrice) * q;
+    });
+    return { date: d, pnl: marked ? Math.round(pnl) : null, spot: ex.spot[d] };
+  });
+}
+
+/* ── payoff ──────────────────────────────────────────────────────────── */
+
+/**
+ * Payoff across a price range, at expiry and at a target date.
+ *
+ * `ivShift` scales each leg's own solved IV (0.1 = ten percent higher vol on
+ * every leg). The target curve holds that shifted vol constant as spot moves,
+ * which is the sticky-strike simplification stated in the UI footnote — a real
+ * surface steepens as price falls.
+ */
+export function payoffCurve({ legs, spot, sigma, targetT, ivShift = 0, basisAdj = 0, points = 141 }) {
+  if (!legs?.length || !spot) return [];
+  const span = Math.max(sigma ? sigma * 2.8 : spot * 0.07, spot * 0.05);
+  const lo = spot - span, hi = spot + span, out = [];
+  for (let i = 0; i < points; i++) {
+    const S = lo + ((hi - lo) * i) / (points - 1);
+    let exp = 0, tgt = 0;
+    legs.forEach((l) => {
+      const isCall = l.right === "CE";
+      // At expiry the basis is zero by definition, so intrinsic is taken
+      // against the index itself. Before expiry the legs are priced off the
+      // forward, carried along at the basis observed today.
+      const intr = Math.max(isCall ? S - l.strike : l.strike - S, 0);
+      const iv = l.iv ? l.iv * (1 + ivShift) : null;
+      const th = targetT > 1e-9 && iv ? bs(S + basisAdj, l.strike, targetT, iv, isCall) : intr;
+      const m = l.side === "SELL" ? -1 : 1;
+      exp += m * (intr - l.entryPrice) * l.q;
+      tgt += m * (th - l.entryPrice) * l.q;
+    });
+    out.push({
+      S: Math.round(S), exp: Math.round(exp), tgt: Math.round(tgt),
+      pos: exp > 0 ? exp : 0, neg: exp < 0 ? exp : 0,
+    });
+  }
+  return out;
+}
+
+/** P&L of the open legs at one specific price and date — the target readout. */
+export function pnlAt(legs, S, targetT, ivShift = 0, basisAdj = 0) {
+  let v = 0;
+  legs.forEach((l) => {
+    const isCall = l.right === "CE";
+    const intr = Math.max(isCall ? S - l.strike : l.strike - S, 0);
+    const iv = l.iv ? l.iv * (1 + ivShift) : null;
+    const px = targetT > 1e-9 && iv ? bs(S + basisAdj, l.strike, targetT, iv, isCall) : intr;
+    v += (l.side === "SELL" ? -1 : 1) * (px - l.entryPrice) * l.q;
+  });
+  return v;
+}
+
+/** Breakevens: where the expiry payoff crosses zero, by linear interpolation. */
+export function breakevens(curve, key = "exp") {
+  const out = [];
+  for (let i = 1; i < curve.length; i++) {
+    const a = curve[i - 1], b = curve[i];
+    if ((a[key] <= 0 && b[key] > 0) || (a[key] >= 0 && b[key] < 0)) {
+      const t = Math.abs(a[key]) / (Math.abs(a[key]) + Math.abs(b[key]) || 1);
+      out.push(Math.round(a.S + (b.S - a.S) * t));
+    }
+  }
+  return out;
+}

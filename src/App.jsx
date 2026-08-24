@@ -1,16 +1,19 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Warning } from "@phosphor-icons/react";
-import { bs, impliedVol, greeks as bsGreeks, lotSize, ncdf } from "./lib/options";
-import { inr, sgn, fm, fi, cx } from "./lib/format";
+import { impliedVol, greeks as bsGreeks, lotSize, ncdf } from "./lib/options";
+import {
+  atmStrike, oiTotals, oiProfile, maxPain as calcMaxPain, synthFuture, straddlePremium,
+  atmImpliedVol, strikeRows, tagExpiries, rollingStraddle, mtmSeries, payoffCurve,
+  pnlAt, breakevens,
+} from "./lib/chain";
 import { makeDemo } from "./lib/demo";
-import { Reveal } from "./components/Motion";
 import Landing from "./components/Landing";
-import MarketHeader from "./components/MarketHeader";
-import RiskSummary from "./components/RiskSummary";
-import PayoffChart from "./components/PayoffChart";
-import Positions from "./components/Positions";
-import OptionChain from "./components/OptionChain";
+import TopBar from "./components/TopBar";
+import MarketStrip from "./components/MarketStrip";
+import ChainPanel from "./components/ChainPanel";
+import AnalysisPanel from "./components/AnalysisPanel";
+import PositionsPanel from "./components/PositionsPanel";
 import StrategyWizard from "./components/StrategyWizard";
 
 const STORE = "nifty-sim-legs-v1";
@@ -23,6 +26,17 @@ export default function App() {
   const [dayIdx, setDayIdx] = useState(0);
   const [legs, setLegs] = useState([]);
   const [defaultLots, setDefaultLots] = useState(1);
+  const [multiplier, setMultiplier] = useState(1);
+  const [autoRun, setAutoRun] = useState(false);
+  const [basis, setBasis] = useState("spot");
+  const [tab, setTab] = useState("payoff");
+  const [chainHid, setChainHid] = useState(false);
+  const [analysisHid, setAnalysisHid] = useState(false);
+  const [ivShift, setIvShift] = useState(0);
+  const [targetSpotRaw, setTargetSpot] = useState(null);
+  const [targetDate, setTargetDate] = useState(null);
+  const importRef = useRef(null);
+
   const [theme, setTheme] = useState(() => {
     if (typeof window === "undefined") return "light";
     return localStorage.getItem("thetalab-theme")
@@ -33,7 +47,7 @@ export default function App() {
     localStorage.setItem("thetalab-theme", theme);
   }, [theme]);
 
-  /* If a bundle is deployed alongside the site, load it without asking. */
+  /* If a bundle ships alongside the site, load it without asking. */
   useEffect(() => {
     fetch("/chain_bundle.json")
       .then((r) => (r.ok ? r.json() : Promise.reject()))
@@ -41,6 +55,49 @@ export default function App() {
       .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
+
+  /* NSE lists NIFTY options years ahead; those far-dated chains are sparse and
+     any IV solved from them is meaningless. Offer only expiries that actually
+     completed inside the data. */
+  const usableExpiries = (b) => {
+    const keys = Object.keys(b.expiries).sort();
+    const lastData = keys.reduce((mx, k) => {
+      const d = b.expiries[k].dates;
+      return d[d.length - 1] > mx ? d[d.length - 1] : mx;
+    }, "");
+    const complete = keys.filter((k) => k <= lastData && b.expiries[k].dates.length >= 2);
+    return complete.length ? complete : keys;
+  };
+
+  /* Which expiries were actually quoted on each session. The bundle is stored
+     per expiry, but the chain reads the other way round: on any given day a desk
+     sees the handful of expiries live at that moment. Indexing once on load
+     keeps the expiry tab row from scanning 400 expiries on every render. */
+  const indexByDate = (b, usable) => {
+    const byDate = {};
+    usable.forEach((e) => {
+      b.expiries[e].dates.forEach((d) => { (byDate[d] ||= []).push(e); });
+    });
+    Object.values(byDate).forEach((list) => list.sort());
+    return byDate;
+  };
+
+  const load = (b, isDemo = false) => {
+    const usable = usableExpiries(b);
+    setBundle({ ...b, _usable: usable, _byDate: indexByDate(b, usable) });
+    setDemo(isDemo);
+    setExpiry(usable[usable.length - 1]);
+    setDayIdx(0);
+  };
+  const onFile = (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      try { load(JSON.parse(r.result)); }
+      catch (err) { alert("Could not read that file: " + err.message); }
+    };
+    r.readAsText(f);
+  };
 
   /* Legs survive a refresh, per expiry. */
   useEffect(() => {
@@ -59,83 +116,120 @@ export default function App() {
     } catch { /* private mode — not worth interrupting for */ }
   }, [legs, expiry]);
 
-  /* NSE lists NIFTY options years ahead. Those far-dated contracts barely trade,
-     so their chains are sparse and their implied vols meaningless — a 2031 expiry
-     produced a 1-sigma of 10,000 points. Default to the most recent expiry that
-     actually completed inside the data, and only offer those. */
-  const usableExpiries = (b) => {
-    const keys = Object.keys(b.expiries).sort();
-    const lastData = keys.reduce((mx, k) => {
-      const d = b.expiries[k].dates;
-      const last = d[d.length - 1];
-      return last > mx ? last : mx;
-    }, "");
-    const complete = keys.filter((k) => k <= lastData && b.expiries[k].dates.length >= 2);
-    return complete.length ? complete : keys;
-  };
-  const load = (b, isDemo = false) => {
-    const usable = usableExpiries(b);
-    setBundle({ ...b, _usable: usable });
-    setDemo(isDemo); setExpiry(usable[usable.length - 1]); setDayIdx(0);
-  };
-  const onFile = (e) => {
-    const f = e.target.files?.[0]; if (!f) return;
-    const r = new FileReader();
-    r.onload = () => { try { load(JSON.parse(r.result)); } catch (err) { alert("Could not read that file: " + err.message); } };
-    r.readAsText(f);
-  };
-
+  /* ── session in view ───────────────────────────────────────────────── */
   const ex = bundle && expiry ? bundle.expiries[expiry] : null;
-  const dates = ex?.dates ?? [];
+  const dates = useMemo(() => ex?.dates ?? [], [ex]);
   const today = dates[dayIdx] ?? null;
-  const spot = today ? ex.spot[today] : null;
-  const chain = today ? ex.chain[today] : {};
-  const sessionsLeft = today ? dates.length - 1 - dayIdx : 0;
+  const spot = today && ex ? ex.spot[today] : null;
+  const ohlc = today && ex?.ohlc ? ex.ohlc[today] : null;
+  const prevClose = dayIdx > 0 && ex ? ex.spot[dates[dayIdx - 1]] : null;
+  const chain = useMemo(() => (today && ex ? ex.chain[today] ?? {} : {}), [ex, today]);
+  const prevChain = useMemo(
+    () => (dayIdx > 0 && ex ? ex.chain[dates[dayIdx - 1]] ?? null : null), [ex, dates, dayIdx]);
+  const lotQty = lotSize(today ?? "2026-01-01");
+
   const tYears = useMemo(() => {
     if (!today || !expiry) return 0;
-    return Math.max((new Date(expiry) - new Date(today)) / 86400000, 0.35) / 365;
+    return Math.max((new Date(expiry) - new Date(today)) / 86400000, 0) / 365;
   }, [today, expiry]);
 
-  const priceAt = (date, strike, right) => {
+  /* Target date defaults to expiry and is clamped into the remaining sessions
+     whenever the session in view moves past it. */
+  useEffect(() => {
+    if (!dates.length) return;
+    setTargetDate((t) => (t && t >= dates[dayIdx] && dates.includes(t) ? t : dates[dates.length - 1]));
+  }, [dates, dayIdx]);
+  const targetT = useMemo(() => {
+    if (!targetDate || !expiry) return 0;
+    return Math.max((new Date(expiry) - new Date(targetDate)) / 86400000, 0) / 365;
+  }, [targetDate, expiry]);
+
+  /* ── chain analytics ───────────────────────────────────────────────── */
+  const synthFut = useMemo(() => synthFuture(chain, ex?.strikes, spot), [chain, ex, spot]);
+  const reference = basis === "synth" && synthFut != null ? synthFut : spot;
+  const atm = useMemo(() => atmStrike(ex?.strikes, reference), [ex, reference]);
+
+  /* Every Black-Scholes solve runs against the forward the options are actually
+     quoting, not the index level. `basisAdj` carries that difference into the
+     payoff curve, which is charted on the index scale. */
+  const fwd = synthFut ?? spot;
+  const basisAdj = fwd != null && spot != null ? fwd - spot : 0;
+
+  const atmIV = useMemo(() => atmImpliedVol(chain, atm, fwd, tYears), [chain, atm, fwd, tYears]);
+  const sigma = atmIV && spot ? spot * atmIV * Math.sqrt(tYears) : null;
+  const straddle = useMemo(() => straddlePremium(chain, atm), [chain, atm]);
+  const oi = useMemo(() => oiTotals(chain, prevChain), [chain, prevChain]);
+  const maxPain = useMemo(() => calcMaxPain(chain, ex?.strikes ?? []), [chain, ex]);
+  /* The expiry tabs are the chains live on this session — not every expiry in
+     eight years of data. The one in view is always included, even on a session
+     where it happens to carry no quotes. */
+  const liveExpiries = useMemo(() => {
+    if (!bundle || !today) return expiry ? [expiry] : [];
+    const on = (bundle._byDate?.[today] ?? []).filter((e) => e >= today);
+    return on.includes(expiry) ? on : [...on, expiry].filter(Boolean).sort();
+  }, [bundle, today, expiry]);
+
+  const tags = useMemo(() => tagExpiries(liveExpiries, today), [liveExpiries, today]);
+
+  const windowStrikes = useMemo(() => {
+    if (!ex || !spot) return [];
+    const span = sigma ? sigma * 3.2 : spot * 0.05;
+    return ex.strikes.filter((s) => Math.abs(s - spot) <= span);
+  }, [ex, spot, sigma]);
+
+  const rows = useMemo(
+    () => strikeRows(chain, windowStrikes, fwd, tYears), [chain, windowStrikes, fwd, tYears]);
+  const oiRows = useMemo(
+    () => oiProfile(chain, windowStrikes, prevChain), [chain, windowStrikes, prevChain]);
+  const straddleSeries = useMemo(() => rollingStraddle(ex), [ex]);
+
+  /* ── legs, marked to the session in view ───────────────────────────── */
+  const priceAt = useCallback((date, strike, right) => {
     const r = ex?.chain?.[date]?.[String(strike)];
     return r ? (right === "CE" ? r.c ?? null : r.p ?? null) : null;
-  };
-  const atm = spot && ex
-    ? ex.strikes.reduce((a, b) => (Math.abs(b - spot) < Math.abs(a - spot) ? b : a), ex.strikes[0]) : null;
+  }, [ex]);
 
   const live = useMemo(() => {
     if (!today || !spot) return [];
     return legs.map((l) => {
       const closed = l.closedDate && today >= l.closedDate;
       const cur = closed ? l.closePrice : priceAt(today, l.strike, l.right);
-      const q = l.lots * lotSize(l.entryDate);
+      const q = l.lots * multiplier * lotSize(l.entryDate);
       const isCall = l.right === "CE";
-      const iv = cur != null && !closed ? impliedVol(cur, spot, l.strike, tYears, isCall) : null;
-      const g = iv ? bsGreeks(spot, l.strike, tYears, iv, isCall) : { delta: 0, gamma: 0, theta: 0, vega: 0 };
-      const pnl = cur == null ? null : (l.side === "SELL" ? l.entryPrice - cur : cur - l.entryPrice) * q;
-      return { ...l, cur, q, dir: l.side === "SELL" ? -1 : 1, isCall, iv, g, pnl, closed,
-        active: l.entryDate <= today && !closed };
+      const iv = cur != null && !closed && tYears > 0
+        ? impliedVol(cur, fwd, l.strike, tYears, isCall) : null;
+      const g = iv ? bsGreeks(fwd, l.strike, tYears, iv, isCall)
+        : { delta: 0, gamma: 0, theta: 0, vega: 0 };
+      const pnl = cur == null ? null
+        : (l.side === "SELL" ? l.entryPrice - cur : cur - l.entryPrice) * q;
+      return {
+        ...l, expiry: l.expiry ?? expiry, cur, q, dir: l.side === "SELL" ? -1 : 1,
+        isCall, iv, g, pnl, closed, active: l.entryDate <= today && !closed,
+      };
     });
-  }, [legs, today, spot, tYears]);
+  }, [legs, today, spot, fwd, tYears, multiplier, priceAt, expiry]);
 
-  const active = live.filter((l) => l.active);
+  /* Legs the payoff is actually built from: open, and not switched off. */
+  const active = useMemo(() => live.filter((l) => l.active && !l.off), [live]);
+  const hasLegs = active.length > 0;
 
   const held = useMemo(() => {
     const m = {};
-    active.forEach((l) => {
+    live.filter((l) => l.active).forEach((l) => {
       const k = `${l.strike}${l.right}`;
-      const e = m[k] || (m[k] = { lots: 0, cost: 0, pnl: 0 });
+      const e = m[k] || (m[k] = { lots: 0, cost: 0 });
       const s = l.side === "SELL" ? -1 : 1;
-      e.lots += s * l.lots; e.cost += s * l.entryPrice * l.lots; e.pnl += l.pnl ?? 0;
+      e.lots += s * l.lots * multiplier;
+      e.cost += s * l.entryPrice * l.lots * multiplier;
     });
     Object.values(m).forEach((e) => { e.avg = e.lots ? Math.abs(e.cost / e.lots) : 0; });
     return m;
-  }, [active]);
+  }, [live, multiplier]);
 
-  const tot = useMemo(() => {
+  const totals = useMemo(() => {
     let pnl = 0, credit = 0, delta = 0, gamma = 0, theta = 0, vega = 0;
     live.forEach((l) => {
-      if (l.entryDate > today) return;
+      if (l.entryDate > today || l.off) return;
       if (l.pnl != null) pnl += l.pnl;
       credit += (l.side === "SELL" ? 1 : -1) * l.entryPrice * l.q;
       if (l.active) {
@@ -146,48 +240,24 @@ export default function App() {
     return { pnl, credit, delta, gamma, theta, vega };
   }, [live, today]);
 
-  const atmIV = useMemo(() => {
-    if (!spot || !atm || !chain[String(atm)]) return null;
-    const { c, p } = chain[String(atm)];
-    const vs = [c != null && impliedVol(c, spot, atm, tYears, true),
-                p != null && impliedVol(p, spot, atm, tYears, false)].filter(Boolean);
-    return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null;
-  }, [spot, atm, chain, tYears]);
-  const sigma = atmIV && spot ? spot * atmIV * Math.sqrt(tYears) : null;
+  /* ── payoff and its summary ────────────────────────────────────────── */
+  /* A null scenario spot means "wherever this session closed" — it only holds a
+     value once the user has actually dragged it somewhere. Switching expiry
+     drops back to tracking. */
+  useEffect(() => { setTargetSpot(null); }, [expiry]);
+  const targetSpot = targetSpotRaw ?? (spot != null ? Math.round(spot) : null);
 
-  const payoff = useMemo(() => {
-    if (!spot || !active.length) return [];
-    const span = Math.max(sigma ? sigma * 2.6 : spot * 0.06, spot * 0.045);
-    const lo = spot - span, hi = spot + span, N = 121, out = [];
-    for (let i = 0; i < N; i++) {
-      const S = lo + (hi - lo) * i / (N - 1);
-      let exp = 0, now = 0;
-      active.forEach((l) => {
-        const intr = Math.max(l.isCall ? S - l.strike : l.strike - S, 0);
-        const th = l.iv ? bs(S, l.strike, tYears, l.iv, l.isCall) : intr;
-        const m = l.side === "SELL" ? -1 : 1;
-        exp += m * (intr - l.entryPrice) * l.q;
-        now += m * (th - l.entryPrice) * l.q;
-      });
-      out.push({ S: Math.round(S), exp: Math.round(exp), now: Math.round(now),
-        pos: exp > 0 ? exp : 0, neg: exp < 0 ? exp : 0 });
-    }
-    return out;
-  }, [active, spot, sigma, tYears]);
+  const payoff = useMemo(
+    () => payoffCurve({ legs: active, spot, sigma, targetT, ivShift, basisAdj }),
+    [active, spot, sigma, targetT, ivShift, basisAdj]);
 
   const stats = useMemo(() => {
     if (!payoff.length) return null;
     const exp = payoff.map((p) => p.exp);
-    const maxP = Math.max(...exp), maxL = Math.min(...exp), bes = [];
-    for (let i = 1; i < payoff.length; i++) {
-      const a = payoff[i - 1], b = payoff[i];
-      if ((a.exp <= 0 && b.exp > 0) || (a.exp >= 0 && b.exp < 0)) {
-        const t = Math.abs(a.exp) / (Math.abs(a.exp) + Math.abs(b.exp) || 1);
-        bes.push(Math.round(a.S + (b.S - a.S) * t));
-      }
-    }
+    const maxP = Math.max(...exp), maxL = Math.min(...exp);
+    const bes = breakevens(payoff);
     let pop = null;
-    if (atmIV && spot) {
+    if (atmIV && spot && tYears > 0) {
       const sd = atmIV * Math.sqrt(tYears);
       const z = (S) => (Math.log(S / spot) + 0.5 * sd * sd) / sd;
       let mass = 0;
@@ -197,94 +267,171 @@ export default function App() {
     }
     const shortN = active.filter((l) => l.side === "SELL").reduce((s, l) => s + l.strike * l.q, 0);
     const longN = active.filter((l) => l.side === "BUY").reduce((s, l) => s + l.strike * l.q, 0);
-    return { maxP, maxL, bes, pop, margin: Math.max(shortN * 0.12 - longN * 0.06, 0),
-      rr: maxL ? Math.abs(maxP / maxL) : null };
-  }, [payoff, atmIV, spot, tYears, active]);
+    return {
+      maxP, maxL, bes, pop, pnl: totals.pnl, credit: totals.credit,
+      margin: Math.max(shortN * 0.12 - longN * 0.06, 0),
+      rr: maxL ? Math.abs(maxP / maxL) : null,
+    };
+  }, [payoff, atmIV, spot, tYears, active, totals]);
 
+  const targetPnl = useMemo(
+    () => (hasLegs && targetSpot != null ? pnlAt(active, targetSpot, targetT, ivShift, basisAdj) : null),
+    [active, targetSpot, targetT, ivShift, hasLegs, basisAdj]);
+
+  const targetPnlByLeg = useMemo(() => {
+    if (!hasLegs || targetSpot == null) return {};
+    const m = {};
+    active.forEach((l) => { m[l.id] = pnlAt([l], targetSpot, targetT, ivShift, basisAdj); });
+    return m;
+  }, [active, targetSpot, targetT, ivShift, hasLegs, basisAdj]);
+
+  const mtm = useMemo(
+    () => mtmSeries(legs.filter((l) => !l.off), ex, lotSize).map((r) => ({
+      ...r, pnl: r.pnl == null ? null : r.pnl * multiplier })),
+    [legs, ex, multiplier]);
+
+  /* ── actions ───────────────────────────────────────────────────────── */
   const addLeg = (strike, right, side) => {
     const p = priceAt(today, strike, right); if (p == null) return;
-    setLegs((L) => [...L, { id: Date.now() + Math.random(), side, right, strike,
-      lots: Number(defaultLots) || 1, entryDate: today, entryPrice: p, closedDate: null, closePrice: null }]);
+    setLegs((L) => [...L, {
+      id: Date.now() + Math.random(), side, right, strike, expiry,
+      lots: Number(defaultLots) || 1, entryDate: today, entryPrice: p,
+      closedDate: null, closePrice: null, off: false,
+    }]);
   };
   const setLots = (id, n) => setLegs((L) => L.map((l) =>
     l.id === id && !l.closedDate ? { ...l, lots: Math.max(1, Math.min(999, n)) } : l));
   const exitLeg = (id) => setLegs((L) => L.map((l) =>
-    l.id === id && !l.closedDate ? { ...l, closedDate: today, closePrice: priceAt(today, l.strike, l.right) } : l));
+    l.id === id && !l.closedDate
+      ? { ...l, closedDate: today, closePrice: priceAt(today, l.strike, l.right) } : l));
+  const exitAll = () => setLegs((L) => L.map((l) =>
+    l.closedDate ? l : { ...l, closedDate: today, closePrice: priceAt(today, l.strike, l.right) }));
   const removeLeg = (id) => setLegs((L) => L.filter((l) => l.id !== id));
+  const toggleLeg = (id) => setLegs((L) => L.map((l) =>
+    l.id === id ? { ...l, off: !l.off } : l));
+
   const loadStrategy = (strategyLegs) => {
     setLegs(strategyLegs.map((l, i) => ({
-      id: Date.now() + i, side: l.side, right: l.right, strike: l.strike, lots: l.lots,
-      entryDate: today, entryPrice: l.price, closedDate: null, closePrice: null,
+      id: Date.now() + i, side: l.side, right: l.right, strike: l.strike, expiry,
+      lots: l.lots, entryDate: today, entryPrice: l.price,
+      closedDate: null, closePrice: null, off: false,
     })));
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    setTab("payoff");
   };
 
-  if (!bundle) return <Landing onFile={onFile} onDemo={() => load(makeDemo(), true)} loading={loading} />;
+  /* Switching expiry keeps the session you were looking at wherever it exists,
+     so the tab row reads as one chain seen at different tenors. */
+  const pickExpiry = (e) => {
+    const nextDates = bundle.expiries[e]?.dates ?? [];
+    const keep = nextDates.indexOf(today);
+    setExpiry(e);
+    setDayIdx(keep >= 0 ? keep : Math.max(0, nextDates.length - 1));
+  };
 
-  const strikes = ex.strikes.filter((s) => spot && Math.abs(s - spot) <= (sigma ? sigma * 3 : 800));
-  const netEntry = active.length ? active.reduce((a, l) => a + (l.side === "SELL" ? 1 : -1) * l.entryPrice, 0) : null;
-  const netNow = active.reduce((a, l) => a + (l.side === "SELL" ? 1 : -1) * (l.cur ?? 0), 0);
+  const onSave = () => {
+    const blob = new Blob([JSON.stringify({ expiry, date: today, legs }, null, 2)],
+      { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `thetalab-${expiry}-${today}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  const onShare = async () => {
+    const text = active.map((l) =>
+      `${l.side} ${l.lots * multiplier}x ${l.strike}${l.right} @ ${l.entryPrice}`).join("\n");
+    try { await navigator.clipboard.writeText(text || "no open legs"); }
+    catch { /* clipboard blocked — nothing worth interrupting for */ }
+  };
+  const onImport = () => importRef.current?.click();
+  const onImportFile = (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      try {
+        const p = JSON.parse(r.result);
+        if (Array.isArray(p?.legs)) setLegs(p.legs);
+      } catch (err) { alert("Could not read that strategy: " + err.message); }
+    };
+    r.readAsText(f);
+    e.target.value = "";
+  };
+
+  if (!bundle) {
+    return <Landing onFile={onFile} onDemo={() => load(makeDemo(), true)} loading={loading} />;
+  }
 
   return (
-    <div className="min-h-screen px-3 py-3 sm:px-5 sm:py-5 max-w-[1600px] mx-auto">
+    <div className="app-shell">
+      <input ref={importRef} type="file" accept="application/json"
+        onChange={onImportFile} className="hidden" />
+
+      <TopBar symbol={bundle.symbol ?? "NIFTY"} dates={dates} dayIdx={dayIdx}
+        setDayIdx={setDayIdx} autoRun={autoRun} setAutoRun={setAutoRun}
+        theme={theme} toggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))} />
+
+      <MarketStrip ohlc={ohlc} prevClose={prevClose} spot={spot} synthFut={synthFut}
+        expiry={expiry} onFind={() => setTab("strategy")} onImport={onImport} />
+
       <AnimatePresence>
         {demo && (
-          <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
-            className="panel mb-3 px-4 py-2.5 flex items-center gap-2.5 !border-loss/30"
-            style={{ background: "var(--c-loss-soft)" }}>
-            <Warning size={15} weight="regular" className="text-loss shrink-0" />
-            <span className="text-[12.5px] text-loss">
-              <b>Sample data.</b> These premiums come from a model, not from NSE.
-            </span>
+          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }} className="demo-note">
+            <Warning size={14} weight="regular" className="shrink-0" />
+            <span><b>Sample data.</b> These premiums come from a model, not from NSE.</span>
           </motion.div>
         )}
       </AnimatePresence>
 
-      <Reveal>
-        <MarketHeader expiries={bundle._usable ?? Object.keys(bundle.expiries).sort()}
-          expiry={expiry} setExpiry={(v) => { setExpiry(v); setDayIdx(0); }}
-          dates={dates} dayIdx={dayIdx} setDayIdx={setDayIdx} spot={spot}
-          prevSpot={dayIdx > 0 ? ex.spot[dates[dayIdx - 1]] : null} sessionsLeft={sessionsLeft}
-          atmIV={atmIV} sigma={sigma} lot={lotSize(today ?? "2026-01-01")}
-          theme={theme} toggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))} />
-      </Reveal>
+      <div className={`deskgrid ${chainHid ? "is-chain-hidden" : ""}`}>
+        <div className="area-chain">
+          <ChainPanel
+            expiries={liveExpiries} expiry={expiry}
+            tags={tags} today={today} rows={rows} atm={atm}
+            spot={reference} held={held} onAdd={addLeg} lots={Number(defaultLots) || 1}
+            atmIV={atmIV} straddle={straddle} pcr={oi?.pcr} oi={oi} maxPain={maxPain}
+            basis={basis} setBasis={setBasis} synthFut={synthFut}
+            onPickExpiry={pickExpiry} collapsed={chainHid} setCollapsed={setChainHid} />
+        </div>
 
-      <div className="workspace mt-3">
-        <Reveal className="area-chain" delay={0.04}>
-          <OptionChain strikes={strikes} chain={chain} atm={atm} held={held} onAdd={addLeg}
-            lots={Number(defaultLots) || 1} netEntry={netEntry} netNow={netNow} />
-        </Reveal>
+        <div className="area-analysis">
+          <AnalysisPanel
+            tab={tab} setTab={setTab} stats={stats} payoff={payoff} spot={spot} sigma={sigma}
+            legs={active} hasLegs={hasLegs} targetSpot={targetSpot} setTargetSpot={setTargetSpot}
+            ivShift={ivShift} setIvShift={setIvShift} targetDate={targetDate ?? ""}
+            setTargetDate={setTargetDate} targetPnl={targetPnl} targetT={targetT}
+            dates={dates} dayIdx={dayIdx} mtm={mtm} oiRows={oiRows}
+            straddleSeries={straddleSeries} maxPain={maxPain}
+            collapsed={analysisHid} setCollapsed={setAnalysisHid} theme={theme}
+            wizard={
+              <StrategyWizard chain={chain} strikes={ex.strikes} spot={spot} sigma={sigma}
+                tYears={tYears} dates={dates} dayIdx={dayIdx} expiry={expiry}
+                lotQty={lotQty} defaultLots={defaultLots} onLoad={loadStrategy} />
+            } />
+        </div>
 
-        <Reveal className="area-risk" delay={0.06}>
-          <RiskSummary pnl={tot.pnl} hasPosition={active.length > 0 || live.some((l) => l.closed)}
-            maxProfit={stats?.maxP} maxLoss={stats?.maxL} netCredit={tot.credit}
-            breakevens={stats?.bes} rr={stats?.rr} pop={stats?.pop} margin={stats?.margin} />
-        </Reveal>
-
-        <Reveal className="area-wizard" delay={0.08}>
-          <StrategyWizard chain={chain} strikes={ex.strikes} spot={spot} sigma={sigma} tYears={tYears}
-            dates={dates} dayIdx={dayIdx} expiry={expiry} lotQty={lotSize(today ?? "2026-01-01")}
-            defaultLots={defaultLots} onLoad={loadStrategy} />
-        </Reveal>
-
-        <Reveal className="area-payoff" delay={0.1}>
-          <PayoffChart data={payoff} spot={spot} sigma={sigma} breakevens={stats?.bes ?? []}
-            legs={active} greeks={tot} hasLegs={active.length > 0} theme={theme} />
-        </Reveal>
-
-        <Reveal className="area-positions" delay={0.12}>
-          <Positions legs={live} today={today} defaultLots={defaultLots} setDefaultLots={setDefaultLots}
-            setLots={setLots} exit={exitLeg} remove={removeLeg} clear={() => setLegs([])} />
-        </Reveal>
+        <div className="area-positions">
+          <PositionsPanel
+            legs={live} today={today} lotQty={lotQty} defaultLots={defaultLots}
+            setDefaultLots={setDefaultLots} setLots={setLots} exitLeg={exitLeg}
+            removeLeg={removeLeg} toggleLeg={toggleLeg} clear={() => setLegs([])}
+            exitAll={exitAll} multiplier={multiplier} setMultiplier={setMultiplier}
+            onSave={onSave} onShare={onShare} targetPnlByLeg={targetPnlByLeg}
+            targetDate={targetDate ?? today}
+            totals={{ ...totals, target: targetPnl }} />
+        </div>
       </div>
 
-      <p className="text-[11px] text-muted leading-[1.8] mt-6 mb-2 max-w-[92ch]">
-        End-of-day prices. Implied volatility is solved from each observed premium, and the “today” curve
-        holds that volatility constant as spot moves — real IV shifts with price, so treat the dashed line
-        as a guide rather than a forecast. Probability of profit is a lognormal estimate from ATM IV, not a
-        historical frequency. Approximate margin is a rough 12% of short notional less 6% of long cover; it
-        is not a SPAN calculation and should not be used for real sizing. P&amp;L excludes brokerage, STT and
-        slippage.
+      <p className="disclaimer">
+        End-of-day prices from NSE&rsquo;s official F&amp;O bhavcopy — one session is the smallest
+        step that exists in this data, which is why there are no intraday controls. Implied
+        volatility is solved from each observed premium, and the target curve holds that
+        volatility constant as spot moves; real IV shifts with price, so treat the dashed line as
+        a guide rather than a forecast. Probability of profit is a lognormal estimate from ATM IV,
+        not a historical frequency. Estimated margin is a rough 12% of short notional less 6% of
+        long cover — it is <b>not</b> a SPAN calculation and should not be used for real sizing.
+        Max pain and PCR describe where open interest sits, not where price is going. P&amp;L
+        excludes brokerage, STT and slippage.
       </p>
     </div>
   );

@@ -1,34 +1,5 @@
 @import "tailwindcss";
-@import "@fontsource-variable/archivo";
-@import "@fontsource-variable/public-sans";
-@import "@fontsource-variable/geist-mono";
-
-/* ─────────────────────────────────────────────────────────────
-   Typefaces.
-
-   The intended pairing is Söhne for display and GrowwSans for body. Neither
-   ships here: Söhne is a commercial licence from Klim Type Foundry and
-   GrowwSans is Groww's in-house font, so there is no distributable copy of
-   either to bundle. Both are named FIRST in the stacks below, so they take
-   over the moment the files exist — either installed on the viewer's machine,
-   or self-hosted by uncommenting the @font-face block below and dropping the
-   licensed .woff2 files into public/fonts/.
-
-   Until then the substitutes carry the same brief: Archivo is an
-   Akzidenz-Grotesk descendant, the family Söhne itself derives from, and
-   Public Sans is a neo-grotesque of the same temperature as GrowwSans.
-
-@font-face {
-  font-family: "Söhne";
-  src: url("/fonts/soehne-variable.woff2") format("woff2-variations");
-  font-weight: 100 900; font-display: swap;
-}
-@font-face {
-  font-family: "GrowwSans";
-  src: url("/fonts/groww-sans-variable.woff2") format("woff2-variations");
-  font-weight: 100 900; font-display: swap;
-}
-   ───────────────────────────────────────────────────────────── */
+@import "@fontsource-variable/inter";
 
 /* ─────────────────────────────────────────────────────────────
    Design tokens. Every colour, radius and elevation in the app
@@ -112,13 +83,13 @@
   --color-accent: var(--c-accent);
   --color-accent2: var(--c-accent-2);
   --color-warn: var(--c-warn);
-  --font-sans: "GrowwSans", "Groww Sans", "Public Sans Variable",
-               system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
-  --font-display: "Söhne", "Soehne", "Archivo Variable",
-                  system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
-  --font-body: "GrowwSans", "Groww Sans", "Public Sans Variable",
-               system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
-  --font-num: "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* Inter throughout, the way Kite uses it — one family for headings, body and
+     figures alike. Its tabular numerals are what keep the chain's columns in
+     line, so numbers do not need a separate monospace face. */
+  --font-sans:    "Inter Variable", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-display: "Inter Variable", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-body:    "Inter Variable", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-num:     "Inter Variable", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -137,8 +108,9 @@ body {
 .n {
   font-family: var(--font-num);
   font-variant-numeric: tabular-nums;
-  letter-spacing: -.03em;
-  font-weight: 450;
+  font-feature-settings: "tnum" 1, "cv05" 1;   /* tabular figures; open-tailed l */
+  letter-spacing: -.01em;
+  font-weight: 500;
 }
 .n-lg { font-weight: 500; letter-spacing: -.045em; }
 

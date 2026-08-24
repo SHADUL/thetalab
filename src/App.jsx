@@ -16,7 +16,8 @@ import AnalysisPanel from "./components/AnalysisPanel";
 import PositionsPanel from "./components/PositionsPanel";
 import StrategyWizard from "./components/StrategyWizard";
 
-const STORE = "nifty-sim-legs-v1";
+const STORE = "thetalab-book-v2";
+const STORE_V1 = "nifty-sim-legs-v1";
 
 export default function App() {
   const [bundle, setBundle] = useState(null);
@@ -99,22 +100,27 @@ export default function App() {
     r.readAsText(f);
   };
 
-  /* Legs survive a refresh, per expiry. */
+  /* One book, not one per expiry.
+     A position is frequently spread across tenors — a weekly sold against the
+     monthly, a calendar, a hedge rolled out a week — so the legs live in a
+     single list and each carries the expiry it belongs to. Switching the chain
+     to another expiry changes what you are looking at, never what you hold.
+     v1 stored a separate list under each expiry key; those are folded into the
+     flat book on first load, stamping each leg with the key it was filed under. */
   useEffect(() => {
-    if (!expiry) return;
     try {
-      const all = JSON.parse(localStorage.getItem(STORE) || "{}");
-      setLegs(all[expiry] || []);
-    } catch { setLegs([]); }
-  }, [expiry]);
+      const flat = localStorage.getItem(STORE);
+      if (flat) { setLegs(JSON.parse(flat)); return; }
+      const old = JSON.parse(localStorage.getItem(STORE_V1) || "{}");
+      const merged = Object.entries(old).flatMap(([k, list]) =>
+        (Array.isArray(list) ? list : []).map((l) => ({ ...l, expiry: l.expiry ?? k })));
+      if (merged.length) setLegs(merged);
+    } catch { /* unreadable store — start empty rather than fail to load */ }
+  }, []);
   useEffect(() => {
-    if (!expiry) return;
-    try {
-      const all = JSON.parse(localStorage.getItem(STORE) || "{}");
-      all[expiry] = legs;
-      localStorage.setItem(STORE, JSON.stringify(all));
-    } catch { /* private mode — not worth interrupting for */ }
-  }, [legs, expiry]);
+    try { localStorage.setItem(STORE, JSON.stringify(legs)); }
+    catch { /* private mode — not worth interrupting for */ }
+  }, [legs]);
 
   /* ── session in view ───────────────────────────────────────────────── */
   const ex = bundle && expiry ? bundle.expiries[expiry] : null;
@@ -133,16 +139,6 @@ export default function App() {
     return Math.max((new Date(expiry) - new Date(today)) / 86400000, 0) / 365;
   }, [today, expiry]);
 
-  /* Target date defaults to expiry and is clamped into the remaining sessions
-     whenever the session in view moves past it. */
-  useEffect(() => {
-    if (!dates.length) return;
-    setTargetDate((t) => (t && t >= dates[dayIdx] && dates.includes(t) ? t : dates[dates.length - 1]));
-  }, [dates, dayIdx]);
-  const targetT = useMemo(() => {
-    if (!targetDate || !expiry) return 0;
-    return Math.max((new Date(expiry) - new Date(targetDate)) / 86400000, 0) / 365;
-  }, [targetDate, expiry]);
 
   /* ── chain analytics ───────────────────────────────────────────────── */
   const synthFut = useMemo(() => synthFuture(chain, ex?.strikes, spot), [chain, ex, spot]);
@@ -150,10 +146,9 @@ export default function App() {
   const atm = useMemo(() => atmStrike(ex?.strikes, reference), [ex, reference]);
 
   /* Every Black-Scholes solve runs against the forward the options are actually
-     quoting, not the index level. `basisAdj` carries that difference into the
-     payoff curve, which is charted on the index scale. */
+     quoting, not the index level. Each leg carries its own expiry's basis into
+     the payoff curve, which is charted on the index scale. */
   const fwd = synthFut ?? spot;
-  const basisAdj = fwd != null && spot != null ? fwd - spot : 0;
 
   const atmIV = useMemo(() => atmImpliedVol(chain, atm, fwd, tYears), [chain, atm, fwd, tYears]);
   const sigma = atmIV && spot ? spot * atmIV * Math.sqrt(tYears) : null;
@@ -169,7 +164,8 @@ export default function App() {
     return on.includes(expiry) ? on : [...on, expiry].filter(Boolean).sort();
   }, [bundle, today, expiry]);
 
-  const tags = useMemo(() => tagExpiries(liveExpiries, today), [liveExpiries, today]);
+  const tags = useMemo(
+    () => tagExpiries(bundle?._usable ?? [], today), [bundle, today]);
 
   const windowStrikes = useMemo(() => {
     if (!ex || !spot) return [];
@@ -184,38 +180,73 @@ export default function App() {
   const straddleSeries = useMemo(() => rollingStraddle(ex), [ex]);
 
   /* ── legs, marked to the session in view ───────────────────────────── */
-  const priceAt = useCallback((date, strike, right) => {
-    const r = ex?.chain?.[date]?.[String(strike)];
+  /* Any leg, any expiry, any session. */
+  const priceOf = useCallback((expKey, date, strike, right) => {
+    const r = bundle?.expiries?.[expKey]?.chain?.[date]?.[String(strike)];
     return r ? (right === "CE" ? r.c ?? null : r.p ?? null) : null;
-  }, [ex]);
+  }, [bundle]);
+
+  /* Each expiry in the book prices off its own forward and its own tenor, so
+     the context is built once per expiry rather than once per leg. */
+  const legCtx = useMemo(() => {
+    if (!bundle || !today) return {};
+    const keys = new Set(legs.map((l) => l.expiry).filter(Boolean));
+    if (expiry) keys.add(expiry);
+    const m = {};
+    keys.forEach((k) => {
+      const e = bundle.expiries[k];
+      const ch = e?.chain?.[today];
+      if (!ch) return;
+      const sp = e.spot[today] ?? spot;
+      const f = synthFuture(ch, e.strikes, sp) ?? sp;
+      m[k] = {
+        chain: ch, spot: sp, fwd: f, basis: f - sp,
+        T: Math.max((new Date(k) - new Date(today)) / 86400000, 0) / 365,
+      };
+    });
+    return m;
+  }, [bundle, legs, expiry, today, spot]);
 
   const live = useMemo(() => {
-    if (!today || !spot) return [];
+    if (!today) return [];
     return legs.map((l) => {
+      const lex = l.expiry ?? expiry;
+      const c = legCtx[lex];
       const closed = l.closedDate && today >= l.closedDate;
-      const cur = closed ? l.closePrice : priceAt(today, l.strike, l.right);
+      const quoted = c ? (l.right === "CE" ? c.chain[String(l.strike)]?.c
+                                           : c.chain[String(l.strike)]?.p) ?? null : null;
+      const cur = closed ? l.closePrice : quoted;
       const q = l.lots * multiplier * lotSize(l.entryDate);
       const isCall = l.right === "CE";
-      const iv = cur != null && !closed && tYears > 0
-        ? impliedVol(cur, fwd, l.strike, tYears, isCall) : null;
-      const g = iv ? bsGreeks(fwd, l.strike, tYears, iv, isCall)
+      const iv = cur != null && !closed && c && c.T > 0
+        ? impliedVol(cur, c.fwd, l.strike, c.T, isCall) : null;
+      const g = iv ? bsGreeks(c.fwd, l.strike, c.T, iv, isCall)
         : { delta: 0, gamma: 0, theta: 0, vega: 0 };
       const pnl = cur == null ? null
         : (l.side === "SELL" ? l.entryPrice - cur : cur - l.entryPrice) * q;
       return {
-        ...l, expiry: l.expiry ?? expiry, cur, q, dir: l.side === "SELL" ? -1 : 1,
-        isCall, iv, g, pnl, closed, active: l.entryDate <= today && !closed,
+        ...l, expiry: lex, cur, q, dir: l.side === "SELL" ? -1 : 1,
+        isCall, iv, g, pnl, closed, basis: c?.basis ?? 0,
+        /* This expiry carries no chain for this session — the bundle only keeps
+           the run-up to each expiry. Say so rather than showing a stale mark.
+           A leg opened later than the session in view is simply not held yet,
+           which is a different thing and not worth flagging. */
+        noQuote: !closed && quoted == null && l.entryDate <= today && lex >= today,
+        expired: lex < today,
+        active: l.entryDate <= today && !closed && lex >= today,
       };
     });
-  }, [legs, today, spot, fwd, tYears, multiplier, priceAt, expiry]);
+  }, [legs, today, legCtx, multiplier, expiry]);
 
   /* Legs the payoff is actually built from: open, and not switched off. */
   const active = useMemo(() => live.filter((l) => l.active && !l.off), [live]);
   const hasLegs = active.length > 0;
 
+  /* Chain badges belong to the expiry on screen — a leg on another tenor is
+     still in the book, but it is not a position in THIS chain. */
   const held = useMemo(() => {
     const m = {};
-    live.filter((l) => l.active).forEach((l) => {
+    live.filter((l) => l.active && l.expiry === expiry).forEach((l) => {
       const k = `${l.strike}${l.right}`;
       const e = m[k] || (m[k] = { lots: 0, cost: 0 });
       const s = l.side === "SELL" ? -1 : 1;
@@ -224,7 +255,7 @@ export default function App() {
     });
     Object.values(m).forEach((e) => { e.avg = e.lots ? Math.abs(e.cost / e.lots) : 0; });
     return m;
-  }, [live, multiplier]);
+  }, [live, multiplier, expiry]);
 
   const totals = useMemo(() => {
     let pnl = 0, credit = 0, delta = 0, gamma = 0, theta = 0, vega = 0;
@@ -247,9 +278,27 @@ export default function App() {
   useEffect(() => { setTargetSpot(null); }, [expiry]);
   const targetSpot = targetSpotRaw ?? (spot != null ? Math.round(spot) : null);
 
+  /* The payoff's expiry reference is the NEAREST leg expiry — where a calendar's
+     shape is actually decided. Legs expiring then settle at intrinsic; anything
+     longer-dated still carries time value and is priced for it. */
+  const nearExpiry = useMemo(
+    () => (active.length ? active.map((l) => l.expiry).sort()[0] : expiry), [active, expiry]);
+  const yearsBetween = (from, to) =>
+    Math.max((new Date(to) - new Date(from)) / 86400000, 0) / 365;
+
+  const payoffLegs = useMemo(() => active.map((l) => ({
+    side: l.side, right: l.right, strike: l.strike, entryPrice: l.entryPrice,
+    q: l.q, iv: l.iv, basis: l.basis, id: l.id,
+    tExp: yearsBetween(nearExpiry, l.expiry),
+    tTgt: yearsBetween(targetDate ?? nearExpiry, l.expiry),
+  })), [active, nearExpiry, targetDate]);
+
+  const bookExpiries = useMemo(
+    () => [...new Set(active.map((l) => l.expiry))].sort(), [active]);
+
   const payoff = useMemo(
-    () => payoffCurve({ legs: active, spot, sigma, targetT, ivShift, basisAdj }),
-    [active, spot, sigma, targetT, ivShift, basisAdj]);
+    () => payoffCurve({ legs: payoffLegs, spot, sigma, ivShift }),
+    [payoffLegs, spot, sigma, ivShift]);
 
   const stats = useMemo(() => {
     if (!payoff.length) return null;
@@ -275,24 +324,43 @@ export default function App() {
   }, [payoff, atmIV, spot, tYears, active, totals]);
 
   const targetPnl = useMemo(
-    () => (hasLegs && targetSpot != null ? pnlAt(active, targetSpot, targetT, ivShift, basisAdj) : null),
-    [active, targetSpot, targetT, ivShift, hasLegs, basisAdj]);
+    () => (hasLegs && targetSpot != null ? pnlAt(payoffLegs, targetSpot, ivShift) : null),
+    [payoffLegs, targetSpot, ivShift, hasLegs]);
 
   const targetPnlByLeg = useMemo(() => {
     if (!hasLegs || targetSpot == null) return {};
     const m = {};
-    active.forEach((l) => { m[l.id] = pnlAt([l], targetSpot, targetT, ivShift, basisAdj); });
+    payoffLegs.forEach((l) => { m[l.id] = pnlAt([l], targetSpot, ivShift); });
     return m;
-  }, [active, targetSpot, targetT, ivShift, hasLegs, basisAdj]);
+  }, [payoffLegs, targetSpot, ivShift, hasLegs]);
+
+  /* Every session still ahead of us across the whole book, so a target date can
+     be set past the near expiry when a longer-dated leg is still running. */
+  const targetDates = useMemo(() => {
+    if (!bundle || !today) return [];
+    const keys = new Set(legs.map((l) => l.expiry).filter(Boolean));
+    if (expiry) keys.add(expiry);
+    const all = new Set();
+    keys.forEach((k) => (bundle.expiries[k]?.dates ?? [])
+      .forEach((d) => { if (d >= today) all.add(d); }));
+    return [...all].sort();
+  }, [bundle, legs, expiry, today]);
+
+  useEffect(() => {
+    if (!targetDates.length) return;
+    setTargetDate((t) => (t && targetDates.includes(t) ? t : targetDates[targetDates.length - 1]));
+  }, [targetDates]);
 
   const mtm = useMemo(
-    () => mtmSeries(legs.filter((l) => !l.off), ex, lotSize).map((r) => ({
-      ...r, pnl: r.pnl == null ? null : r.pnl * multiplier })),
-    [legs, ex, multiplier]);
+    () => mtmSeries(
+      legs.filter((l) => !l.off).map((l) => ({ ...l, expiry: l.expiry ?? expiry })),
+      dates, priceOf, lotSize, (d) => ex?.spot?.[d],
+    ).map((r) => ({ ...r, pnl: r.pnl == null ? null : r.pnl * multiplier })),
+    [legs, dates, priceOf, ex, multiplier, expiry]);
 
   /* ── actions ───────────────────────────────────────────────────────── */
   const addLeg = (strike, right, side) => {
-    const p = priceAt(today, strike, right); if (p == null) return;
+    const p = priceOf(expiry, today, strike, right); if (p == null) return;
     setLegs((L) => [...L, {
       id: Date.now() + Math.random(), side, right, strike, expiry,
       lots: Number(defaultLots) || 1, entryDate: today, entryPrice: p,
@@ -301,21 +369,30 @@ export default function App() {
   };
   const setLots = (id, n) => setLegs((L) => L.map((l) =>
     l.id === id && !l.closedDate ? { ...l, lots: Math.max(1, Math.min(999, n)) } : l));
+  const closeAt = (l) => ({
+    ...l, closedDate: today,
+    closePrice: priceOf(l.expiry ?? expiry, today, l.strike, l.right),
+  });
   const exitLeg = (id) => setLegs((L) => L.map((l) =>
-    l.id === id && !l.closedDate
-      ? { ...l, closedDate: today, closePrice: priceAt(today, l.strike, l.right) } : l));
+    l.id === id && !l.closedDate ? closeAt(l) : l));
+  /* Only legs quoted on this session can be closed at a real price. */
   const exitAll = () => setLegs((L) => L.map((l) =>
-    l.closedDate ? l : { ...l, closedDate: today, closePrice: priceAt(today, l.strike, l.right) }));
+    l.closedDate || priceOf(l.expiry ?? expiry, today, l.strike, l.right) == null ? l : closeAt(l)));
   const removeLeg = (id) => setLegs((L) => L.filter((l) => l.id !== id));
   const toggleLeg = (id) => setLegs((L) => L.map((l) =>
     l.id === id ? { ...l, off: !l.off } : l));
 
+  /* The wizard builds a structure for the expiry on screen; it replaces what
+     is open on THAT expiry and leaves the rest of the book alone. */
   const loadStrategy = (strategyLegs) => {
-    setLegs(strategyLegs.map((l, i) => ({
-      id: Date.now() + i, side: l.side, right: l.right, strike: l.strike, expiry,
-      lots: l.lots, entryDate: today, entryPrice: l.price,
-      closedDate: null, closePrice: null, off: false,
-    })));
+    setLegs((L) => [
+      ...L.filter((l) => (l.expiry ?? expiry) !== expiry || l.closedDate),
+      ...strategyLegs.map((l, i) => ({
+        id: Date.now() + i, side: l.side, right: l.right, strike: l.strike, expiry,
+        lots: l.lots, entryDate: today, entryPrice: l.price,
+        closedDate: null, closePrice: null, off: false,
+      })),
+    ]);
     setTab("payoff");
   };
 
@@ -386,7 +463,7 @@ export default function App() {
       <div className={`deskgrid ${chainHid ? "is-chain-hidden" : ""}`}>
         <div className="area-chain">
           <ChainPanel
-            expiries={liveExpiries} expiry={expiry}
+            expiries={liveExpiries} allExpiries={bundle._usable} expiry={expiry}
             tags={tags} today={today} rows={rows} atm={atm}
             spot={reference} held={held} onAdd={addLeg} lots={Number(defaultLots) || 1}
             atmIV={atmIV} straddle={straddle} pcr={oi?.pcr} oi={oi} maxPain={maxPain}
@@ -399,7 +476,9 @@ export default function App() {
             tab={tab} setTab={setTab} stats={stats} payoff={payoff} spot={spot} sigma={sigma}
             legs={active} hasLegs={hasLegs} targetSpot={targetSpot} setTargetSpot={setTargetSpot}
             ivShift={ivShift} setIvShift={setIvShift} targetDate={targetDate ?? ""}
-            setTargetDate={setTargetDate} targetPnl={targetPnl} targetT={targetT}
+            setTargetDate={setTargetDate} targetPnl={targetPnl}
+            targetDates={targetDates} targetIsExpiry={!!targetDate && targetDate >= nearExpiry}
+            nearExpiry={nearExpiry} mixedExpiries={bookExpiries.length > 1}
             dates={dates} dayIdx={dayIdx} mtm={mtm} oiRows={oiRows}
             straddleSeries={straddleSeries} maxPain={maxPain}
             collapsed={analysisHid} setCollapsed={setAnalysisHid} theme={theme}

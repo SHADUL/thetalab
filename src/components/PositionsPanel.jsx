@@ -152,7 +152,15 @@ export default function PositionsPanel({
                       {l.strike} <span className="text-ink2">{l.right}</span>
                       {l.closed && <span className="text-muted font-normal text-[10.5px]"> · closed</span>}
                     </td>
-                    <td className="n text-muted whitespace-nowrap">{expShort(l.expiry)}</td>
+                    <td className="n text-muted whitespace-nowrap">
+                      {expShort(l.expiry)}
+                      {l.noQuote && (
+                        <span className="noquote"
+                          title="This expiry has no chain on the session in view, so the leg cannot be marked here">
+                          no quote
+                        </span>
+                      )}
+                    </td>
                     <td className="n text-right">{fm(l.entryPrice)}</td>
                     <td className="n text-right">{fm(l.cur)}</td>
 

@@ -60,7 +60,8 @@ function Empty({ children }) {
 export default function AnalysisPanel({
   tab, setTab, stats, payoff, spot, sigma, legs, hasLegs,
   targetSpot, setTargetSpot, ivShift, setIvShift, targetDate, setTargetDate,
-  targetPnl, targetT, dates, dayIdx, mtm, oiRows, straddleSeries, maxPain,
+  targetPnl, targetDates, targetIsExpiry, nearExpiry, mixedExpiries,
+  dates, dayIdx, mtm, oiRows, straddleSeries, maxPain,
   wizard, collapsed, setCollapsed, theme,
 }) {
   const [showSettings, setShowSettings] = useState(true);
@@ -279,11 +280,11 @@ export default function AnalysisPanel({
                 <span className="ctrl-k">Target On:</span>
                 <select className="ctrlsel n" value={targetDate}
                   onChange={(e) => setTargetDate(e.target.value)}>
-                  {dates.slice(dayIdx).map((d, i) => (
+                  {targetDates.map((d) => (
                     <option key={d} value={d}>
                       {new Date(d + "T00:00:00").toLocaleDateString("en-IN",
                         { weekday: "short", day: "2-digit", month: "short", year: "numeric" })}
-                      {dayIdx + i === dates.length - 1 ? " · expiry" : ""}
+                      {d === nearExpiry ? " · expiry" : ""}
                     </option>
                   ))}
                 </select>
@@ -301,7 +302,11 @@ export default function AnalysisPanel({
                 </button>
               </span>
               <span className="ctrl-note">
-                {targetT <= 1e-9 ? "Target is expiry — intrinsic value" : "IV held constant as spot moves"}
+                {mixedExpiries
+                  ? `Expiry curve is priced at the nearest leg expiry (${new Date(nearExpiry + "T00:00:00")
+                      .toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}); longer-dated legs keep time value`
+                  : targetIsExpiry ? "Target is expiry — intrinsic value"
+                  : "IV held constant as spot moves"}
               </span>
             </div>
           )}

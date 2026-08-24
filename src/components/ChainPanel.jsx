@@ -116,7 +116,7 @@ function ExpiryTabs({ expiries, expiry, tags, today, onPick }) {
 
 /* ── panel ────────────────────────────────────────────────────────────── */
 export default function ChainPanel({
-  expiries, expiry, tags, today, rows, atm, spot, held, onAdd, lots,
+  expiries, allExpiries, expiry, tags, today, rows, atm, spot, held, onAdd, lots,
   atmIV, straddle, pcr, oi, maxPain, basis, setBasis, synthFut, onPickExpiry,
   collapsed, setCollapsed,
 }) {
@@ -136,10 +136,18 @@ export default function ChainPanel({
     if (c && el) c.scrollTop = el.offsetTop - c.clientHeight / 2 + el.clientHeight / 2;
   }, [expiry, atm]);
 
-  const expLabel = expiry
-    ? new Date(expiry + "T00:00:00").toLocaleDateString("en-IN",
-        { day: "2-digit", month: "short", year: "numeric" }).toUpperCase()
-    : "—";
+  /* Grouped by year, chronological. An array rather than an object because
+     object keys that look like integers ("2019") are ordered numerically by the
+     engine no matter what order they were inserted in. */
+  const byYear = useMemo(() => {
+    const g = new Map();
+    (allExpiries ?? []).forEach((e) => {
+      const y = e.slice(0, 4);
+      if (!g.has(y)) g.set(y, []);
+      g.get(y).push(e);
+    });
+    return [...g.entries()];
+  }, [allExpiries]);
 
   const maxOI = useMemo(
     () => Math.max(1, ...rows.map((r) => Math.max(r.co || 0, r.po || 0))), [rows]);
@@ -208,8 +216,24 @@ export default function ChainPanel({
     <section className="panel-e deskpanel">
       <div className="panel-head">
         <AddOns cols={cols} setCols={setCols} />
+        {/* The tab rail only carries the expiries live on this session. This
+            picker reaches the whole history — every expiry in the bundle,
+            grouped by year — so an old cycle can be opened and replayed. */}
         <h2 className="panel-title">
-          Option Chain <span className="n panel-title-sub">({expLabel})</span>
+          Option Chain
+          <select className="expsel n" value={expiry ?? ""} aria-label="Expiry"
+            onChange={(e) => onPickExpiry(e.target.value)}>
+            {byYear.map(([yr, list]) => (
+              <optgroup key={yr} label={yr}>
+                {list.map((e) => (
+                  <option key={e} value={e}>
+                    {new Date(e + "T00:00:00").toLocaleDateString("en-IN",
+                      { day: "2-digit", month: "short", year: "numeric" }).toUpperCase()}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
         </h2>
         <button className="chip" onClick={() => setCollapsed((v) => !v)}>
           {collapsed ? <CaretDoubleRight size={10} weight="bold" />

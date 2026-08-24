@@ -146,7 +146,11 @@ export const dte = (expiry, today) =>
 /**
  * Tag expiries the way a chain does: current week, next week, current month,
  * next month. Monthly is the last expiry falling inside that calendar month,
- * which is how NSE's monthly contract is defined.
+ * which is how NSE's monthly contract is defined — so this has to be decided
+ * against EVERY expiry in the data, not just the handful quoted on the session
+ * in view. Judging it from the visible subset would crown whichever expiry
+ * happens to be last on screen: with only the 4th and 11th of July loaded, the
+ * 11th would be labelled the monthly when the real one is the 25th.
  */
 export function tagExpiries(expiries, today) {
   if (!today) return {};
@@ -198,20 +202,22 @@ export function rollingStraddle(ex, upto) {
  * visible rather than just its endpoint. Legs are only marked from the session
  * they were entered, and stop moving once closed.
  */
-export function mtmSeries(legs, ex, lotSizeFor) {
-  if (!ex || !legs?.length) return [];
-  return ex.dates.map((d) => {
+export function mtmSeries(legs, dates, priceOf, lotSizeFor, spotOf) {
+  if (!dates?.length || !legs?.length) return [];
+  return dates.map((d) => {
     let pnl = 0, marked = false;
     legs.forEach((l) => {
       if (l.entryDate > d) return;
       const closed = l.closedDate && d >= l.closedDate;
-      const px = closed ? l.closePrice : ex.chain[d]?.[String(l.strike)]?.[l.right === "CE" ? "c" : "p"];
+      // Each leg is marked against its OWN expiry's chain, so a weekly and a
+      // monthly held together are both valued on the same session.
+      const px = closed ? l.closePrice : priceOf(l.expiry, d, l.strike, l.right);
       if (px == null) return;
       marked = true;
       const q = l.lots * lotSizeFor(l.entryDate);
       pnl += (l.side === "SELL" ? l.entryPrice - px : px - l.entryPrice) * q;
     });
-    return { date: d, pnl: marked ? Math.round(pnl) : null, spot: ex.spot[d] };
+    return { date: d, pnl: marked ? Math.round(pnl) : null, spot: spotOf(d) };
   });
 }
 
@@ -225,7 +231,37 @@ export function mtmSeries(legs, ex, lotSizeFor) {
  * which is the sticky-strike simplification stated in the UI footnote — a real
  * surface steepens as price falls.
  */
-export function payoffCurve({ legs, spot, sigma, targetT, ivShift = 0, basisAdj = 0, points = 141 }) {
+/**
+ * Value one leg if the index is at S, with `T` years still to run on that leg.
+ *
+ * A leg that has reached its own expiry is worth intrinsic against the index —
+ * the basis is zero by definition at settlement. A leg still alive is priced
+ * off its forward, carried at the basis observed on the session in view.
+ */
+function legValue(l, S, T, ivShift) {
+  const isCall = l.right === "CE";
+  const intrinsic = Math.max(isCall ? S - l.strike : l.strike - S, 0);
+  const iv = l.iv ? l.iv * (1 + ivShift) : null;
+  if (T <= 1e-9 || !iv) return intrinsic;
+  return bs(S + (l.basis || 0), l.strike, T, iv, isCall);
+}
+
+/**
+ * Payoff across a price range, at expiry and at a target date.
+ *
+ * Legs may sit on different expiries — a weekly sold against a monthly, say —
+ * so each carries its own remaining tenor rather than sharing one. `tExp` is
+ * the time it still has to run on the payoff's expiry reference date (the
+ * NEAREST leg expiry, which is where a calendar's shape is actually decided),
+ * and `tTgt` the time it has left on the target date. A leg expiring on the
+ * reference date has tExp = 0 and settles at intrinsic; a longer-dated leg
+ * keeps time value and is priced for it.
+ *
+ * `ivShift` scales each leg's own solved IV. Both curves hold that vol constant
+ * as spot moves, which is the sticky-strike simplification stated in the UI
+ * footnote — a real surface steepens as price falls.
+ */
+export function payoffCurve({ legs, spot, sigma, ivShift = 0, points = 141 }) {
   if (!legs?.length || !spot) return [];
   const span = Math.max(sigma ? sigma * 2.8 : spot * 0.07, spot * 0.05);
   const lo = spot - span, hi = spot + span, out = [];
@@ -233,16 +269,9 @@ export function payoffCurve({ legs, spot, sigma, targetT, ivShift = 0, basisAdj 
     const S = lo + ((hi - lo) * i) / (points - 1);
     let exp = 0, tgt = 0;
     legs.forEach((l) => {
-      const isCall = l.right === "CE";
-      // At expiry the basis is zero by definition, so intrinsic is taken
-      // against the index itself. Before expiry the legs are priced off the
-      // forward, carried along at the basis observed today.
-      const intr = Math.max(isCall ? S - l.strike : l.strike - S, 0);
-      const iv = l.iv ? l.iv * (1 + ivShift) : null;
-      const th = targetT > 1e-9 && iv ? bs(S + basisAdj, l.strike, targetT, iv, isCall) : intr;
       const m = l.side === "SELL" ? -1 : 1;
-      exp += m * (intr - l.entryPrice) * l.q;
-      tgt += m * (th - l.entryPrice) * l.q;
+      exp += m * (legValue(l, S, l.tExp ?? 0, ivShift) - l.entryPrice) * l.q;
+      tgt += m * (legValue(l, S, l.tTgt ?? 0, ivShift) - l.entryPrice) * l.q;
     });
     out.push({
       S: Math.round(S), exp: Math.round(exp), tgt: Math.round(tgt),
@@ -252,15 +281,11 @@ export function payoffCurve({ legs, spot, sigma, targetT, ivShift = 0, basisAdj 
   return out;
 }
 
-/** P&L of the open legs at one specific price and date — the target readout. */
-export function pnlAt(legs, S, targetT, ivShift = 0, basisAdj = 0) {
+/** P&L of the given legs at one price on the target date — the target readout. */
+export function pnlAt(legs, S, ivShift = 0) {
   let v = 0;
   legs.forEach((l) => {
-    const isCall = l.right === "CE";
-    const intr = Math.max(isCall ? S - l.strike : l.strike - S, 0);
-    const iv = l.iv ? l.iv * (1 + ivShift) : null;
-    const px = targetT > 1e-9 && iv ? bs(S + basisAdj, l.strike, targetT, iv, isCall) : intr;
-    v += (l.side === "SELL" ? -1 : 1) * (px - l.entryPrice) * l.q;
+    v += (l.side === "SELL" ? -1 : 1) * (legValue(l, S, l.tTgt ?? 0, ivShift) - l.entryPrice) * l.q;
   });
   return v;
 }

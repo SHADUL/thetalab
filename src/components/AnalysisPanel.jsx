@@ -25,13 +25,18 @@ const TABS = [
   ["oi", "OI"], ["straddle", "Rolling Straddle"],
 ];
 
-const Metric = ({ label, value, sub, tone }) => (
+const Metric = ({ label, value, sub, arrow, tone }) => (
   <div className="metric">
     <div className="metric-k">{label}</div>
     <div className={cx("n metric-v", tone === "up" && "is-up", tone === "down" && "is-down")}>
       {value}
-      {sub && <span className="metric-sub">{sub}</span>}
     </div>
+    {sub && (
+      <span className="n metric-sub">
+        {arrow && <span className="metric-arrow">{arrow === "up" ? "▲" : "▼"}</span>}
+        {sub}
+      </span>
+    )}
   </div>
 );
 
@@ -89,7 +94,11 @@ export default function AnalysisPanel({
   const shortDate = (d) => new Date(d + "T00:00:00")
     .toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
 
-  const pctOf = (v, base) => (base ? ` (${v > 0 ? "+" : ""}${fm((v / base) * 100, 1)}%)` : "");
+  /* Return on capital as its own line under a P&L-style figure, direction
+     carried by a small triangle rather than a +/- sign doing double duty
+     with the currency figure above it. */
+  const pctArrow = (v, base) => (base ? `${fm((Math.abs(v) / base) * 100, 1)}%` : null);
+  const arrowOf = (v) => (v > 0 ? "up" : v < 0 ? "down" : null);
 
   return (
     <section className="panel-e deskpanel">
@@ -122,14 +131,17 @@ export default function AnalysisPanel({
           <div className="metricrow">
             <Metric label="Est. Margin" value={hasLegs ? inr(stats?.margin) : "—"} />
             <Metric label="P&L" value={hasLegs ? sgn(stats?.pnl) : "—"}
-              sub={hasLegs && stats?.margin ? pctOf(stats.pnl, stats.margin) : null}
+              sub={hasLegs && stats?.margin ? pctArrow(stats.pnl, stats.margin) : null}
+              arrow={hasLegs ? arrowOf(stats?.pnl) : null}
               tone={stats?.pnl > 0 ? "up" : stats?.pnl < 0 ? "down" : null} />
             <Metric label="Max Profit"
               value={hasLegs ? (Number.isFinite(stats?.maxP) ? inr(stats.maxP) : "Unlimited") : "—"}
-              sub={hasLegs && stats?.margin ? pctOf(stats.maxP, stats.margin) : null} tone="up" />
+              sub={hasLegs && stats?.margin && Number.isFinite(stats?.maxP) ? pctArrow(stats.maxP, stats.margin) : null}
+              arrow={hasLegs && Number.isFinite(stats?.maxP) ? arrowOf(stats.maxP) : null} tone="up" />
             <Metric label="Max Loss"
               value={hasLegs ? (Number.isFinite(stats?.maxL) ? inr(stats.maxL) : "Unlimited") : "—"}
-              sub={hasLegs && stats?.margin ? pctOf(stats.maxL, stats.margin) : null} tone="down" />
+              sub={hasLegs && stats?.margin && Number.isFinite(stats?.maxL) ? pctArrow(stats.maxL, stats.margin) : null}
+              arrow={hasLegs && Number.isFinite(stats?.maxL) ? arrowOf(stats.maxL) : null} tone="down" />
             <Metric label="R:R" value={hasLegs && stats?.rr ? `1 : ${fm(stats.rr, 1)}` : "—"} />
             <Metric label="POP" value={hasLegs && stats?.pop != null ? fm(stats.pop, 2) + "%" : "—"} />
             <Metric label="Net Credit" value={hasLegs ? sgn(stats?.credit) : "—"}
@@ -144,7 +156,7 @@ export default function AnalysisPanel({
           <div className="tabbody">
             {tab === "payoff" && (hasLegs ? (
               <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}
-                transition={{ duration: 0.35 }} className="chart-wrap">
+                transition={{ duration: 0.35 }} className="chart-wrap has-legend">
                 <div className="chart-legend">
                   <LineKey color={K.gain} label={`At expiry · ${shortDate(nearExpiry)}`}
                     hint="What the position settles at, priced at the nearest leg expiry" />
@@ -152,24 +164,25 @@ export default function AnalysisPanel({
                     label={`At target date · ${shortDate(targetDate)}`}
                     hint="What the position is worth on the target date set below, with time value still in it" />
                 </div>
+                <div className="chart-plot">
                 <ResponsiveContainer>
-                  <ComposedChart data={payoff} margin={{ top: 26, right: 14, left: 2, bottom: 2 }}>
+                  <ComposedChart data={payoff} margin={{ top: 22, right: 20, left: 4, bottom: 4 }}>
                     <defs>
                       <linearGradient id="pGain" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor={K.gain} stopOpacity={0.28} />
+                        <stop offset="0%" stopColor={K.gain} stopOpacity={0.24} />
                         <stop offset="100%" stopColor={K.gain} stopOpacity={0.02} />
                       </linearGradient>
                       <linearGradient id="pLoss" x1="0" y1="1" x2="0" y2="0">
-                        <stop offset="0%" stopColor={K.loss} stopOpacity={0.24} />
+                        <stop offset="0%" stopColor={K.loss} stopOpacity={0.2} />
                         <stop offset="100%" stopColor={K.loss} stopOpacity={0.02} />
                       </linearGradient>
                     </defs>
-                    <CartesianGrid stroke={K.grid} vertical={false} />
+                    <CartesianGrid stroke={K.grid} vertical={false} strokeOpacity={0.7} />
                     {sigma && [2, 1].map((n) => (
                       <ReferenceArea key={n} x1={Math.round(spot - n * sigma)}
                         x2={Math.round(spot + n * sigma)} fill={K.accent}
-                        fillOpacity={n === 1 ? 0.05 : 0.035} strokeOpacity={0}
-                        label={{ value: `±${n}σ`, fill: K.muted, fontSize: 9.5, position: "insideTopRight" }} />
+                        fillOpacity={n === 1 ? 0.055 : 0.032} strokeOpacity={0}
+                        label={{ value: `±${n}σ`, fill: K.muted, fontSize: 10, position: "insideTopRight" }} />
                     ))}
                     {/* A NUMBER axis, not a category one. Spot, the breakevens
                         and each leg's strike are arbitrary values that will not
@@ -178,10 +191,10 @@ export default function AnalysisPanel({
                         matches a category exactly — so all of them silently
                         vanished. Positioning by value puts them back. */}
                     <XAxis dataKey="S" type="number" domain={xDomain ?? ["dataMin", "dataMax"]}
-                      allowDataOverflow={false} tick={{ fill: K.muted, fontSize: 10.5 }}
+                      allowDataOverflow={false} tick={{ fill: K.muted, fontSize: 11.5 }}
                       tickFormatter={fi} axisLine={{ stroke: K.grid }} tickLine={false}
-                      interval="preserveStartEnd" minTickGap={52} />
-                    <YAxis width={52} tick={{ fill: K.muted, fontSize: 10.5 }} axisLine={false}
+                      interval="preserveStartEnd" minTickGap={56} />
+                    <YAxis width={58} tick={{ fill: K.muted, fontSize: 11.5 }} axisLine={false}
                       tickLine={false} tickFormatter={fmtAxis}
                       domain={yDomain} allowDataOverflow={false} />
                     <Tooltip cursor={{ stroke: K.faint, strokeDasharray: "3 3" }}
@@ -191,7 +204,7 @@ export default function AnalysisPanel({
                     <ReferenceLine y={0} stroke={K.faint} />
                     <Area dataKey="pos" stroke="none" fill="url(#pGain)" isAnimationActive={false} />
                     <Area dataKey="neg" stroke="none" fill="url(#pLoss)" isAnimationActive={false} />
-                    <Line dataKey="exp" stroke={K.gain} strokeWidth={2.4} dot={false}
+                    <Line dataKey="exp" stroke={K.gain} strokeWidth={2.6} dot={false}
                       strokeLinecap="round" isAnimationActive={false} />
                     <Line dataKey="tgt" stroke={K.accent} strokeWidth={2.2} strokeDasharray="7 5"
                       dot={false} strokeLinecap="round" isAnimationActive={false} />
@@ -206,15 +219,17 @@ export default function AnalysisPanel({
                         the levels worth marking directly on the price axis. */}
                     {stats?.bes?.map((b) => (
                       <ReferenceLine key={b} x={b} stroke={K.warn} strokeDasharray="3 3"
-                        label={{ value: fi(b), fill: K.warn, fontSize: 10, position: "insideBottomLeft" }} />
+                        label={{ value: fi(b), fill: K.warn, fontSize: 10.5, fontWeight: 600,
+                          position: "insideBottomLeft" }} />
                     ))}
                     <ReferenceLine x={Math.round(targetSpot ?? spot)} stroke={K.ink2} strokeWidth={1.2}
                       label={{ value: `${symbol} Spot : ${fm(targetSpot ?? spot, 1)}`,
-                        fill: K.ink2, fontSize: 10.5, position: "top" }} />
+                        fill: K.ink2, fontSize: 11, fontWeight: 600, position: "top" }} />
                   </ComposedChart>
                 </ResponsiveContainer>
+                </div>
                 {targetPnl != null && (
-                  <div className={cx("target-chip", targetPnl >= 0 ? "is-up" : "is-down")}>
+                  <div className={cx("target-chip n", targetPnl >= 0 ? "is-up" : "is-down")}>
                     Target P&amp;L: {sgn(targetPnl)}
                     {stats?.margin ? ` (${fm((targetPnl / stats.margin) * 100, 1)}%)` : ""}
                   </div>

@@ -2,6 +2,8 @@ import { useState, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { MagicWand, ArrowsHorizontal, TrendUp, TrendDown, CaretDown, Plus, Info } from "@phosphor-icons/react";
 import { ivSurface, generate, rank, defaultBounds } from "../lib/strategies";
+import { GROUPS, readymadeFor, buildReadymade } from "../lib/readymade";
+import ReadymadeCard from "./ReadymadeCard";
 import { inr, sgn, fm, fi, cx } from "../lib/format";
 
 const VIEWS = [
@@ -16,8 +18,15 @@ const SORTS = [
   { id: "capital", label: "Least capital" },
 ];
 
+/* Chart colours resolve from the same tokens as the rest of the app, so the
+   shape icons repaint with a theme switch instead of carrying a fixed pair. */
+const tok = (n, f) => (typeof window === "undefined" ? f
+  : getComputedStyle(document.documentElement).getPropertyValue(n).trim() || f);
+
 export default function StrategyWizard({ chain, strikes, spot, sigma, tYears, dates, dayIdx,
   expiry, lotQty, defaultLots, step = 50, symbol = "NIFTY", onLoad }) {
+  const [mode, setMode] = useState("readymade");
+  const [group, setGroup] = useState("bullish");
   const init = defaultBounds(spot, sigma, step);
   const [view, setView] = useState("between");
   const [lower, setLower] = useState(init.lower);
@@ -37,6 +46,17 @@ export default function StrategyWizard({ chain, strikes, spot, sigma, tYears, da
 
   const lo = view === "below" ? spot - spot * 0.12 : Number(lower);
   const hi = view === "above" ? spot + spot * 0.12 : Number(upper);
+
+  /* Shared by every ready-made card, solved once per session rather than
+     once per card tap. */
+  const atm = useMemo(
+    () => strikes.reduce((a, b) => (Math.abs(b - spot) < Math.abs(a - spot) ? b : a), strikes[0] ?? spot),
+    [strikes, spot]);
+  const readySurf = useMemo(
+    () => ivSurface(chain, strikes, spot, tYears), [chain, strikes, spot, tYears]);
+  const readyCtx = { surf: readySurf, atm, step, lots: Number(defaultLots) || 1 };
+  const readyList = useMemo(() => readymadeFor(group), [group]);
+  const gainC = tok("--c-gain", "#067A55"), lossC = tok("--c-loss", "#C8342B");
 
   const results = useMemo(() => {
     if (!ran || !spot) return [];
@@ -60,20 +80,53 @@ export default function StrategyWizard({ chain, strikes, spot, sigma, tYears, da
     /* Rendered inside the analysis panel's Strategy tab, so this carries its
        own padding but not a second card surface. */
     <div className="p-4">
-      <div className="mb-4">
-        <div className="flex items-center gap-2 mb-1.5">
-          <MagicWand size={14} weight="regular" className="text-accent" />
-          <span className="lbl !text-accent">Strategy finder</span>
+      <div className="mb-4 flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <div className="flex items-center gap-2 mb-1.5">
+            <MagicWand size={14} weight="regular" className="text-accent" />
+            <span className="lbl !text-accent">Strategy finder</span>
+          </div>
+          <h2 className="text-[16px] font-semibold tracking-[-0.02em] leading-tight">
+            {mode === "readymade" ? "Pick a ready-made strategy." : "Tell us your market view."}
+          </h2>
+          <p className="text-[12.5px] text-ink2 mt-1 max-w-[52ch] leading-relaxed">
+            Every structure is constructed and priced off this session's chain, with each leg's
+            volatility solved from its own traded premium.
+          </p>
         </div>
-        <h2 className="text-[16px] font-semibold tracking-[-0.02em] leading-tight">
-          Tell us your market view.
-        </h2>
-        <p className="text-[12.5px] text-ink2 mt-1 max-w-[52ch] leading-relaxed">
-          Every structure is constructed and priced off this session's chain, with each leg's
-          volatility solved from its own traded premium.
-        </p>
+        <div className="seg-track !max-w-[220px] shrink-0" role="tablist" aria-label="Finder mode">
+          {[["readymade", "Ready-made"], ["custom", "Custom"]].map(([id, label]) => (
+            <button key={id} role="tab" aria-selected={mode === id} data-on={mode === id}
+              onClick={() => setMode(id)} className="seg">{label}</button>
+          ))}
+        </div>
       </div>
 
+      {mode === "readymade" && (
+        <div>
+          <div className="rm-grouprow" role="tablist" aria-label="Strategy family">
+            {GROUPS.map(([id, label]) => (
+              <button key={id} role="tab" aria-selected={group === id}
+                onClick={() => setGroup(id)}
+                className={cx("rm-group", group === id && "is-on")}>{label}</button>
+            ))}
+          </div>
+          <motion.div key={group} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.22 }} className="rm-grid">
+            {readyList.map((strat) => {
+              const legs = spot ? buildReadymade(strat, readyCtx) : null;
+              return (
+                <ReadymadeCard key={strat.id} strat={strat} disabled={!legs}
+                  gain={gainC} loss={lossC}
+                  onPick={() => onLoad(legs)} />
+              );
+            })}
+          </motion.div>
+        </div>
+      )}
+
+      {mode === "custom" && (
+      <>
       <div className="grid gap-3 sm:gap-4">
         <Field label={`My view is ${symbol}`}>
           <div className="seg-track max-w-[360px]" role="tablist" aria-label="Market view">
@@ -208,10 +261,25 @@ export default function StrategyWizard({ chain, strikes, spot, sigma, tYears, da
                           )}
                         </AnimatePresence>
                       </td>
-                      <td className={cx("n px-3 text-right text-[13.5px] font-semibold",
-                        r.minInView > 0 ? "text-gain" : "text-loss")}>{sgn(Math.round(r.minInView))}</td>
-                      <td className="n px-3 text-right text-[13px] text-gain">{inr(Math.round(r.maxProfit))}</td>
-                      <td className="n px-3 text-right text-[13px] text-loss">{inr(Math.round(r.maxLoss))}</td>
+                      <td className={cx("n px-3 text-right text-[16px] font-bold leading-tight",
+                        r.minInView > 0 ? "text-gain" : "text-loss")}>
+                        {sgn(Math.round(r.minInView))}
+                        <div className="text-[10.5px] font-medium opacity-70 mt-0.5">
+                          {r.capital ? `${r.minInView >= 0 ? "+" : ""}${fm((r.minInView / r.capital) * 100, 1)}%` : "—"}
+                        </div>
+                      </td>
+                      <td className="n px-3 text-right text-[14.5px] font-bold text-gain leading-tight">
+                        {inr(Math.round(r.maxProfit))}
+                        <div className="text-[10.5px] font-medium opacity-70 mt-0.5">
+                          {r.capital ? `+${fm((r.maxProfit / r.capital) * 100, 1)}%` : "—"}
+                        </div>
+                      </td>
+                      <td className="n px-3 text-right text-[14.5px] font-bold text-loss leading-tight">
+                        {inr(Math.round(r.maxLoss))}
+                        <div className="text-[10.5px] font-medium opacity-70 mt-0.5">
+                          {r.capital ? `${fm((r.maxLoss / r.capital) * 100, 1)}%` : "—"}
+                        </div>
+                      </td>
                       <td className="n px-3 text-right text-[12.5px] text-ink2 whitespace-nowrap">
                         {r.breakevens.length ? r.breakevens.slice(0, 2).map(fi).join(", ") : "—"}</td>
                       <td className="n px-3 text-right text-[13px]">{inr(Math.round(r.capital))}</td>
@@ -250,6 +318,8 @@ export default function StrategyWizard({ chain, strikes, spot, sigma, tYears, da
           </motion.div>
         )}
       </AnimatePresence>
+      </>
+      )}
     </div>
   );
 }

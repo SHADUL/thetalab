@@ -12,8 +12,8 @@ import { bs, impliedVol } from "./options";
 /* Strike grids differ by index — NIFTY is 50 points, SENSEX 100 — and the
    spread widths below have to scale with the grid too, or a SENSEX condor
    built on NIFTY-sized wings would be a fraction of a percent wide. */
-const roundTo = (x, step) => Math.round(x / step) * step;
-const widths = (step, mults) => mults.map((m) => m * step);
+export const roundTo = (x, step) => Math.round(x / step) * step;
+export const widths = (step, mults) => mults.map((m) => m * step);
 
 /** Solve IV once per strike/right so candidate generation stays cheap. */
 export function ivSurface(chain, strikes, spot, T) {
@@ -27,12 +27,12 @@ export function ivSurface(chain, strikes, spot, T) {
   return map;
 }
 
-const leg = (side, right, strike, lots, surf) => {
+export const leg = (side, right, strike, lots, surf) => {
   const s = surf[`${strike}${right}`];
   if (!s || s.px == null) return null;
   return { side, right, strike, lots, price: s.px, iv: s.iv };
 };
-const ok = (...ls) => (ls.every(Boolean) ? ls : null);
+export const ok = (...ls) => (ls.every(Boolean) ? ls : null);
 
 /**
  * Enumerate the strategies a professional would actually consider for a view.

@@ -239,6 +239,59 @@ select.ctl { appearance: none; padding-right: 30px;
 
 .deskpanel { overflow: hidden; }
 
+/* ── phone layout: one section at a time, switched by a bottom bar ─────
+   Desktop and tablet keep the deskgrid exactly as it is above. Below the
+   phone breakpoint the three areas stay mounted — so chart state, scroll
+   position and hover state survive switching tabs — and CSS alone hides
+   whichever two are not the active section, keyed off the data attribute
+   App.jsx sets on .deskgrid. */
+@media (max-width: 767px) {
+  .app-shell { padding-bottom: calc(66px + env(safe-area-inset-bottom, 0px)); }
+  .deskgrid { gap: 8px; }
+  .deskgrid[data-mobile-section="chain"] .area-analysis,
+  .deskgrid[data-mobile-section="chain"] .area-positions { display: none; }
+  .deskgrid[data-mobile-section="analysis"] .area-chain,
+  .deskgrid[data-mobile-section="analysis"] .area-positions { display: none; }
+  .deskgrid[data-mobile-section="positions"] .area-chain,
+  .deskgrid[data-mobile-section="positions"] .area-analysis { display: none; }
+  /* The chain no longer shares the screen with anything else, so its own
+     scroll well can claim most of the viewport instead of the 52vh it
+     budgets for when analysis and positions sit underneath it. */
+  .deskgrid[data-mobile-section="chain"] .chain-body {
+    max-height: calc(100dvh - 300px);
+  }
+  .disclaimer { display: none; }   /* its own tab-switch away from being read anyway */
+}
+
+.mobile-tabbar {
+  display: none;
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  background: var(--c-surface); border-top: 1px solid var(--c-line);
+  box-shadow: 0 -2px 12px rgba(17,19,24,.06);
+}
+@media (max-width: 767px) { .mobile-tabbar { display: flex; } }
+.mtab {
+  flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 8px 4px 7px; border: 0; background: transparent; color: var(--c-muted);
+  font-family: var(--font-display); font-size: 10.5px; font-weight: 550;
+  cursor: pointer; transition: color .15s ease-out;
+}
+.mtab.is-on { color: var(--c-accent); font-weight: 650; }
+.mtab-icon { position: relative; display: inline-flex; }
+.mtab-badge {
+  position: absolute; top: -5px; right: -9px; min-width: 15px; height: 15px;
+  padding: 0 3px; border-radius: 8px; background: var(--c-accent); color: var(--c-accent-ink);
+  font-family: var(--font-num); font-size: 9px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+.mtab-dot {
+  position: absolute; top: -2px; right: -5px; width: 7px; height: 7px; border-radius: 50%;
+  border: 1.5px solid var(--c-surface);
+}
+.mtab-dot.is-up { background: var(--c-gain); }
+.mtab-dot.is-down { background: var(--c-loss); }
+
 /* ── top bar ─────────────────────────────────────────────────── */
 .topbar {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -493,15 +546,28 @@ select.ctl { appearance: none; padding-right: 30px;
 /* ── chain table ─────────────────────────────────────────────── */
 .chain-body { overflow-y: auto; overflow-x: auto; max-height: 52vh; }
 @media (min-width: 1180px) { .chain-body { max-height: calc(100vh - 268px); } }
-/* On a phone the three columns plus a pair of B/S pills do not fit at desktop
-   metrics; the strike column gives up width first, and the action slot stops
-   reserving space it no longer needs. */
+/* On a phone the price and OI columns do not have desktop's room, and the B/S
+   pills used to sit in normal flex flow alongside the price. When that combined
+   content ran wider than the cell — routine once the OI columns joined the
+   layout — a flex row justified to the far edge overflows on the START side,
+   not the end, so the pills were pushed to a negative x: rendered, but off the
+   left edge of the screen and untappable. Taking them out of flow and pinning
+   them to the cell's own box (which is always on-screen, since the cell itself
+   is) fixes that regardless of how narrow the cell gets. They overlay the
+   price rather than compete with it for width, which is fine — the price
+   already dims under them the moment they appear. */
 @media (max-width: 640px) {
-  .chain-table thead th:nth-child(2) { width: 78px; }
+  .chain-table thead th.text-center { width: 74px; }
   .ch-cell { padding: 0 6px; }
-  .ch-act { min-width: 0; gap: 3px; }
+  .ch-act {
+    position: absolute; top: 50%; transform: translateY(-50%);
+    min-width: 0; gap: 3px; z-index: 4;
+  }
+  .ch-cell:has(.ch-inner.is-rtl) .ch-act { right: 4px; }
+  .ch-cell:not(:has(.ch-inner.is-rtl)) .ch-act { left: 4px; }
   .ch-px { font-size: 12px; }
   .ch-delta { font-size: 9.5px; }
+  .ch-oi { width: 15%; }
 }
 .chain-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .chain-table thead th {

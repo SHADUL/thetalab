@@ -15,6 +15,7 @@ import ChainPanel from "./components/ChainPanel";
 import AnalysisPanel from "./components/AnalysisPanel";
 import PositionsPanel from "./components/PositionsPanel";
 import StrategyWizard from "./components/StrategyWizard";
+import MobileTabs from "./components/MobileTabs";
 
 const STORE = "thetalab-book-v2";
 const STORE_V1 = "nifty-sim-legs-v1";
@@ -55,6 +56,9 @@ export default function App() {
   const [priceBasis, setPriceBasis] = useState("open");
   const [tab, setTab] = useState("payoff");
   const [chainHid, setChainHid] = useState(false);
+  /* Which of the three areas a phone is currently showing. Irrelevant above
+     the phone breakpoint -- CSS there overrides it and shows all three. */
+  const [mobileSection, setMobileSection] = useState("chain");
   const [analysisHid, setAnalysisHid] = useState(false);
   const [ivShift, setIvShift] = useState(0);
   const [targetSpotRaw, setTargetSpot] = useState(null);
@@ -607,7 +611,9 @@ export default function App() {
         theme={theme} toggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))} />
 
       <MarketStrip ohlc={ohlc} prevClose={prevClose} spot={spot} synthFut={synthFut}
-        expiry={expiry} onFind={() => setTab("strategy")} onImport={onImport} />
+        expiry={expiry}
+        onFind={() => { setTab("strategy"); setMobileSection("analysis"); }}
+        onImport={onImport} />
 
       <AnimatePresence>
         {demo && (
@@ -619,7 +625,8 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      <div className={`deskgrid ${chainHid ? "is-chain-hidden" : ""}`}>
+      <div className={`deskgrid ${chainHid ? "is-chain-hidden" : ""}`}
+        data-mobile-section={mobileSection}>
         <div className="area-chain">
           <ChainPanel
             expiries={liveExpiries} allExpiries={bundle._usable} expiry={expiry}
@@ -662,6 +669,9 @@ export default function App() {
             totals={{ ...totals, target: targetPnl }} />
         </div>
       </div>
+
+      <MobileTabs active={mobileSection} onChange={setMobileSection}
+        legCount={book.length} pnl={hasLegs ? totals.pnl : null} />
 
       <p className="disclaimer">
         <b>

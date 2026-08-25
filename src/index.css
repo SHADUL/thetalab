@@ -567,7 +567,12 @@ select.ctl { appearance: none; padding-right: 30px;
   .ch-cell:not(:has(.ch-inner.is-rtl)) .ch-act { left: 4px; }
   .ch-px { font-size: 12px; }
   .ch-delta { font-size: 9.5px; }
-  .ch-oi { width: 15%; }
+  /* The B/S pills now overlay the price rather than sit beside it (above),
+     and a translucent pill background let the digits underneath show through
+     — reading as garbled overlapping text rather than a clean swap. Once a
+     cell is active the price is hidden outright instead of merely dimmed;
+     it was only ever a reference point for a strike you have just tapped. */
+  .ch-px.is-dim { opacity: 0; }
 }
 .chain-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .chain-table thead th {
@@ -602,24 +607,19 @@ select.ctl { appearance: none; padding-right: 30px;
 .ch-iv { font-size: 10.5px; color: var(--c-muted); min-width: 30px; }
 .ch-act { display: inline-flex; align-items: center; gap: 4px; min-width: 62px; }
 .ch-inner.is-rtl .ch-act { justify-content: flex-end; }
-/* Open interest column. The bar grows away from the strike — calls leftward,
-   puts rightward — so the two profiles build outward from the centre of the
-   chain rather than both running the same way. */
-.ch-oi {
-  border-bottom: 1px solid var(--c-line);
-  padding: 0 6px; width: 19%; vertical-align: middle;
-}
-.ch-oi-bar {
-  display: block; height: 15px; border-radius: 3px; min-width: 2px;
+/* Open interest as a pill behind the price, inside the same cell it prices —
+   not a column of its own. It grows from the edge nearest the strike outward,
+   capped short of the far edge, and sits under the price and the B/S pills in
+   stacking order (z-index 1, below ch-inner's 2). Compact by construction:
+   the row never gets any wider for carrying it. */
+.ch-oi-pill {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  height: 62%; border-radius: 999px; z-index: 1;
   transition: width .28s ease-out;
 }
-.ch-oi.is-call { text-align: right; }
-.ch-oi.is-call .ch-oi-bar { margin-left: auto; background: var(--c-loss); opacity: .34; }
-.ch-oi.is-put  { text-align: left; }
-.ch-oi.is-put  .ch-oi-bar { margin-right: auto; background: var(--c-gain); opacity: .34; }
-.chain-table tbody tr:hover .ch-oi-bar { opacity: .55; }
-.ch-oi-h { white-space: nowrap; }
-.ch-oi-h .oi-swatch { vertical-align: middle; }
+.ch-oi-pill.is-call { right: 0; background: var(--c-loss); opacity: .3; }
+.ch-oi-pill.is-put  { left: 0; background: var(--c-gain); opacity: .3; }
+.chain-table tbody tr:hover .ch-oi-pill { opacity: .48; }
 
 .bs-pill {
   width: 22px; height: 21px; border-radius: 6px; font-size: 11px; font-weight: 700;

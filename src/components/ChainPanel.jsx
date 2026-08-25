@@ -152,18 +152,6 @@ export default function ChainPanel({
   const maxOI = useMemo(
     () => Math.max(1, ...rows.map((r) => Math.max(r.co || 0, r.po || 0))), [rows]);
 
-  /* Open interest as a bar, in its own column, growing outward from the strike
-     it belongs to — calls to the left, puts to the right, so the two build away
-     from the centre and the shape of where the position sits is readable down
-     the column. Length is relative to the largest OI on screen, so the profile
-     rescales with whatever part of the chain is in view. */
-  const OIBar = ({ value, side }) => (
-    <td className={cx("ch-oi", side === "CE" ? "is-call" : "is-put")}
-      title={`${side === "CE" ? "Call" : "Put"} open interest: ${cnt(value)}`}>
-      <span className="ch-oi-bar" style={{ width: `${Math.min((value / maxOI) * 100, 100)}%` }} />
-    </td>
-  );
-
   /* One side of one strike. Slots are fixed-width and always rendered, so
      revealing B/S on hover never nudges a price by a pixel. */
   const Side = ({ r, right }) => {
@@ -208,6 +196,16 @@ export default function ChainPanel({
         onClick={() => has && setHover(key)}
         className={cx("ch-cell", has && "cursor-pointer", itm && "is-itm",
           badge && (pos.lots < 0 ? "is-short" : "is-long"), on && "is-hot")}>
+        {/* Open interest as a pill behind the price, not a column of its own —
+            the length reads at a glance without competing with Call LTP / Put
+            LTP for the row's width. It grows from the strike-adjacent edge
+            outward, capped so it never quite reaches the far edge, and sits
+            under the price and the B/S pills in stacking order. */}
+        {cols.oi && has && (
+          <span className={cx("ch-oi-pill", rtl ? "is-call" : "is-put")}
+            style={{ width: `${Math.max((((rtl ? r.co : r.po) || 0) / maxOI) * 88, 3)}%` }}
+            title={`${rtl ? "Call" : "Put"} open interest: ${cnt(rtl ? r.co : r.po)}`} />
+        )}
         <span className={cx("ch-inner", rtl && "is-rtl")}>
           {cols.iv && (
             <span className="n ch-iv">{iv ? fm(iv * 100, 1) : "—"}</span>
@@ -314,17 +312,7 @@ export default function ChainPanel({
               <thead>
                 <tr>
                   <th className="text-right">Call LTP{cols.delta && " (Δ)"}</th>
-                  {cols.oi && (
-                    <th className="text-right ch-oi-h">
-                      Call OI <i className="oi-swatch is-call" />
-                    </th>
-                  )}
                   <th className="text-center">Strike</th>
-                  {cols.oi && (
-                    <th className="text-left ch-oi-h">
-                      <i className="oi-swatch is-put" /> Put OI
-                    </th>
-                  )}
                   <th className="text-left">Put LTP{cols.delta && " (Δ)"}</th>
                 </tr>
               </thead>
@@ -335,7 +323,6 @@ export default function ChainPanel({
                     <tr key={r.strike} data-atm={r.strike === atm}
                       className={cx(r.strike === atm && "is-atm-row")}>
                       <Side r={r} right="CE" />
-                      {cols.oi && <OIBar value={r.co} side="CE" />}
                       <td className={cx("ch-strike", r.strike === atm && "is-atm")}>
                         <span className="n ch-strike-n">{r.strike}</span>
                         {diff != null && (
@@ -344,7 +331,6 @@ export default function ChainPanel({
                           </span>
                         )}
                       </td>
-                      {cols.oi && <OIBar value={r.po} side="PE" />}
                       <Side r={r} right="PE" />
                     </tr>
                   );

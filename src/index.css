@@ -617,9 +617,9 @@ select.ctl { appearance: none; padding-right: 30px;
   height: 62%; border-radius: 999px; z-index: 1;
   transition: width .28s ease-out;
 }
-.ch-oi-pill.is-call { right: 0; background: var(--c-loss); opacity: .3; }
-.ch-oi-pill.is-put  { left: 0; background: var(--c-gain); opacity: .3; }
-.chain-table tbody tr:hover .ch-oi-pill { opacity: .48; }
+.ch-oi-pill.is-call { right: 0; background: var(--c-loss); opacity: .16; }
+.ch-oi-pill.is-put  { left: 0; background: var(--c-gain); opacity: .16; }
+.chain-table tbody tr:hover .ch-oi-pill { opacity: .28; }
 
 .bs-pill {
   width: 22px; height: 21px; border-radius: 6px; font-size: 11px; font-weight: 700;

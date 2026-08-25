@@ -6,6 +6,7 @@ import {
 import { motion } from "framer-motion";
 import { CaretDoubleUp, CaretDoubleDown, Minus, Plus, ChartPolar } from "@phosphor-icons/react";
 import { inr, sgn, fm, fi, cnt, cx } from "../lib/format";
+import AnimatedNumber from "./AnimatedNumber";
 
 /* Chart colours resolve from the same tokens as everything else, so a theme
    switch repaints the visualisation without a second palette. */
@@ -25,10 +26,11 @@ const TABS = [
   ["oi", "OI"], ["straddle", "Rolling Straddle"],
 ];
 
-const Metric = ({ label, value, sub, arrow, tone }) => (
+const Metric = ({ label, value, sub, arrow, tone, major }) => (
   <div className="metric">
     <div className="metric-k">{label}</div>
-    <div className={cx("n metric-v", tone === "up" && "is-up", tone === "down" && "is-down")}>
+    <div className={cx("n metric-v", major && "is-major",
+      tone === "up" && "is-up", tone === "down" && "is-down")}>
       {value}
     </div>
     {sub && (
@@ -129,22 +131,31 @@ export default function AnalysisPanel({
         <>
           {/* ── metrics strip ─────────────────────────────────────────── */}
           <div className="metricrow">
-            <Metric label="Est. Margin" value={hasLegs ? inr(stats?.margin) : "—"} />
-            <Metric label="P&L" value={hasLegs ? sgn(stats?.pnl) : "—"}
+            <Metric label="Est. Margin"
+              value={hasLegs ? <AnimatedNumber value={stats?.margin} format={inr} /> : "—"} />
+            <Metric label="P&L" major
+              value={hasLegs ? <AnimatedNumber value={stats?.pnl} format={sgn} /> : "—"}
               sub={hasLegs && stats?.margin ? pctArrow(stats.pnl, stats.margin) : null}
               arrow={hasLegs ? arrowOf(stats?.pnl) : null}
               tone={stats?.pnl > 0 ? "up" : stats?.pnl < 0 ? "down" : null} />
-            <Metric label="Max Profit"
-              value={hasLegs ? (Number.isFinite(stats?.maxP) ? inr(stats.maxP) : "Unlimited") : "—"}
+            <Metric label="Max Profit" major
+              value={hasLegs
+                ? (Number.isFinite(stats?.maxP) ? <AnimatedNumber value={stats.maxP} format={inr} /> : "Unlimited")
+                : "—"}
               sub={hasLegs && stats?.margin && Number.isFinite(stats?.maxP) ? pctArrow(stats.maxP, stats.margin) : null}
               arrow={hasLegs && Number.isFinite(stats?.maxP) ? arrowOf(stats.maxP) : null} tone="up" />
-            <Metric label="Max Loss"
-              value={hasLegs ? (Number.isFinite(stats?.maxL) ? inr(stats.maxL) : "Unlimited") : "—"}
+            <Metric label="Max Loss" major
+              value={hasLegs
+                ? (Number.isFinite(stats?.maxL) ? <AnimatedNumber value={stats.maxL} format={inr} /> : "Unlimited")
+                : "—"}
               sub={hasLegs && stats?.margin && Number.isFinite(stats?.maxL) ? pctArrow(stats.maxL, stats.margin) : null}
               arrow={hasLegs && Number.isFinite(stats?.maxL) ? arrowOf(stats.maxL) : null} tone="down" />
-            <Metric label="R:R" value={hasLegs && stats?.rr ? `1 : ${fm(stats.rr, 1)}` : "—"} />
-            <Metric label="POP" value={hasLegs && stats?.pop != null ? fm(stats.pop, 2) + "%" : "—"} />
-            <Metric label="Net Credit" value={hasLegs ? sgn(stats?.credit) : "—"}
+            <Metric label="R:R" value={hasLegs && stats?.rr
+              ? <>1 : <AnimatedNumber value={stats.rr} format={(v) => fm(v, 1)} /></> : "—"} />
+            <Metric label="POP" value={hasLegs && stats?.pop != null
+              ? <AnimatedNumber value={stats.pop} format={(v) => fm(v, 2) + "%"} /> : "—"} />
+            <Metric label="Net Credit"
+              value={hasLegs ? <AnimatedNumber value={stats?.credit} format={sgn} /> : "—"}
               tone={stats?.credit > 0 ? "up" : stats?.credit < 0 ? "down" : null} />
             <Metric label="Breakevens"
               value={hasLegs && stats?.bes?.length ? stats.bes.map(fi).join(" · ") : "—"}
@@ -202,12 +213,20 @@ export default function AnalysisPanel({
                       labelFormatter={(v) => `${symbol} ${fi(v)}`}
                       formatter={(v, n) => [sgn(v), n === "exp" ? "At expiry" : "At target date"]} />
                     <ReferenceLine y={0} stroke={K.faint} />
-                    <Area dataKey="pos" stroke="none" fill="url(#pGain)" isAnimationActive={false} />
-                    <Area dataKey="neg" stroke="none" fill="url(#pLoss)" isAnimationActive={false} />
+                    {/* Animated rather than isAnimationActive={false}: switching day/
+                        session used to redraw this curve in one instant jump. Recharts
+                        tweens point-for-point between the old and new arrays (same length,
+                        same x's), so this reads as the curve moving, not flickering. */}
+                    <Area dataKey="pos" stroke="none" fill="url(#pGain)"
+                      isAnimationActive animationDuration={550} animationEasing="ease-out" />
+                    <Area dataKey="neg" stroke="none" fill="url(#pLoss)"
+                      isAnimationActive animationDuration={550} animationEasing="ease-out" />
                     <Line dataKey="exp" stroke={K.gain} strokeWidth={2.6} dot={false}
-                      strokeLinecap="round" isAnimationActive={false} />
+                      strokeLinecap="round"
+                      isAnimationActive animationDuration={550} animationEasing="ease-out" />
                     <Line dataKey="tgt" stroke={K.accent} strokeWidth={2.2} strokeDasharray="7 5"
-                      dot={false} strokeLinecap="round" isAnimationActive={false} />
+                      dot={false} strokeLinecap="round"
+                      isAnimationActive animationDuration={550} animationEasing="ease-out" />
                     {/* One vertical line per leg used to be drawn here. A
                         four-leg condor turned that into eight lines on one
                         chart once the axis fix below made them actually
@@ -230,8 +249,9 @@ export default function AnalysisPanel({
                 </div>
                 {targetPnl != null && (
                   <div className={cx("target-chip n", targetPnl >= 0 ? "is-up" : "is-down")}>
-                    Target P&amp;L: {sgn(targetPnl)}
-                    {stats?.margin ? ` (${fm((targetPnl / stats.margin) * 100, 1)}%)` : ""}
+                    Target P&amp;L:{" "}
+                    <AnimatedNumber value={targetPnl}
+                      format={(v) => sgn(v) + (stats?.margin ? ` (${fm((v / stats.margin) * 100, 1)}%)` : "")} />
                   </div>
                 )}
               </motion.div>

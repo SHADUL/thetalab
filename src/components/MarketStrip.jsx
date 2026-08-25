@@ -1,5 +1,6 @@
 import { MagnifyingGlass, DownloadSimple } from "@phosphor-icons/react";
 import { fm, fi, cx } from "../lib/format";
+import AnimatedNumber from "./AnimatedNumber";
 
 const Delta = ({ pts, pct }) => {
   if (pts == null) return null;
@@ -11,10 +12,11 @@ const Delta = ({ pts, pct }) => {
   );
 };
 
-const Quote = ({ label, value, pts, pct, note }) => (
+const Quote = ({ label, value, pts, pct, note, strong }) => (
   <span className="flex items-baseline gap-1.5 whitespace-nowrap">
     <span className="text-[11.5px] text-muted">{label}:</span>
-    <span className="n text-[13px] font-medium text-ink">{value}</span>
+    <span className={cx("n text-[13px]",
+      strong ? "font-bold text-accent" : "font-medium text-ink")}>{value}</span>
     {note && <span className="text-[10.5px] text-muted">{note}</span>}
     <Delta pts={pts} pct={pct} />
   </span>
@@ -40,9 +42,12 @@ export default function MarketStrip({ ohlc, prevClose, spot, synthFut, expiry, o
   return (
     <div className="mktstrip">
       <div className="flex items-baseline gap-x-5 gap-y-1.5 flex-wrap min-w-0">
-        <Quote label="Day Open" value={fm(open, 1)} pts={gapPts} pct={gapPct} />
-        <Quote label="Spot" value={fm(spot, 1)} pts={movePts} pct={movePct} />
-        <Quote label="Synth Fut" value={synthFut != null ? fm(synthFut, 1) : "—"}
+        <Quote label="Day Open" value={<AnimatedNumber value={open} format={(v) => fm(v, 1)} />}
+          pts={gapPts} pct={gapPct} />
+        <Quote label="Spot" strong value={<AnimatedNumber value={spot} format={(v) => fm(v, 1)} />}
+          pts={movePts} pct={movePct} />
+        <Quote label="Synth Fut"
+          value={synthFut != null ? <AnimatedNumber value={synthFut} format={(v) => fm(v, 1)} /> : "—"}
           note={expShort ? `(${expShort})` : null} />
         {ohlc && (
           <span className="n text-[11px] text-muted whitespace-nowrap hidden xl:inline">

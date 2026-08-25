@@ -681,7 +681,7 @@ tr.is-atm-row .ch-cell { border-top: 1px solid color-mix(in srgb, var(--c-accent
   display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
   border-bottom: 1px solid var(--c-line); background: var(--c-surface-2);
 }
-.metric { padding: 9px 14px 10px; border-right: 1px solid var(--c-line); min-width: 0; }
+.metric { padding: 8px 14px 9px; border-right: 1px solid var(--c-line); min-width: 0; }
 .metric:last-child { border-right: 0; }
 .metric-k {
   font-family: var(--font-display); font-size: 10.5px; letter-spacing: .05em;
@@ -689,11 +689,13 @@ tr.is-atm-row .ch-cell { border-top: 1px solid color-mix(in srgb, var(--c-accent
   overflow: hidden; text-overflow: ellipsis;
 }
 /* The figure holds the row's rhythm, so it never wraps; the percentage that
-   qualifies it drops to its own line rather than truncating the number. This
-   is the first thing read off the payoff chart, so it carries real weight —
-   the "important number" scale, not a table cell's. */
-.metric-v { font-size: 20px; font-weight: 700; color: var(--c-text); margin-top: 3px;
-  letter-spacing: -.02em; white-space: nowrap; }
+   qualifies it drops to its own line rather than truncating the number.
+   Only P&L / Max Profit / Max Loss (.is-major) carry the "important number"
+   scale — the rest of the strip is context, not the headline, so it reads
+   at table-cell size instead of competing with the three that matter. */
+.metric-v { font-size: 15px; font-weight: 650; color: var(--c-text); margin-top: 3px;
+  letter-spacing: -.015em; white-space: nowrap; }
+.metric-v.is-major { font-size: 20px; font-weight: 700; letter-spacing: -.02em; }
 .metric-sub {
   display: flex; align-items: center; gap: 3px; font-size: 11px; font-weight: 600;
   opacity: .82; margin-top: 2px; letter-spacing: -.005em;

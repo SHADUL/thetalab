@@ -668,19 +668,21 @@ tr.is-atm-row .ch-cell { border-top: 1px solid color-mix(in srgb, var(--c-accent
 .tickbox { width: 12px; height: 12px; accent-color: var(--c-accent); cursor: pointer; }
 
 .metricrow {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
   border-bottom: 1px solid var(--c-line); background: var(--c-surface-2);
 }
-.metric { padding: 6px 10px; border-right: 1px solid var(--c-line); min-width: 0; }
+.metric { padding: 8px 12px; border-right: 1px solid var(--c-line); min-width: 0; }
 .metric:last-child { border-right: 0; }
 .metric-k { font-family: var(--font-display); font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase;
   color: var(--c-muted); font-weight: 600; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; }
 /* The figure holds the row's rhythm, so it never wraps; the percentage that
-   qualifies it drops to its own line rather than truncating the number. */
-.metric-v { font-size: 12.5px; font-weight: 600; color: var(--c-text); margin-top: 1px;
-  white-space: nowrap; }
-.metric-sub { display: block; font-size: 10px; opacity: .75; margin-top: -1px; }
+   qualifies it drops to its own line rather than truncating the number. This
+   is the first thing read off the payoff chart, so it carries real weight
+   rather than sitting at the same size as a table cell. */
+.metric-v { font-size: 17px; font-weight: 700; color: var(--c-text); margin-top: 2px;
+  letter-spacing: -.015em; white-space: nowrap; }
+.metric-sub { display: block; font-size: 11px; font-weight: 600; opacity: .8; margin-top: 1px; }
 
 /* Gain/loss colouring lives here rather than on a utility class. These elements
    set their own `color`, and a same-specificity utility declared earlier in the

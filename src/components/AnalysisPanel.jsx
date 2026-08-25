@@ -122,6 +122,7 @@ export default function AnalysisPanel({
           <div className="metricrow">
             <Metric label="Est. Margin" value={hasLegs ? inr(stats?.margin) : "—"} />
             <Metric label="P&L" value={hasLegs ? sgn(stats?.pnl) : "—"}
+              sub={hasLegs && stats?.margin ? pctOf(stats.pnl, stats.margin) : null}
               tone={stats?.pnl > 0 ? "up" : stats?.pnl < 0 ? "down" : null} />
             <Metric label="Max Profit"
               value={hasLegs ? (Number.isFinite(stats?.maxP) ? inr(stats.maxP) : "Unlimited") : "—"}

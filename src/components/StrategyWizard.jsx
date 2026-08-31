@@ -4,6 +4,7 @@ import { MagicWand, ArrowsHorizontal, TrendUp, TrendDown, CaretDown, Plus, Info 
 import { ivSurface, generate, rank, defaultBounds } from "../lib/strategies";
 import { GROUPS, readymadeFor, buildReadymade } from "../lib/readymade";
 import ReadymadeCard from "./ReadymadeCard";
+import QuantStrategyPanel from "./QuantStrategyPanel";
 import { inr, sgn, fm, fi, cx } from "../lib/format";
 
 const VIEWS = [
@@ -37,6 +38,7 @@ export default function StrategyWizard({ chain, strikes, spot, sigma, tYears, da
   const [open, setOpen] = useState(null);
   const [ran, setRan] = useState(false);
 
+  const today = dates[dayIdx] ?? null;
   const targetDate = dates[Math.min(targetIdx, dates.length - 1)];
   const targetT = useMemo(() => {
     if (!targetDate) return 0;
@@ -87,15 +89,17 @@ export default function StrategyWizard({ chain, strikes, spot, sigma, tYears, da
             <span className="lbl !text-accent">Strategy finder</span>
           </div>
           <h2 className="text-[16px] font-semibold tracking-[-0.02em] leading-tight">
-            {mode === "readymade" ? "Pick a ready-made strategy." : "Tell us your market view."}
+            {mode === "readymade" ? "Pick a ready-made strategy."
+              : mode === "quant" ? "Let the Greeks pick the strikes."
+              : "Tell us your market view."}
           </h2>
           <p className="text-[12.5px] text-ink2 mt-1 max-w-[52ch] leading-relaxed">
             Every structure is constructed and priced off this session's chain, with each leg's
             volatility solved from its own traded premium.
           </p>
         </div>
-        <div className="seg-track !max-w-[220px] shrink-0" role="tablist" aria-label="Finder mode">
-          {[["readymade", "Ready-made"], ["custom", "Custom"]].map(([id, label]) => (
+        <div className="seg-track !max-w-[320px] shrink-0" role="tablist" aria-label="Finder mode">
+          {[["readymade", "Ready-made"], ["quant", "Quant Engine"], ["custom", "Custom"]].map(([id, label]) => (
             <button key={id} role="tab" aria-selected={mode === id} data-on={mode === id}
               onClick={() => setMode(id)} className="seg">{label}</button>
           ))}
@@ -123,6 +127,11 @@ export default function StrategyWizard({ chain, strikes, spot, sigma, tYears, da
             })}
           </motion.div>
         </div>
+      )}
+
+      {mode === "quant" && (
+        <QuantStrategyPanel chain={chain} spot={spot} expiry={expiry} today={today}
+          lotQty={lotQty} step={step} symbol={symbol} onLoad={onLoad} />
       )}
 
       {mode === "custom" && (

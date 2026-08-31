@@ -175,6 +175,38 @@ function resolveForward(
   const parity = forwardFromParity(pairs, T, rate);
   if (parity) return { forward: parity.forward, source: 'parity', issues };
 
+  // EOD bhavcopy carries no bid/ask at all, only a settlement price — the
+  // block above never finds a usable pair on this kind of feed and every
+  // session would otherwise fall through to the much cruder spot-carry
+  // approximation below. Settlement prices still support parity; there is
+  // just no live spread to weight tightness by, so distance from spot is
+  // used instead — near-the-money settlement is the most reliably-traded
+  // and least stale. This is the same method the app's existing chain.js
+  // already uses (synthFuture) for exactly this data source.
+  if (chain.context.spot !== null && chain.context.spot > 0) {
+    const settlePairs: Array<{ strike: number; callMid: number; putMid: number; weight: number }> = [];
+    for (const [strike, c] of calls) {
+      const p = puts.get(strike);
+      if (!p) continue;
+      const cm = c.settle;
+      const pm = p.settle;
+      if (cm === null || pm === null || !(cm > 0) || !(pm > 0)) continue;
+      const dist = Math.abs(strike - chain.context.spot);
+      settlePairs.push({ strike, callMid: cm, putMid: pm, weight: 1 / (dist + 1) });
+    }
+    const settleParity = forwardFromParity(settlePairs, T, rate);
+    if (settleParity) {
+      issues.push({
+        code: 'FORWARD_FROM_SETTLEMENT_PARITY',
+        severity: 'info',
+        message:
+          'forward derived from settlement-price parity, not live bid/ask — normal for EOD ' +
+          'data, and still preferred over spot-carry, but less precise than a real quoted spread',
+      });
+      return { forward: settleParity.forward, source: 'parity', issues };
+    }
+  }
+
   if (chain.context.spot !== null && chain.context.spot > 0) {
     const carry = Math.exp((rate - chain.context.dividendYield) * T);
     issues.push({

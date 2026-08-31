@@ -197,6 +197,26 @@ test('spot-carry fallback is used and flagged when parity is impossible', () => 
   assert.ok(codes(enriched.issues).includes('NO_FORWARD_AVAILABLE'));
 });
 
+test('settlement-only feeds (EOD bhavcopy: no bid/ask) still resolve a parity forward', () => {
+  // No futures, no bid/ask anywhere — exactly what NSE/BSE bhavcopy gives us.
+  // Only a settlement price per contract, which is still enough for parity.
+  const payload = syntheticChain({ forward: 25137.4, strikes: STRIKES, smile: FLAT, futures: null, spot: 25000 });
+  for (const r of payload.rows) {
+    r.settle = r.last;
+    r.bid = null;
+    r.ask = null;
+    r.last = null;
+  }
+  const enriched = enrichChain(normalise(payload).chain);
+  const slice = enriched.slices[0];
+  assert.equal(slice.forwardSource, 'parity');
+  assert.ok(Math.abs(slice.forward - 25137.4) < 1, `got ${slice.forward}`);
+  assert.ok(codes(enriched.issues).includes('FORWARD_FROM_SETTLEMENT_PARITY'));
+  // And IV still solves off that forward, same as any other source.
+  const atm = slice.quotes.find((q) => q.quote.strike === 25150 && q.quote.right === 'CE');
+  assert.ok(atm && atm.iv !== null && Math.abs(atm.iv - 0.13) < 0.01);
+});
+
 test('crossed quotes are fatal and excluded from the usable set', () => {
   const payload = syntheticChain({ forward: 25000, strikes: STRIKES, smile: FLAT });
   const target = payload.rows.find((r) => r.strike === 25000 && r.right === 'CE')!;

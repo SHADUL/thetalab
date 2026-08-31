@@ -10,6 +10,7 @@
  * data in, a real Greek-selected trade out, onto the actual site — before
  * any of that gets built on top.
  */
+import { atmIvOf } from '../analytics/atmIv.ts';
 import { normCdf } from '../math/normal.ts';
 import { isUsable } from '../types.ts';
 import type { EnrichedQuote, EnrichedSlice, Greeks, Right } from '../types.ts';
@@ -184,13 +185,7 @@ export function buildIronCondor(
   // POP: model-implied probability the forward finishes between the
   // breakevens at expiry, using the true ATM IV (not the short legs' own —
   // those are already skewed away from the middle) as the vol assumption.
-  const atmCall = slice.atmStrike !== null
-    ? usable.find((q) => q.quote.strike === slice.atmStrike && q.quote.right === 'CE') : undefined;
-  const atmPut = slice.atmStrike !== null
-    ? usable.find((q) => q.quote.strike === slice.atmStrike && q.quote.right === 'PE') : undefined;
-  const atmIv =
-    atmCall?.iv != null && atmPut?.iv != null ? (atmCall.iv + atmPut.iv) / 2
-      : (atmCall?.iv ?? atmPut?.iv ?? null);
+  const atmIv = atmIvOf(slice);
 
   let pop: number | null = null;
   if (atmIv !== null && slice.timeToExpiry > 0) {

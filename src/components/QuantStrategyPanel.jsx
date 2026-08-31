@@ -1,9 +1,39 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { Lightning, Minus, Plus, Info } from "@phosphor-icons/react";
 import { buildEnrichedSlice, entryPriceOf } from "../lib/quantBridge";
 import { buildIronCondor, isIronCondorFailure } from "../quant/strategies/ironCondor.ts";
+import { atmIvOf } from "../quant/analytics/atmIv.ts";
+import { expectedMove } from "../quant/analytics/expectedMove.ts";
+import { computeSkew } from "../quant/analytics/skew.ts";
+import { ivRankAndPercentile } from "../quant/analytics/ivRank.ts";
 import { inr, sgn, fm, fi, cx } from "../lib/format";
+
+/* One fetch per symbol per page load, not per render — the history file is
+   ~100-140KB and never changes within a session. The cache itself lives
+   outside React state so a cache hit can be read straight from it during
+   render; the effect only fires (and only ever calls setState) for the one
+   real async event, an actual fetch completing. */
+const ivHistoryCache = new Map();
+function useIvHistory(symbol) {
+  const [, bump] = useState(0);
+  useEffect(() => {
+    if (ivHistoryCache.has(symbol)) return;
+    let cancelled = false;
+    fetch(`/atm_iv_${symbol.toLowerCase()}.json`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        ivHistoryCache.set(symbol, data?.points ?? null);
+        if (!cancelled) bump((n) => n + 1);
+      })
+      .catch(() => {
+        ivHistoryCache.set(symbol, null);
+        if (!cancelled) bump((n) => n + 1);
+      });
+    return () => { cancelled = true; };
+  }, [symbol]);
+  return ivHistoryCache.get(symbol) ?? null;
+}
 
 const Stepper = ({ value, onChange, step, min, max, fmtv, suffix }) => (
   <span className="stepper">
@@ -25,6 +55,8 @@ export default function QuantStrategyPanel({ chain, spot, expiry, today, lotQty,
   const [targetDelta, setTargetDelta] = useState(0.16);
   const [wingWidth, setWingWidth] = useState(step * 5);
 
+  const ivHistory = useIvHistory(symbol);
+
   const bridged = useMemo(
     () => buildEnrichedSlice({ chain, spot, expiry, today, lotQty, step, symbol }),
     [chain, spot, expiry, today, lotQty, step, symbol],
@@ -37,6 +69,14 @@ export default function QuantStrategyPanel({ chain, spot, expiry, today, lotQty,
       entryPriceOverride: entryPriceOf(chain, priceBasis),
     });
   }, [bridged, targetDelta, wingWidth, lotQty, chain, priceBasis]);
+
+  // Regime reads don't depend on whether a trade could be built — a NO TRADE
+  // session is exactly when knowing IV/skew/expected move matters most.
+  const atmIv = bridged?.slice ? atmIvOf(bridged.slice) : null;
+  const move = bridged?.slice && atmIv != null
+    ? expectedMove(bridged.slice.forward, atmIv, bridged.slice.timeToExpiry) : null;
+  const skew = bridged?.slice ? computeSkew(bridged.slice, atmIv) : null;
+  const rank = ivHistory && atmIv != null ? ivRankAndPercentile(ivHistory, atmIv) : null;
 
   if (!bridged?.slice) {
     return (
@@ -64,7 +104,7 @@ export default function QuantStrategyPanel({ chain, spot, expiry, today, lotQty,
         </Field>
         <Field label="ATM IV">
           <span className="n text-[13.5px] font-semibold">
-            {result && !failed && result.atmIv != null ? `${fm(result.atmIv * 100, 1)}%` : "—"}
+            {atmIv != null ? `${fm(atmIv * 100, 1)}%` : "—"}
           </span>
         </Field>
         <Field label="DTE">
@@ -83,6 +123,8 @@ export default function QuantStrategyPanel({ chain, spot, expiry, today, lotQty,
           </span>
         </div>
       </div>
+
+      <MarketRegime move={move} skew={skew} rank={rank} symbol={symbol} />
 
       {!result || failed ? (
         <div className="flex gap-2.5 px-4 py-3.5 rounded-[12px] border border-warn/30"
@@ -170,6 +212,57 @@ const Header = () => (
     </p>
   </div>
 );
+
+/**
+ * IV level and skew read as plain classifications, not just raw numbers —
+ * closer to how a desk actually talks about the environment. Thresholds are
+ * simple and stated here rather than buried: rank/percentile above 70 reads
+ * HIGH, below 30 reads LOW; risk reversal beyond ±0.015 (1.5 vol points)
+ * reads as a real skew rather than the ordinary put-heavy baseline every
+ * index option chain carries.
+ */
+const MarketRegime = ({ move, skew, rank, symbol }) => {
+  const ivLabel = rank == null ? null
+    : rank.percentile >= 70 ? "HIGH" : rank.percentile <= 30 ? "LOW" : "NORMAL";
+  const ivTone = ivLabel === "HIGH" ? "loss" : ivLabel === "LOW" ? "gain" : null;
+
+  const skewLabel = skew == null ? null
+    : skew.riskReversal < -0.015 ? "PUT-HEAVY" : skew.riskReversal > 0.015 ? "CALL-HEAVY" : "NORMAL";
+
+  return (
+    <div className="mb-4 rounded-[12px] border border-line overflow-hidden">
+      <div className="flex items-center justify-between px-3.5 pt-3 pb-2.5">
+        <span className="lbl !text-[10px]">Market Regime</span>
+        <div className="flex items-center gap-1.5">
+          {ivLabel && (
+            <span className={cx("lbl !text-[9px] px-1.5 py-0.5 rounded",
+              ivTone === "loss" ? "!text-loss bg-loss/8" : ivTone === "gain" ? "!text-gain bg-gain/8" : "bg-surface2")}>
+              IV {ivLabel}
+            </span>
+          )}
+          {skewLabel && (
+            <span className="lbl !text-[9px] px-1.5 py-0.5 rounded bg-surface2">SKEW {skewLabel}</span>
+          )}
+        </div>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 border-t border-line divide-x divide-line">
+        <Metric small label="Expected move (1σ)"
+          value={move ? `±${fi(move.points)} (${fm(move.pct * 100, 1)}%)` : "—"} />
+        <Metric small label="1σ range"
+          value={move ? `${fi(move.oneSigma.lower)}–${fi(move.oneSigma.upper)}` : "—"} />
+        <Metric small label={`IV rank / pctile${rank ? ` (${rank.windowDays}d)` : ""}`}
+          value={rank ? `${fm(rank.rank, 0)} / ${fm(rank.percentile, 0)}` : "—"} />
+        <Metric small label="Risk reversal (25Δ)"
+          value={skew ? `${skew.riskReversal >= 0 ? "+" : ""}${fm(skew.riskReversal * 100, 2)}%` : "—"} />
+      </div>
+      {!rank && (
+        <p className="text-[10.5px] text-faint px-3.5 py-2 border-t border-line">
+          IV rank/percentile needs {symbol} history — unavailable for this session or too little history to be meaningful.
+        </p>
+      )}
+    </div>
+  );
+};
 
 const Field = ({ label, children }) => (
   <span className="flex items-baseline gap-1.5">

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { Lightning, Minus, Plus, Info } from "@phosphor-icons/react";
 import { buildEnrichedSlice, entryPriceOf } from "../lib/quantBridge";
-import { buildIronCondor, isIronCondorFailure } from "../quant/strategies/ironCondor.ts";
+import { selectStrategy, isRegimeFailure } from "../quant/strategies/regimeSelect.ts";
 import { atmIvOf } from "../quant/analytics/atmIv.ts";
 import { expectedMove } from "../quant/analytics/expectedMove.ts";
 import { computeSkew } from "../quant/analytics/skew.ts";
@@ -62,14 +62,6 @@ export default function QuantStrategyPanel({ chain, spot, expiry, today, lotQty,
     [chain, spot, expiry, today, lotQty, step, symbol],
   );
 
-  const result = useMemo(() => {
-    if (!bridged?.slice) return null;
-    return buildIronCondor(bridged.slice, {
-      targetShortDelta: targetDelta, wingWidth, lotSize: Number(lotQty) || 1,
-      entryPriceOverride: entryPriceOf(chain, priceBasis),
-    });
-  }, [bridged, targetDelta, wingWidth, lotQty, chain, priceBasis]);
-
   // Regime reads don't depend on whether a trade could be built — a NO TRADE
   // session is exactly when knowing IV/skew/expected move matters most.
   const atmIv = bridged?.slice ? atmIvOf(bridged.slice) : null;
@@ -77,6 +69,18 @@ export default function QuantStrategyPanel({ chain, spot, expiry, today, lotQty,
     ? expectedMove(bridged.slice.forward, atmIv, bridged.slice.timeToExpiry) : null;
   const skew = bridged?.slice ? computeSkew(bridged.slice, atmIv) : null;
   const rank = ivHistory && atmIv != null ? ivRankAndPercentile(ivHistory, atmIv) : null;
+
+  // The skew reading decides the structure: a real call-side bid dispatches
+  // to a Bull Put Spread, a put-skew beyond the ordinary index baseline
+  // dispatches to a Bear Call Spread, and a flat reading falls back to the
+  // neutral Iron Condor — see regimeSelect.ts for the actual threshold.
+  const outcome = useMemo(() => {
+    if (!bridged?.slice) return null;
+    return selectStrategy(bridged.slice, skew, {
+      targetShortDelta: targetDelta, wingWidth, lotSize: Number(lotQty) || 1,
+      entryPriceOverride: entryPriceOf(chain, priceBasis),
+    });
+  }, [bridged, skew, targetDelta, wingWidth, lotQty, chain, priceBasis]);
 
   if (!bridged?.slice) {
     return (
@@ -90,11 +94,15 @@ export default function QuantStrategyPanel({ chain, spot, expiry, today, lotQty,
   }
 
   const { slice } = bridged;
-  const failed = result && isIronCondorFailure(result);
+  const failed = outcome && isRegimeFailure(outcome);
+  const result = outcome?.result;
+  const isCondor = outcome?.strategyLabel === "Iron Condor";
+  const breakevens = !failed && result
+    ? (isCondor ? result.breakevens : [result.breakeven]) : null;
 
   return (
     <div>
-      <Header />
+      <Header strategyLabel={outcome?.strategyLabel} />
 
       <div className="flex flex-wrap items-center gap-x-5 gap-y-2 mt-3 mb-4 px-3.5 py-3 rounded-[12px]"
         style={{ background: "var(--c-surface-2)" }}>
@@ -126,6 +134,17 @@ export default function QuantStrategyPanel({ chain, spot, expiry, today, lotQty,
 
       <MarketRegime move={move} skew={skew} rank={rank} symbol={symbol} />
 
+      {outcome && (
+        <div className="flex gap-2 px-3.5 py-2.5 mb-4 rounded-[12px]" style={{ background: "var(--c-surface-2)" }}>
+          <span className={cx("lbl !text-[9px] px-1.5 py-0.5 rounded shrink-0 h-fit",
+            outcome.bias === "bullish" ? "!text-gain bg-gain/8"
+              : outcome.bias === "bearish" ? "!text-loss bg-loss/8" : "bg-surface")}>
+            {outcome.bias.toUpperCase()}
+          </span>
+          <p className="text-[11.5px] text-ink2 leading-relaxed">{outcome.biasReason}</p>
+        </div>
+      )}
+
       {!result || failed ? (
         <div className="flex gap-2.5 px-4 py-3.5 rounded-[12px] border border-warn/30"
           style={{ background: "var(--c-warn-soft)" }}>
@@ -142,7 +161,7 @@ export default function QuantStrategyPanel({ chain, spot, expiry, today, lotQty,
           <div className="rounded-[12px] border border-line overflow-hidden">
             <div className="px-4 py-3 border-b border-line flex items-center justify-between"
               style={{ background: "var(--c-surface-2)" }}>
-              <span className="text-[13.5px] font-semibold">Iron Condor</span>
+              <span className="text-[13.5px] font-semibold">{outcome.strategyLabel}</span>
               <span className={cx("n text-[11px] font-semibold px-1.5 py-0.5 rounded",
                 result.netCredit >= 0 ? "text-loss bg-loss/8" : "text-gain bg-gain/8")}>
                 Credit {inr(result.netCredit * (Number(lotQty) || 1))}
@@ -167,7 +186,7 @@ export default function QuantStrategyPanel({ chain, spot, expiry, today, lotQty,
             <div className="grid grid-cols-2 sm:grid-cols-4 divide-x divide-line">
               <Metric label="Max Profit" value={inr(result.maxProfit)} tone="gain" />
               <Metric label="Max Loss" value={inr(-result.maxLoss)} tone="loss" />
-              <Metric label="Breakevens" value={`${fi(result.breakevens[0])} / ${fi(result.breakevens[1])}`} />
+              <Metric label="Breakevens" value={breakevens.map(fi).join(" / ")} />
               <Metric label="POP" value={result.pop != null ? `${fm(result.pop * 100, 1)}%` : "—"} />
             </div>
 
@@ -196,19 +215,20 @@ export default function QuantStrategyPanel({ chain, spot, expiry, today, lotQty,
   );
 }
 
-const Header = () => (
+const Header = ({ strategyLabel }) => (
   <div>
     <div className="flex items-center gap-2 mb-1.5">
       <Lightning size={14} weight="regular" className="text-accent" />
-      <span className="lbl !text-accent">Quant engine · Iron Condor</span>
+      <span className="lbl !text-accent">Quant engine{strategyLabel ? ` · ${strategyLabel}` : ""}</span>
     </div>
     <h2 className="text-[16px] font-semibold tracking-[-0.02em] leading-tight">
-      Short strikes chosen by delta, not by distance.
+      Strikes chosen by delta; the structure chosen by skew.
     </h2>
     <p className="text-[12.5px] text-ink2 mt-1 max-w-[60ch] leading-relaxed">
       Built on the Black-76 engine: every strike's IV is solved from its own settlement price, the
-      forward comes from put-call parity (not spot), and a strategy this session can't actually
-      support comes back as <b>NO TRADE</b> instead of a guess.
+      forward comes from put-call parity (not spot). A real call-side or put-side skew dispatches
+      to a Bull Put or Bear Call Spread; a flat reading falls back to a neutral Iron Condor. A
+      strategy this session can't actually support comes back as <b>NO TRADE</b> instead of a guess.
     </p>
   </div>
 );

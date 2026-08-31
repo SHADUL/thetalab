@@ -52,6 +52,23 @@ export interface IronCondorParams {
   /** Width of each wing, in strike points. */
   wingWidth: number;
   lotSize: number;
+  /**
+   * Strike/delta selection and every Greek always run on `slice`'s own
+   * pricing — settlement, in practice, because it is the one price NSE
+   * computes for every contract and keeps arbitrage-consistent across
+   * strikes. A session-open print is a single morning trade with no such
+   * guarantee: it can be missing, stale, or violate monotonicity between
+   * adjacent strikes outright, which corrupts parity/IV/Greeks for anyone
+   * who prices off it directly.
+   *
+   * This is where a DIFFERENT price — typically the app's own priceBasis,
+   * which is what the position's live P&L gets compared against on every
+   * later render — gets substituted in for the four selected strikes only,
+   * after selection, not before it. If any selected strike has no price
+   * under this override, the whole candidate is refused rather than mixing
+   * a settlement-priced leg with open-priced ones.
+   */
+  entryPriceOverride?: (strike: number, right: Right) => number | null;
 }
 
 function closestByAbsDelta(qs: EnrichedQuote[], target: number): EnrichedQuote {
@@ -104,8 +121,27 @@ export function buildIronCondor(
     return { reason: 'One or more legs has no usable mark price.' };
   }
 
-  const callCredit = shortCall.markPrice - longCall.markPrice;
-  const putCredit = shortPut.markPrice - longPut.markPrice;
+  let scPrice = shortCall.markPrice;
+  let lcPrice = longCall.markPrice;
+  let spPrice = shortPut.markPrice;
+  let lpPrice = longPut.markPrice;
+
+  if (params.entryPriceOverride) {
+    const oSc = params.entryPriceOverride(shortCall.quote.strike, 'CE');
+    const oLc = params.entryPriceOverride(longCall.quote.strike, 'CE');
+    const oSp = params.entryPriceOverride(shortPut.quote.strike, 'PE');
+    const oLp = params.entryPriceOverride(longPut.quote.strike, 'PE');
+    if (oSc === null || oLc === null || oSp === null || oLp === null) {
+      return {
+        reason: 'The strikes this delta target selects have no tradeable entry price under ' +
+          'the current price basis — try Close basis, a different delta, or a wider wing.',
+      };
+    }
+    scPrice = oSc; lcPrice = oLc; spPrice = oSp; lpPrice = oLp;
+  }
+
+  const callCredit = scPrice - lcPrice;
+  const putCredit = spPrice - lpPrice;
   const netCredit = callCredit + putCredit;
   if (netCredit <= 0) {
     return { reason: 'Net credit at these strikes is zero or negative — not worth selling.' };
@@ -115,18 +151,18 @@ export function buildIronCondor(
   const putWidth = shortPut.quote.strike - longPutStrike;
   const maxLossPerUnit = Math.max(callWidth - callCredit, putWidth - putCredit);
 
-  const legQuotes: Array<{ side: IronCondorLeg['side']; q: EnrichedQuote; dir: 1 | -1 }> = [
-    { side: 'SELL', q: shortPut, dir: -1 },
-    { side: 'BUY', q: longPut, dir: 1 },
-    { side: 'SELL', q: shortCall, dir: -1 },
-    { side: 'BUY', q: longCall, dir: 1 },
+  const legQuotes: Array<{ side: IronCondorLeg['side']; q: EnrichedQuote; dir: 1 | -1; price: number }> = [
+    { side: 'SELL', q: shortPut, dir: -1, price: spPrice },
+    { side: 'BUY', q: longPut, dir: 1, price: lpPrice },
+    { side: 'SELL', q: shortCall, dir: -1, price: scPrice },
+    { side: 'BUY', q: longCall, dir: 1, price: lcPrice },
   ];
 
-  const legs: IronCondorLeg[] = legQuotes.map(({ side, q }) => ({
+  const legs: IronCondorLeg[] = legQuotes.map(({ side, q, price }) => ({
     side,
     right: q.quote.right,
     strike: q.quote.strike,
-    price: q.markPrice as number,
+    price,
     iv: q.iv,
     delta: q.greeks.delta,
   }));

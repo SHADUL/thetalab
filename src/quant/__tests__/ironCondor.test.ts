@@ -108,6 +108,48 @@ test('refuses to build a condor when the requested wing has no usable quote', ()
   assert.match((result as { reason: string }).reason, /no usable quote/i);
 });
 
+test('entryPriceOverride swaps in a different tradeable price without touching strike/delta selection', () => {
+  const { chain } = normalise(bhavcopyLikeChain(0.13));
+  const slice = enrichChain(chain).slices[0];
+  const base = buildIronCondor(slice, { targetShortDelta: 0.16, wingWidth: 500, lotSize: 75 });
+  assert.ok(!isIronCondorFailure(base), (base as { reason: string }).reason);
+  if (isIronCondorFailure(base)) return;
+
+  // A distinct "entry price" per leg — scaled rather than shifted by a flat
+  // amount, since a flat offset cancels exactly across a symmetric condor's
+  // four legs (short/long on each side sum to zero net offset). Standing in
+  // for e.g. a session-open print that differs from the settlement price
+  // used to select strikes in the first place.
+  const overridden = buildIronCondor(slice, {
+    targetShortDelta: 0.16, wingWidth: 500, lotSize: 75,
+    entryPriceOverride: (strike, right) => {
+      const q = slice.quotes.find((x) => x.quote.strike === strike && x.quote.right === right);
+      return q?.markPrice != null ? q.markPrice * 1.1 : null;
+    },
+  });
+  assert.ok(!isIronCondorFailure(overridden), (overridden as { reason: string }).reason);
+  if (isIronCondorFailure(overridden)) return;
+
+  // Same strikes chosen either way — the override only swaps price, not selection.
+  assert.deepEqual(base.legs.map((l) => `${l.side}:${l.strike}:${l.right}`).sort(),
+    overridden.legs.map((l) => `${l.side}:${l.strike}:${l.right}`).sort());
+  // But the dollar figures must actually reflect the overridden price, not
+  // the settlement price used for selection.
+  for (const leg of overridden.legs) assert.ok(leg.price > 1);
+  assert.notEqual(overridden.netCredit, base.netCredit);
+});
+
+test('entryPriceOverride returning null for a selected strike is refused, not mixed with settlement price', () => {
+  const { chain } = normalise(bhavcopyLikeChain(0.13));
+  const slice = enrichChain(chain).slices[0];
+  const result = buildIronCondor(slice, {
+    targetShortDelta: 0.16, wingWidth: 500, lotSize: 75,
+    entryPriceOverride: () => null,
+  });
+  assert.ok(isIronCondorFailure(result));
+  assert.match((result as { reason: string }).reason, /no tradeable entry price/i);
+});
+
 test('a sparse chain with no OTM strikes on one side is refused, not guessed at', () => {
   const payload = bhavcopyLikeChain(0.13);
   payload.rows = payload.rows.filter((r) => !(r.right === 'PE' && (r.strike as number) < FORWARD));

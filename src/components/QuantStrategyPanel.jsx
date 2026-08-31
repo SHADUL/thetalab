@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { Lightning, Minus, Plus, Info } from "@phosphor-icons/react";
-import { buildEnrichedSlice } from "../lib/quantBridge";
+import { buildEnrichedSlice, entryPriceOf } from "../lib/quantBridge";
 import { buildIronCondor, isIronCondorFailure } from "../quant/strategies/ironCondor.ts";
 import { inr, sgn, fm, fi, cx } from "../lib/format";
 
@@ -26,14 +26,17 @@ export default function QuantStrategyPanel({ chain, spot, expiry, today, lotQty,
   const [wingWidth, setWingWidth] = useState(step * 5);
 
   const bridged = useMemo(
-    () => buildEnrichedSlice({ chain, spot, expiry, today, lotQty, step, symbol, priceBasis }),
-    [chain, spot, expiry, today, lotQty, step, symbol, priceBasis],
+    () => buildEnrichedSlice({ chain, spot, expiry, today, lotQty, step, symbol }),
+    [chain, spot, expiry, today, lotQty, step, symbol],
   );
 
   const result = useMemo(() => {
     if (!bridged?.slice) return null;
-    return buildIronCondor(bridged.slice, { targetShortDelta: targetDelta, wingWidth, lotSize: Number(lotQty) || 1 });
-  }, [bridged, targetDelta, wingWidth, lotQty]);
+    return buildIronCondor(bridged.slice, {
+      targetShortDelta: targetDelta, wingWidth, lotSize: Number(lotQty) || 1,
+      entryPriceOverride: entryPriceOf(chain, priceBasis),
+    });
+  }, [bridged, targetDelta, wingWidth, lotQty, chain, priceBasis]);
 
   if (!bridged?.slice) {
     return (

@@ -8,6 +8,16 @@
 import { normalise, enrichChain } from "../quant/index.ts";
 
 /**
+ * Always prices off settlement (`c`/`p`), regardless of the app's selected
+ * priceBasis. Settlement is the one price NSE computes for every contract
+ * and keeps arbitrage-consistent across strikes; a session-open print is a
+ * single morning trade with no such guarantee — it can be missing on
+ * illiquid strikes, or violate monotonicity between adjacent strikes
+ * outright (a put priced lower than the strike below it), which corrupts
+ * parity, IV and every Greek downstream for anyone who prices off it
+ * directly. Use `entryPriceOf` below to get the basis-appropriate price for
+ * whichever specific strikes end up selected.
+ *
  * @param {object} params
  * @param {Record<string, {c?:number, p?:number, co?:number, po?:number}>} params.chain
  * @param {number} params.spot
@@ -16,26 +26,16 @@ import { normalise, enrichChain } from "../quant/index.ts";
  * @param {number} params.lotQty
  * @param {number} params.step    strike step (50 for NIFTY, 100 for SENSEX)
  * @param {string} params.symbol
- * @param {"open"|"close"} params.priceBasis  must match the app's own selected
- *   basis (App.jsx's priceOf): a leg's entryPrice is read straight off this
- *   engine's output, and the app compares that entryPrice against priceOf()
- *   on every later render. Pricing off a different field than priceOf() uses
- *   makes a freshly-loaded position show P&L before a single day has passed.
  */
-export function buildEnrichedSlice({ chain, spot, expiry, today, lotQty, step, symbol, priceBasis = "open" }) {
+export function buildEnrichedSlice({ chain, spot, expiry, today, lotQty, step, symbol }) {
   if (!chain || !spot || !expiry || !today) return null;
-
-  const cField = priceBasis === "open" ? "c0" : "c";
-  const pField = priceBasis === "open" ? "p0" : "p";
 
   const rows = [];
   for (const [strikeStr, entry] of Object.entries(chain)) {
     const strike = Number(strikeStr);
     if (!entry) continue;
-    const c = entry[cField];
-    const p = entry[pField];
-    if (c != null) rows.push({ right: "CE", strike, settle: c, openInterest: entry.co ?? null });
-    if (p != null) rows.push({ right: "PE", strike, settle: p, openInterest: entry.po ?? null });
+    if (entry.c != null) rows.push({ right: "CE", strike, settle: entry.c, openInterest: entry.co ?? null });
+    if (entry.p != null) rows.push({ right: "PE", strike, settle: entry.p, openInterest: entry.po ?? null });
   }
   if (rows.length === 0) return null;
 
@@ -62,4 +62,26 @@ export function buildEnrichedSlice({ chain, spot, expiry, today, lotQty, step, s
   const { chain: normalised } = normalise(payload);
   const enriched = enrichChain(normalised);
   return { slice: enriched.slices[0] ?? null, chainIssues: enriched.issues };
+}
+
+/**
+ * The price the app's own priceOf() (App.jsx) would return for this exact
+ * strike right now — c0/p0 under "open" basis, c/p under "close". This is
+ * what a strategy's legs must be priced at when loaded, since it's what
+ * their live P&L gets compared against on every later render; it is
+ * deliberately NOT what buildEnrichedSlice uses for analysis (see above).
+ *
+ * @param {Record<string, {c?:number, p?:number}>} chain
+ * @param {"open"|"close"} priceBasis
+ * @returns {(strike: number, right: "CE"|"PE") => number | null}
+ */
+export function entryPriceOf(chain, priceBasis) {
+  const cField = priceBasis === "open" ? "c0" : "c";
+  const pField = priceBasis === "open" ? "p0" : "p";
+  return (strike, right) => {
+    const entry = chain?.[strike];
+    if (!entry) return null;
+    const v = right === "CE" ? entry[cField] : entry[pField];
+    return v == null ? null : v;
+  };
 }

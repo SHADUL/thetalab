@@ -653,7 +653,7 @@ export default function App() {
             wizard={
               <StrategyWizard chain={chain} strikes={ex.strikes} spot={spot} sigma={sigma}
                 tYears={tYears} dates={dates} dayIdx={dayIdx} expiry={expiry}
-                step={bundle.strike_step ?? 50} symbol={instrument}
+                step={bundle.strike_step ?? 50} symbol={instrument} priceBasis={priceBasis}
                 lotQty={lotQty} defaultLots={defaultLots} onLoad={loadStrategy} />
             } />
         </div>

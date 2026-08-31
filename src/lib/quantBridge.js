@@ -16,16 +16,26 @@ import { normalise, enrichChain } from "../quant/index.ts";
  * @param {number} params.lotQty
  * @param {number} params.step    strike step (50 for NIFTY, 100 for SENSEX)
  * @param {string} params.symbol
+ * @param {"open"|"close"} params.priceBasis  must match the app's own selected
+ *   basis (App.jsx's priceOf): a leg's entryPrice is read straight off this
+ *   engine's output, and the app compares that entryPrice against priceOf()
+ *   on every later render. Pricing off a different field than priceOf() uses
+ *   makes a freshly-loaded position show P&L before a single day has passed.
  */
-export function buildEnrichedSlice({ chain, spot, expiry, today, lotQty, step, symbol }) {
+export function buildEnrichedSlice({ chain, spot, expiry, today, lotQty, step, symbol, priceBasis = "open" }) {
   if (!chain || !spot || !expiry || !today) return null;
+
+  const cField = priceBasis === "open" ? "c0" : "c";
+  const pField = priceBasis === "open" ? "p0" : "p";
 
   const rows = [];
   for (const [strikeStr, entry] of Object.entries(chain)) {
     const strike = Number(strikeStr);
     if (!entry) continue;
-    if (entry.c != null) rows.push({ right: "CE", strike, settle: entry.c, openInterest: entry.co ?? null });
-    if (entry.p != null) rows.push({ right: "PE", strike, settle: entry.p, openInterest: entry.po ?? null });
+    const c = entry[cField];
+    const p = entry[pField];
+    if (c != null) rows.push({ right: "CE", strike, settle: c, openInterest: entry.co ?? null });
+    if (p != null) rows.push({ right: "PE", strike, settle: p, openInterest: entry.po ?? null });
   }
   if (rows.length === 0) return null;
 

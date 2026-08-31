@@ -20,13 +20,14 @@ const Stepper = ({ value, onChange, step, min, max, fmtv, suffix }) => (
  * that the wiring works before the rest of the strategy library, scoring
  * model or risk engine gets built on top of it.
  */
-export default function QuantStrategyPanel({ chain, spot, expiry, today, lotQty, step = 50, symbol = "NIFTY", onLoad }) {
+export default function QuantStrategyPanel({ chain, spot, expiry, today, lotQty, step = 50,
+  symbol = "NIFTY", priceBasis = "open", onLoad }) {
   const [targetDelta, setTargetDelta] = useState(0.16);
   const [wingWidth, setWingWidth] = useState(step * 5);
 
   const bridged = useMemo(
-    () => buildEnrichedSlice({ chain, spot, expiry, today, lotQty, step, symbol }),
-    [chain, spot, expiry, today, lotQty, step, symbol],
+    () => buildEnrichedSlice({ chain, spot, expiry, today, lotQty, step, symbol, priceBasis }),
+    [chain, spot, expiry, today, lotQty, step, symbol, priceBasis],
   );
 
   const result = useMemo(() => {

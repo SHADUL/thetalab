@@ -25,7 +25,7 @@ const tok = (n, f) => (typeof window === "undefined" ? f
   : getComputedStyle(document.documentElement).getPropertyValue(n).trim() || f);
 
 export default function StrategyWizard({ chain, strikes, spot, sigma, tYears, dates, dayIdx,
-  expiry, lotQty, defaultLots, step = 50, symbol = "NIFTY", onLoad }) {
+  expiry, lotQty, defaultLots, step = 50, symbol = "NIFTY", priceBasis = "open", onLoad }) {
   const [mode, setMode] = useState("readymade");
   const [group, setGroup] = useState("bullish");
   const init = defaultBounds(spot, sigma, step);
@@ -131,7 +131,7 @@ export default function StrategyWizard({ chain, strikes, spot, sigma, tYears, da
 
       {mode === "quant" && (
         <QuantStrategyPanel chain={chain} spot={spot} expiry={expiry} today={today}
-          lotQty={lotQty} step={step} symbol={symbol} onLoad={onLoad} />
+          lotQty={lotQty} step={step} symbol={symbol} priceBasis={priceBasis} onLoad={onLoad} />
       )}
 
       {mode === "custom" && (

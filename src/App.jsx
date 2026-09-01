@@ -725,7 +725,7 @@ export default function App() {
             dates={dates} dayIdx={dayIdx} mtm={mtm} oiRows={oiRows}
             straddleSeries={straddleSeries} maxPain={maxPain}
             collapsed={analysisHid} setCollapsed={setAnalysisHid} theme={theme}
-            symbol={instrument}
+            symbol={instrument} dailyOhlc={ex.ohlc} kiteConnected={kiteConnected}
             wizard={
               <StrategyWizard chain={chain} strikes={ex.strikes} spot={spot} sigma={sigma}
                 tYears={tYears} dates={dates} dayIdx={dayIdx} expiry={expiry} today={today}

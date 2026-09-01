@@ -14,10 +14,9 @@
  * index instrument identifiers below (NSE:NIFTY 50, BSE:SENSEX) are my best
  * understanding of Kite's convention, not confirmed against a real response.
  */
-import { kiteInstrument } from '../src/lib/kiteSymbol.js';
+import { kiteInstrument, INDEX_INSTRUMENT } from '../src/lib/kiteSymbol.js';
 
 const MAX_STRIKES = 200;
-const INDEX_INSTRUMENT = { NIFTY: 'NSE:NIFTY 50', SENSEX: 'BSE:SENSEX' };
 
 function parseCookies(header) {
   const out = {};
@@ -88,6 +87,7 @@ export default async function handler(req, res) {
     const data = body?.data ?? {};
 
     const spot = data[indexInstrument]?.last_price ?? null;
+    const spotInstrumentToken = data[indexInstrument]?.instrument_token ?? null;
     const chain = {};
     for (const [instrument, { strike, right }] of byInstrument) {
       const q = data[instrument];
@@ -98,7 +98,9 @@ export default async function handler(req, res) {
       else { chain[key].p = q.last_price; chain[key].p0 = q.last_price; chain[key].po = q.oi ?? 0; }
     }
 
-    res.status(200).json({ date: todayIST(), spot, chain, fetchedAt: new Date().toISOString() });
+    res.status(200).json({
+      date: todayIST(), spot, spotInstrumentToken, chain, fetchedAt: new Date().toISOString(),
+    });
   } catch {
     res.status(502).json({ error: 'network', message: 'Could not reach Kite.' });
   }

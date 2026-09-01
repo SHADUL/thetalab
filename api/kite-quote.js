@@ -68,6 +68,7 @@ export default async function handler(req, res) {
         volume: q.volume ?? null,
         oi: q.oi ?? null,
         timestamp: q.timestamp ?? null,
+        instrumentToken: q.instrument_token ?? null,
       };
     }
     res.status(200).json({ quotes, asOf: new Date().toISOString() });

@@ -11,6 +11,9 @@
  */
 const MONTH_CODE = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'O', 'N', 'D']; // Jan..Dec
 
+/** Also unverified — Kite's identifier for each index's own quote/candles. */
+export const INDEX_INSTRUMENT = { NIFTY: 'NSE:NIFTY 50', SENSEX: 'BSE:SENSEX' };
+
 export function kiteInstrument(symbol, expiryISO, strike, right, exchange = 'NFO') {
   const d = new Date(`${expiryISO}T00:00:00Z`);
   const yy = String(d.getUTCFullYear()).slice(-2);

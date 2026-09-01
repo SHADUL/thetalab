@@ -7,6 +7,7 @@ import { motion } from "framer-motion";
 import { CaretDoubleUp, CaretDoubleDown, Minus, Plus, ChartPolar } from "@phosphor-icons/react";
 import { inr, sgn, fm, fi, cnt, cx } from "../lib/format";
 import AnimatedNumber from "./AnimatedNumber";
+import IntradayChartPanel from "./IntradayChartPanel";
 
 /* Chart colours resolve from the same tokens as everything else, so a theme
    switch repaints the visualisation without a second palette. */
@@ -22,7 +23,7 @@ const C = () => ({
 });
 
 const TABS = [
-  ["payoff", "Payoff Chart"], ["mtm", "MTM"], ["strategy", "Strategy"],
+  ["payoff", "Payoff Chart"], ["chart", "Chart"], ["mtm", "MTM"], ["strategy", "Strategy"],
   ["oi", "OI"], ["straddle", "Rolling Straddle"],
 ];
 
@@ -81,7 +82,7 @@ export default function AnalysisPanel({
   targetSpot, setTargetSpot, ivShift, setIvShift, targetDate, setTargetDate,
   targetPnl, yDomain, xDomain, targetDates, targetIsExpiry, nearExpiry, mixedExpiries, symbol = "NIFTY",
   dates, dayIdx, mtm, oiRows, straddleSeries, maxPain,
-  wizard, collapsed, setCollapsed, theme,
+  wizard, collapsed, setCollapsed, theme, dailyOhlc, kiteConnected,
 }) {
   const [showSettings, setShowSettings] = useState(true);
   const K = C();
@@ -261,6 +262,11 @@ export default function AnalysisPanel({
                 any premium in the chain, or build one in the Strategy tab.
               </Empty>
             ))}
+
+            {tab === "chart" && (
+              <IntradayChartPanel symbol={symbol} dailyOhlc={dailyOhlc} dates={dates}
+                kiteConnected={kiteConnected} colors={K} />
+            )}
 
             {tab === "mtm" && (hasLegs ? (
               <div className="chart-wrap">

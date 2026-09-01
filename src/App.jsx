@@ -8,6 +8,7 @@ import {
   payoffDomain, pnlAt, breakevens,
 } from "./lib/chain";
 import { makeDemo } from "./lib/demo";
+import { fetchLiveChain, assumedKiteConnected, consumeKiteRedirectResult, kiteLoginUrl } from "./lib/kiteClient";
 import Landing from "./components/Landing";
 import TopBar from "./components/TopBar";
 import MarketStrip from "./components/MarketStrip";
@@ -27,6 +28,10 @@ const INSTRUMENTS = [
   { id: "NIFTY", file: "/chain_bundle.json" },
   { id: "SENSEX", file: "/sensex_bundle.json" },
 ];
+/* A stable empty-object reference for "no chain yet" — `?? {}` would create
+   a fresh object on every render instead, defeating every useMemo below
+   that depends on `chain` for reference equality. */
+const EMPTY_CHAIN = {};
 
 export default function App() {
   const [bundle, setBundle] = useState(null);
@@ -54,6 +59,19 @@ export default function App() {
      choosing it already knowing how the day went — near the money that gap runs
      to tens of percent of the premium. Open is the default for that reason. */
   const [priceBasis, setPriceBasis] = useState("open");
+  /* "Today (Live)" swaps the bundle's last EOD session for a Kite-fetched
+     snapshot of right now. liveSnapshot's shape mirrors a bundle day exactly
+     ({date, spot, chain}) so it can be substituted in below without any
+     downstream consumer needing to know which source it came from. */
+  const [liveMode, setLiveMode] = useState(false);
+  const [liveSnapshot, setLiveSnapshot] = useState(null);
+  const [liveLoading, setLiveLoading] = useState(false);
+  const [liveError, setLiveError] = useState(null);
+  const [kiteConnected, setKiteConnected] = useState(() => assumedKiteConnected());
+  useEffect(() => {
+    const r = consumeKiteRedirectResult();
+    if (r) setKiteConnected(r.connected);
+  }, []);
   const [tab, setTab] = useState("payoff");
   const [chainHid, setChainHid] = useState(false);
   /* Which of the three areas a phone is currently showing. Irrelevant above
@@ -208,13 +226,59 @@ export default function App() {
   /* ── session in view ───────────────────────────────────────────────── */
   const ex = bundle && expiry ? bundle.expiries[expiry] : null;
   const dates = useMemo(() => ex?.dates ?? [], [ex]);
-  const today = dates[dayIdx] ?? null;
-  const spot = today && ex ? ex.spot[today] : null;
-  const ohlc = today && ex?.ohlc ? ex.ohlc[today] : null;
-  const prevClose = dayIdx > 0 && ex ? ex.spot[dates[dayIdx - 1]] : null;
-  const chain = useMemo(() => (today && ex ? ex.chain[today] ?? {} : {}), [ex, today]);
+  const bundleToday = dates[dayIdx] ?? null;
+  const bundleSpot = bundleToday && ex ? ex.spot[bundleToday] : null;
+  const bundleChain = useMemo(
+    () => (bundleToday && ex ? ex.chain[bundleToday] ?? {} : {}), [ex, bundleToday]);
+
+  /* Live mode substitutes a Kite snapshot for the bundle date at exactly
+     this point — everything below (Greeks, strike window, payoff, the whole
+     rest of the app) reads `today`/`spot`/`chain` the same way regardless of
+     source. */
+  const today = liveMode ? (liveSnapshot?.date ?? null) : bundleToday;
+  const spot = liveMode ? (liveSnapshot?.spot ?? null) : bundleSpot;
+  const chain = liveMode ? (liveSnapshot?.chain ?? EMPTY_CHAIN) : bundleChain;
+
+  const ohlc = !liveMode && today && ex?.ohlc ? ex.ohlc[today] : null;
+  const prevClose = !liveMode && dayIdx > 0 && ex ? ex.spot[dates[dayIdx - 1]] : null;
   const prevChain = useMemo(
-    () => (dayIdx > 0 && ex ? ex.chain[dates[dayIdx - 1]] ?? null : null), [ex, dates, dayIdx]);
+    () => (!liveMode && dayIdx > 0 && ex ? ex.chain[dates[dayIdx - 1]] ?? null : null),
+    [ex, dates, dayIdx, liveMode]);
+
+  /* Turning live mode on, or changing expiry/instrument while it's already
+     on, triggers exactly this one fetch — toggleLive() itself only flips
+     the flag. Strike list and lot size are borrowed from the bundle's own
+     entry for this expiry (neither changes intraday), so only price/OI
+     actually needs to come from Kite. */
+  useEffect(() => {
+    if (!liveMode) return;
+    const currentEx = bundle?.expiries?.[expiry];
+    if (!currentEx) { setLiveMode(false); return; }
+    let cancelled = false;
+    setLiveLoading(true);
+    setLiveError(null);
+    fetchLiveChain(instrument, expiry, currentEx.strikes)
+      .then((data) => { if (!cancelled) setLiveSnapshot(data); })
+      .catch((e) => {
+        if (cancelled) return;
+        setLiveError(e.message);
+        setLiveMode(false);
+        setKiteConnected(assumedKiteConnected());
+      })
+      .finally(() => { if (!cancelled) setLiveLoading(false); });
+    return () => { cancelled = true; };
+  }, [liveMode, expiry, instrument, bundle]);
+
+  const toggleLive = () => {
+    if (liveMode) { setLiveMode(false); return; }
+    if (!kiteConnected) { window.location.href = kiteLoginUrl(); return; }
+    setLiveMode(true);
+  };
+  /* Live mode means "right now," which stepping through historical days or
+     switching instrument both contradict — either one exits it first. */
+  const setDayIdxAndExitLive = useCallback((i) => { setLiveMode(false); setDayIdx(i); }, []);
+  const onPickSymbolAndExitLive = useCallback((id) => { setLiveMode(false); setInstrument(id); }, []);
+
   /* The exchange states the market lot in the bhavcopy, so the bundle carries
      it; the date table is only a fallback for older bundles built without it. */
   const lotFor = useCallback(
@@ -259,9 +323,12 @@ export default function App() {
      where it happens to carry no quotes. */
   const liveExpiries = useMemo(() => {
     if (!bundle || !today) return expiry ? [expiry] : [];
+    // A live "today" is never a key in _byDate (it was never a bundle
+    // session) — the meaningful set there is just "not yet expired."
+    if (liveMode) return (bundle._usable ?? []).filter((e) => e >= today);
     const on = (bundle._byDate?.[today] ?? []).filter((e) => e >= today);
     return on.includes(expiry) ? on : [...on, expiry].filter(Boolean).sort();
-  }, [bundle, today, expiry]);
+  }, [bundle, today, expiry, liveMode]);
 
   const tags = useMemo(
     () => tagExpiries(bundle?._usable ?? [], today), [bundle, today]);
@@ -286,13 +353,21 @@ export default function App() {
   /* ── legs, marked to the session in view ───────────────────────────── */
   /* Any leg, any expiry, any session. */
   const priceOf = useCallback((expKey, date, strike, right) => {
+    /* A live pseudo-day is never in the bundle at all, so it needs its own
+       lookup — c/c0 (and p/p0) are the same live number by construction
+       (see kite-chain.js), so priceBasis is irrelevant here. */
+    if (liveMode && liveSnapshot && date === liveSnapshot.date && expKey === expiry) {
+      const r = liveSnapshot.chain[String(strike)];
+      if (!r) return null;
+      return right === "CE" ? (r.c ?? null) : (r.p ?? null);
+    }
     const r = bundle?.expiries?.[expKey]?.chain?.[date]?.[String(strike)];
     if (!r) return null;
     const k = right === "CE"
       ? (priceBasis === "open" ? "c0" : "c")
       : (priceBasis === "open" ? "p0" : "p");
     return r[k] ?? null;
-  }, [bundle, priceBasis]);
+  }, [bundle, priceBasis, liveMode, liveSnapshot, expiry]);
 
   /* Each expiry in the book prices off its own forward and its own tenor, so
      the context is built once per expiry rather than once per leg. */
@@ -605,10 +680,11 @@ export default function App() {
       <input ref={importRef} type="file" accept="application/json"
         onChange={onImportFile} className="hidden" />
 
-      <TopBar symbol={instrument} instruments={available} onPickSymbol={setInstrument}
+      <TopBar symbol={instrument} instruments={available} onPickSymbol={onPickSymbolAndExitLive}
         switching={switching} dates={dates} dayIdx={dayIdx}
-        setDayIdx={setDayIdx} expirySet={expirySet} autoRun={autoRun} setAutoRun={setAutoRun}
-        theme={theme} toggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))} />
+        setDayIdx={setDayIdxAndExitLive} expirySet={expirySet} autoRun={autoRun} setAutoRun={setAutoRun}
+        theme={theme} toggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+        live={liveMode} liveLoading={liveLoading} liveError={liveError} onToggleLive={toggleLive} />
 
       <MarketStrip ohlc={ohlc} prevClose={prevClose} spot={spot} synthFut={synthFut}
         expiry={expiry}

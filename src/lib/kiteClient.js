@@ -39,7 +39,7 @@ export function assumedKiteConnected() {
   return Number.isFinite(at) && Date.now() - at < ASSUMED_VALID_MS;
 }
 
-function forgetKiteConnection() {
+export function forgetKiteConnection() {
   localStorage.removeItem(CONNECTED_AT_KEY);
 }
 
@@ -54,6 +54,24 @@ export async function fetchLiveQuotes(instruments) {
   if (!resp.ok) {
     if (body?.error === 'not_connected' || body?.error === 'token_expired') forgetKiteConnection();
     throw new Error(body?.message || `Live quote request failed (${resp.status})`);
+  }
+  return body;
+}
+
+/**
+ * The full-chain fetch behind "Today (Live)".
+ * @param {string} symbol   "NIFTY" | "SENSEX"
+ * @param {string} expiry   "YYYY-MM-DD"
+ * @param {number[]} strikes
+ * @returns {Promise<{date: string, spot: number|null, chain: object, fetchedAt: string}>}
+ */
+export async function fetchLiveChain(symbol, expiry, strikes) {
+  const qs = new URLSearchParams({ symbol, expiry, strikes: strikes.join(',') });
+  const resp = await fetch(`/api/kite-chain?${qs}`);
+  const body = await resp.json();
+  if (!resp.ok) {
+    if (body?.error === 'not_connected' || body?.error === 'token_expired') forgetKiteConnection();
+    throw new Error(body?.message || `Live chain request failed (${resp.status})`);
   }
   return body;
 }

@@ -684,7 +684,8 @@ export default function App() {
         switching={switching} dates={dates} dayIdx={dayIdx}
         setDayIdx={setDayIdxAndExitLive} expirySet={expirySet} autoRun={autoRun} setAutoRun={setAutoRun}
         theme={theme} toggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
-        live={liveMode} liveLoading={liveLoading} liveError={liveError} onToggleLive={toggleLive} />
+        live={liveMode} liveDate={liveSnapshot?.date ?? null}
+        liveLoading={liveLoading} liveError={liveError} onToggleLive={toggleLive} />
 
       <MarketStrip ohlc={ohlc} prevClose={prevClose} spot={spot} synthFut={synthFut}
         expiry={expiry}

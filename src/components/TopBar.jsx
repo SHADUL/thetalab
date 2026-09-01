@@ -16,7 +16,7 @@ import DatePicker from "./DatePicker";
 export default function TopBar({
   symbol, instruments = [], onPickSymbol, switching,
   dates, dayIdx, setDayIdx, expirySet, autoRun, setAutoRun, theme, toggleTheme,
-  live, liveLoading, liveError, onToggleLive,
+  live, liveDate, liveLoading, liveError, onToggleLive,
 }) {
   const last = dates.length - 1;
   const cur = dates[dayIdx];
@@ -58,8 +58,8 @@ export default function TopBar({
           <CaretDoubleLeft size={11} weight="bold" />Day
         </Step>
 
-        <DatePicker value={live ? null : cur} dates={dates} expirySet={expirySet}
-          onPick={(d) => setDayIdx(dates.indexOf(d))} />
+        <DatePicker value={live ? null : cur} focusDate={live ? liveDate : null}
+          dates={dates} expirySet={expirySet} onPick={(d) => setDayIdx(dates.indexOf(d))} />
 
         <Step onClick={() => setDayIdx(Math.min(last, dayIdx + 1))} disabled={live || dayIdx >= last}
           title="Next session">

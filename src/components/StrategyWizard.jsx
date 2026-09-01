@@ -25,7 +25,7 @@ const tok = (n, f) => (typeof window === "undefined" ? f
   : getComputedStyle(document.documentElement).getPropertyValue(n).trim() || f);
 
 export default function StrategyWizard({ chain, strikes, spot, sigma, tYears, dates, dayIdx,
-  expiry, lotQty, defaultLots, step = 50, symbol = "NIFTY", priceBasis = "open", onLoad }) {
+  expiry, today, lotQty, defaultLots, step = 50, symbol = "NIFTY", priceBasis = "open", onLoad }) {
   const [mode, setMode] = useState("readymade");
   const [group, setGroup] = useState("bullish");
   const init = defaultBounds(spot, sigma, step);
@@ -38,7 +38,11 @@ export default function StrategyWizard({ chain, strikes, spot, sigma, tYears, da
   const [open, setOpen] = useState(null);
   const [ran, setRan] = useState(false);
 
-  const today = dates[dayIdx] ?? null;
+  /* `today` comes from App.jsx rather than being derived from dates/dayIdx
+     here — the app's own value already accounts for "Today (Live)" mode
+     (a Kite-fetched session that is never one of `dates`), and computing a
+     second, local version from dates[dayIdx] would silently read the stale
+     bundle date instead whenever live mode is on. */
   const targetDate = dates[Math.min(targetIdx, dates.length - 1)];
   const targetT = useMemo(() => {
     if (!targetDate) return 0;

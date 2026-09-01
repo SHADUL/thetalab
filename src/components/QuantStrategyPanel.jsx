@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { Lightning, Minus, Plus, Info } from "@phosphor-icons/react";
+import { Lightning, Minus, Plus, Info, Plugs, ArrowsClockwise } from "@phosphor-icons/react";
 import { buildEnrichedSlice, entryPriceOf } from "../lib/quantBridge";
 import { selectStrategy, isRegimeFailure } from "../quant/strategies/regimeSelect.ts";
 import { atmIvOf } from "../quant/analytics/atmIv.ts";
 import { expectedMove } from "../quant/analytics/expectedMove.ts";
 import { computeSkew } from "../quant/analytics/skew.ts";
 import { ivRankAndPercentile } from "../quant/analytics/ivRank.ts";
-import { inr, sgn, fm, fi, cx } from "../lib/format";
+import { kiteLoginUrl, consumeKiteRedirectResult, assumedKiteConnected, fetchLiveQuotes } from "../lib/kiteClient";
+import { kiteInstrument } from "../lib/kiteSymbol";
+import { inr, sgn, fm, fi, cnt, cx } from "../lib/format";
 
 /* One fetch per symbol per page load, not per render — the history file is
    ~100-140KB and never changes within a session. The cache itself lives
@@ -57,6 +59,13 @@ export default function QuantStrategyPanel({ chain, spot, expiry, today, lotQty,
 
   const ivHistory = useIvHistory(symbol);
 
+  const [kiteConnected, setKiteConnected] = useState(() => assumedKiteConnected());
+  const [live, setLive] = useState({ quotes: null, asOf: null, error: null, loading: false });
+  useEffect(() => {
+    const r = consumeKiteRedirectResult();
+    if (r) setKiteConnected(r.connected);
+  }, []);
+
   const bridged = useMemo(
     () => buildEnrichedSlice({ chain, spot, expiry, today, lotQty, step, symbol }),
     [chain, spot, expiry, today, lotQty, step, symbol],
@@ -99,6 +108,19 @@ export default function QuantStrategyPanel({ chain, spot, expiry, today, lotQty,
   const isCondor = outcome?.strategyLabel === "Iron Condor";
   const breakevens = !failed && result
     ? (isCondor ? result.breakevens : [result.breakeven]) : null;
+
+  async function refreshLive() {
+    if (!result || failed) return;
+    setLive((s) => ({ ...s, loading: true, error: null }));
+    try {
+      const instruments = result.legs.map((l) => kiteInstrument(symbol, expiry, l.strike, l.right));
+      const { quotes, asOf } = await fetchLiveQuotes(instruments);
+      setLive({ quotes, asOf, error: null, loading: false });
+    } catch (e) {
+      setKiteConnected(assumedKiteConnected());
+      setLive((s) => ({ ...s, loading: false, error: e.message }));
+    }
+  }
 
   return (
     <div>
@@ -159,28 +181,61 @@ export default function QuantStrategyPanel({ chain, spot, expiry, today, lotQty,
       ) : (
         <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.25 }}>
           <div className="rounded-[12px] border border-line overflow-hidden">
-            <div className="px-4 py-3 border-b border-line flex items-center justify-between"
+            <div className="px-4 py-3 border-b border-line flex items-center justify-between gap-3"
               style={{ background: "var(--c-surface-2)" }}>
               <span className="text-[13.5px] font-semibold">{outcome.strategyLabel}</span>
-              <span className={cx("n text-[11px] font-semibold px-1.5 py-0.5 rounded",
-                result.netCredit >= 0 ? "text-loss bg-loss/8" : "text-gain bg-gain/8")}>
-                Credit {inr(result.netCredit * (Number(lotQty) || 1))}
-              </span>
+              <div className="flex items-center gap-2">
+                {kiteConnected ? (
+                  <button onClick={refreshLive} disabled={live.loading}
+                    className="n flex items-center gap-1.5 text-[11px] font-medium text-accent disabled:opacity-50">
+                    <ArrowsClockwise size={12} weight="bold" className={live.loading ? "animate-spin" : ""} />
+                    {live.loading ? "Fetching…" : "Refresh live quote"}
+                  </button>
+                ) : (
+                  <a href={kiteLoginUrl()}
+                    className="n flex items-center gap-1.5 text-[11px] font-medium text-accent">
+                    <Plugs size={12} weight="bold" />Connect Kite
+                  </a>
+                )}
+                <span className={cx("n text-[11px] font-semibold px-1.5 py-0.5 rounded",
+                  result.netCredit >= 0 ? "text-loss bg-loss/8" : "text-gain bg-gain/8")}>
+                  Credit {inr(result.netCredit * (Number(lotQty) || 1))}
+                </span>
+              </div>
             </div>
 
+            {live.error && (
+              <div className="px-4 py-2 border-b border-line text-[11px] text-warn">{live.error}</div>
+            )}
+            {live.quotes && !live.error && (
+              <div className="px-4 py-1.5 border-b border-line text-[10px] text-faint">
+                Live as of {new Date(live.asOf).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+              </div>
+            )}
+
             <div className="px-4 py-3 space-y-1 border-b border-line">
-              {result.legs.map((l, i) => (
+              {result.legs.map((l, i) => {
+                const key = kiteInstrument(symbol, expiry, l.strike, l.right);
+                const lq = live.quotes?.[key];
+                return (
                 <div key={i} className="n text-[12.5px] flex items-center gap-2.5">
                   <span className={cx("font-semibold w-10", l.side === "SELL" ? "text-loss" : "text-gain")}>
                     {l.side}
                   </span>
                   <span className="w-20">{l.strike} {l.right}</span>
                   <span className="text-muted">@ {fm(l.price)}</span>
+                  {lq && (
+                    <span className="text-accent font-semibold">
+                      live {lq.lastPrice != null ? fm(lq.lastPrice) : "—"}
+                      {lq.oi != null && <span className="text-faint font-normal"> · OI {cnt(lq.oi)}</span>}
+                    </span>
+                  )}
                   <span className="text-faint ml-auto">
                     Δ {l.delta != null ? fm(l.delta, 2) : "—"} · IV {l.iv != null ? fm(l.iv * 100, 1) + "%" : "—"}
                   </span>
                 </div>
-              ))}
+                );
+              })}
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-4 divide-x divide-line">

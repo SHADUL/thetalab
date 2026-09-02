@@ -19,6 +19,7 @@ import MarketStrip from "./components/MarketStrip";
 import ChainPanel from "./components/ChainPanel";
 import AnalysisPanel from "./components/AnalysisPanel";
 import PositionsPanel from "./components/PositionsPanel";
+import Portfolio from "./components/Portfolio";
 import StrategyWizard from "./components/StrategyWizard";
 import MobileTabs from "./components/MobileTabs";
 
@@ -222,7 +223,18 @@ export default function App() {
       if (merged.length) setLegs(merged);
     } catch { /* unreadable store — start empty rather than fail to load */ }
   }, []);
+  /* The save effect below fires in the same pass as the load effect above,
+     before that load's setLegs has actually committed to a new render — its
+     closure still sees the initial `legs=[]`, and would overwrite whatever
+     was just read from storage with an empty book. Skipping the very first
+     firing lets the load's own state update be the thing that triggers the
+     next (correctly-populated) save instead. This matters here specifically
+     because live positions are now meant to survive being closed and
+     reopened the next day — losing the book on load would silently defeat
+     that. */
+  const skippedFirstSave = useRef(false);
   useEffect(() => {
+    if (!skippedFirstSave.current) { skippedFirstSave.current = true; return; }
     try { localStorage.setItem(STORE, JSON.stringify(legs)); }
     catch { /* private mode — not worth interrupting for */ }
   }, [legs]);
@@ -233,6 +245,10 @@ export default function App() {
      one stored list, each leg stamped with the symbol it was opened on. */
   const book = useMemo(
     () => legs.filter((l) => (l.symbol ?? "NIFTY") === instrument), [legs, instrument]);
+
+  const [portfolioOpen, setPortfolioOpen] = useState(false);
+  const liveLegCount = useMemo(
+    () => book.filter((l) => l.source === "live" && !l.closedDate).length, [book]);
 
   /* ── session in view ───────────────────────────────────────────────── */
   const ex = bundle && expiry ? bundle.expiries[expiry] : null;
@@ -682,6 +698,9 @@ export default function App() {
       id: Date.now() + Math.random(), symbol: instrument, side, right, strike, expiry,
       lots: Number(defaultLots) || 1, entryDate: today, entryPrice: p,
       closedDate: null, closePrice: null, off: false,
+      /* Opened on a real Kite quote, not a bundle session — Portfolio uses
+         this to find positions worth re-pricing live on every visit. */
+      source: liveMode ? "live" : "sim",
     }]);
   };
   const setLots = (id, n) => setLegs((L) => L.map((l) =>
@@ -714,6 +733,7 @@ export default function App() {
         strike: l.strike, expiry,
         lots: l.lots, entryDate: today, entryPrice: l.price,
         closedDate: null, closePrice: null, off: false,
+        source: liveMode ? "live" : "sim",
       })),
     ]);
     setTab("payoff");
@@ -777,7 +797,13 @@ export default function App() {
         live={liveMode}
         liveLoading={liveLoading} liveError={liveError} onToggleLive={toggleLive}
         minuteIdx={minuteIdx} setMinuteIdx={setMinuteIdx} minuteSeries={minuteSeries}
-        minuteLoading={minuteLoading} minuteError={minuteError} />
+        minuteLoading={minuteLoading} minuteError={minuteError}
+        liveLegCount={liveLegCount} onOpenPortfolio={() => setPortfolioOpen(true)} />
+
+      {portfolioOpen && (
+        <Portfolio legs={book} symbol={instrument} lotFor={lotFor} kiteConnected={kiteConnected}
+          onClose={() => setPortfolioOpen(false)} />
+      )}
 
       <MarketStrip ohlc={ohlc} prevClose={prevClose} spot={spot} synthFut={synthFut}
         expiry={expiry}

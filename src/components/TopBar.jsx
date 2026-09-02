@@ -58,6 +58,7 @@ export default function TopBar({
   dates, dayIdx, setDayIdx, expirySet, autoRun, setAutoRun, theme, toggleTheme,
   live, liveLoading, liveError, onToggleLive,
   minuteIdx, setMinuteIdx, minuteSeries, minuteLoading, minuteError,
+  liveLegCount, onOpenPortfolio,
 }) {
   const last = dates.length - 1;
   const cur = dates[dayIdx];
@@ -138,6 +139,20 @@ export default function TopBar({
               </span>
             )}
           </span>
+        )}
+
+        {onOpenPortfolio && (
+          <button onClick={onOpenPortfolio} className="topstep relative"
+            title="Positions opened live, tracked with a fresh quote every visit">
+            Portfolio
+            {liveLegCount > 0 && (
+              <span className="absolute -top-1.5 -right-1.5 flex items-center justify-center
+                min-w-[15px] h-[15px] px-[3px] rounded-full text-[9.5px] font-bold text-white"
+                style={{ background: "var(--c-accent)" }}>
+                {liveLegCount}
+              </span>
+            )}
+          </button>
         )}
       </div>
 

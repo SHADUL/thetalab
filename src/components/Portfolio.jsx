@@ -1,9 +1,13 @@
 import { useState, useEffect, useCallback } from "react";
 import { Broadcast, ArrowClockwise, X, Info, SignOut, Minus, Plus, Check,
-         CaretDown, CaretUp } from "@phosphor-icons/react";
+         CaretDown, CaretUp, Bell, ChartLine, ListBullets } from "@phosphor-icons/react";
 import { fetchLiveQuotes, kiteLoginUrl } from "../lib/kiteClient";
-import { kiteInstrument } from "../lib/kiteSymbol";
-import { cx, sgn, fm } from "../lib/format";
+import { kiteInstrument, INDEX_INSTRUMENT } from "../lib/kiteSymbol";
+import { impliedVol, greeks } from "../lib/options";
+import { cx, sgn, fm, inr } from "../lib/format";
+import { readPnlHistory, recordPnl } from "../lib/pnlHistory";
+
+const IST_DATE = (iso) => new Date(iso).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
 
 /**
  * Every position explicitly added via the "Add to Portfolio" picker in
@@ -24,45 +28,83 @@ import { cx, sgn, fm } from "../lib/format";
  * Exiting here is booking, not trading — it marks the slice closed in this
  * app's own tracking at the live price already on screen, the same
  * non-executing pattern Positions' own Exit already uses. Nothing here
- * ever places a real order against Kite.
+ * ever places a real order against Kite. SL/target alerts are the same
+ * spirit: a notification, not an order — App.jsx's own polling effect (not
+ * this component, so it keeps running while Portfolio is closed) is what
+ * actually watches for a crossing.
  */
-export default function Portfolio({ legs, symbol, lotFor, kiteConnected, onPartialExit, onClose }) {
+export default function Portfolio({
+  legs, symbol, lotFor, kiteConnected, onPartialExit, onSetAlert, onClose,
+}) {
   const exchange = symbol === "SENSEX" ? "BFO" : "NFO";
+  const indexInstrument = INDEX_INSTRUMENT[symbol];
   const open = legs.filter((l) => l.source === "live" && !l.closedDate);
   const closed = legs.filter((l) => l.source === "live" && l.closedDate);
   const openIds = open.map((l) => l.id).join(",");
 
+  const [view, setView] = useState("positions");
   const [quotes, setQuotes] = useState({});
+  const [spot, setSpot] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [asOf, setAsOf] = useState(null);
   const [exitingId, setExitingId] = useState(null);
   const [exitQty, setExitQty] = useState(1);
   const [closedShown, setClosedShown] = useState(false);
+  const [alertingId, setAlertingId] = useState(null);
+  const [alertSl, setAlertSl] = useState("");
+  const [alertTarget, setAlertTarget] = useState("");
+  const [notifPerm, setNotifPerm] = useState(
+    typeof Notification !== "undefined" ? Notification.permission : "unsupported");
 
   const refresh = useCallback(() => {
     if (!kiteConnected || open.length === 0) return;
     setLoading(true);
     setError(null);
     const instruments = open.map((l) => kiteInstrument(symbol, l.expiry, l.strike, l.right, exchange));
+    if (indexInstrument) instruments.push(indexInstrument);
     fetchLiveQuotes(instruments)
-      .then((r) => { setQuotes(r.quotes); setAsOf(r.asOf); })
+      .then((r) => {
+        setQuotes(r.quotes);
+        setAsOf(r.asOf);
+        if (indexInstrument) setSpot(r.quotes[indexInstrument]?.lastPrice ?? null);
+      })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kiteConnected, openIds, symbol, exchange]);
+  }, [kiteConnected, openIds, symbol, exchange, indexInstrument]);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  const todayIST = asOf ? IST_DATE(asOf) : null;
 
   const rows = open.map((l) => {
     const key = kiteInstrument(symbol, l.expiry, l.strike, l.right, exchange);
     const ltp = quotes[key]?.lastPrice ?? null;
     const qty = l.lots * lotFor(l.expiry, l.entryDate);
+    const dir = l.side === "SELL" ? -1 : 1;
     const pnl = ltp == null ? null : (l.side === "SELL" ? l.entryPrice - ltp : ltp - l.entryPrice) * qty;
-    return { ...l, ltp, pnl };
+
+    /* Spot stands in for the forward here — Portfolio only ever fetches the
+       one leg's own quote plus the index, not a whole chain, so there's no
+       put-call parity available to solve a proper forward from. Close
+       enough for a Greeks readout; the Quant Engine elsewhere in the app
+       still does this properly off a full chain. */
+    const isCall = l.right === "CE";
+    const T = todayIST ? Math.max((new Date(l.expiry) - new Date(todayIST)) / 86400000, 0) / 365 : 0;
+    const iv = ltp != null && spot != null && T > 0 ? impliedVol(ltp, spot, l.strike, T, isCall) : null;
+    const g = iv ? greeks(spot, l.strike, T, iv, isCall) : null;
+
+    return { ...l, ltp, pnl, dir, qty, g };
   });
   const unrealized = rows.some((r) => r.pnl != null)
     ? rows.reduce((s, r) => s + (r.pnl ?? 0), 0) : null;
+  const totalGreeks = rows.reduce((t, r) => {
+    if (!r.g) return t;
+    t.delta += r.dir * r.g.delta * r.qty; t.theta += r.dir * r.g.theta * r.qty;
+    t.vega += r.dir * r.g.vega * r.qty;
+    return t;
+  }, { delta: 0, theta: 0, vega: 0 });
 
   const closedRows = closed.map((l) => {
     const qty = l.lots * lotFor(l.expiry, l.entryDate);
@@ -72,19 +114,38 @@ export default function Portfolio({ legs, symbol, lotFor, kiteConnected, onParti
   const realized = closedRows.reduce((s, r) => s + r.pnl, 0);
   const combined = (unrealized ?? 0) + realized;
 
+  /* One point a day, keyed off whatever's actually been seen — a passive
+     record of "how am I doing," not a fetch of its own. */
+  useEffect(() => {
+    if (!todayIST || unrealized == null) return;
+    recordPnl(symbol, todayIST, combined);
+  }, [todayIST, combined, symbol, unrealized]);
+  /* Not memoized — a cheap localStorage read, and it needs to be fresh
+     the moment the effect above just wrote a new point for today. */
+  const history = readPnlHistory(symbol);
+
   const startExit = (l) => { setExitingId(l.id); setExitQty(l.lots); };
   const confirmExit = (l, ltp) => {
-    const closeDate = asOf
-      ? new Date(asOf).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" })
-      : new Date().toISOString().slice(0, 10);
-    onPartialExit(l.id, exitQty, ltp, closeDate);
+    onPartialExit(l.id, exitQty, ltp, todayIST ?? new Date().toISOString().slice(0, 10));
     setExitingId(null);
+  };
+
+  const startAlert = (l) => {
+    setAlertingId(l.id); setAlertSl(l.sl ?? ""); setAlertTarget(l.target ?? "");
+    if (notifPerm === "default") Notification.requestPermission().then(setNotifPerm);
+  };
+  const saveAlert = (l) => {
+    onSetAlert(l.id, {
+      sl: alertSl === "" ? null : Number(alertSl),
+      target: alertTarget === "" ? null : Number(alertTarget),
+    });
+    setAlertingId(null);
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4"
       style={{ background: "rgba(0,0,0,0.45)" }} onClick={onClose}>
-      <div className="n mt-12 w-full max-w-2xl rounded-2xl p-5"
+      <div className="n mt-12 w-full max-w-3xl rounded-2xl p-5"
         style={{ background: "var(--c-surface)", border: "1px solid var(--c-line)" }}
         onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
@@ -94,6 +155,12 @@ export default function Portfolio({ legs, symbol, lotFor, kiteConnected, onParti
             <span className="text-[11px] text-muted">{symbol} · positions opened live</span>
           </div>
           <div className="flex items-center gap-1.5">
+            {history.length > 1 && (
+              <button onClick={() => setView((v) => (v === "positions" ? "history" : "positions"))}
+                className={cx("topstep", view === "history" && "is-on")} title="P&L history">
+                {view === "history" ? <ListBullets size={12} weight="bold" /> : <ChartLine size={12} weight="bold" />}
+              </button>
+            )}
             {kiteConnected && open.length > 0 && (
               <button onClick={refresh} disabled={loading} className="topstep" title="Refresh live quotes">
                 <ArrowClockwise size={12} weight="bold" />
@@ -111,6 +178,8 @@ export default function Portfolio({ legs, symbol, lotFor, kiteConnected, onParti
             Positions to pick which ones belong here — tracked with a real Kite quote every time
             you come back, not the end-of-day price.
           </p>
+        ) : view === "history" ? (
+          <PnlHistoryChart history={history} />
         ) : (
           <>
             {open.length > 0 && !kiteConnected && (
@@ -124,7 +193,7 @@ export default function Portfolio({ legs, symbol, lotFor, kiteConnected, onParti
             )}
 
             {(open.length > 0 || closed.length > 0) && (
-              <div className="flex items-center justify-between mb-3 px-1">
+              <div className="flex items-center justify-between mb-1.5 px-1">
                 <span className="text-[11px] text-muted">
                   {loading ? "Refreshing…" : error ? error
                     : asOf ? `As of ${new Date(asOf).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}`
@@ -143,6 +212,14 @@ export default function Portfolio({ legs, symbol, lotFor, kiteConnected, onParti
                 </span>
               </div>
             )}
+            {open.length > 0 && (
+              <div className="flex items-center gap-3 mb-3 px-1 text-[10.5px] text-muted">
+                <span>Δ <b className="n text-ink2">{fm(totalGreeks.delta, 1)}</b></span>
+                <span>Θ <b className={cx("n", totalGreeks.theta >= 0 ? "text-gain" : "text-loss")}>
+                  {inr(totalGreeks.theta)}</b></span>
+                <span>Vega <b className="n text-ink2">{inr(totalGreeks.vega)}</b></span>
+              </div>
+            )}
 
             {open.length > 0 && (
               <div className="overflow-x-auto">
@@ -153,7 +230,9 @@ export default function Portfolio({ legs, symbol, lotFor, kiteConnected, onParti
                       <th className="font-medium py-1 pr-2">Opened</th>
                       <th className="font-medium py-1 pr-2 text-right">Entry</th>
                       <th className="font-medium py-1 pr-2 text-right">LTP</th>
+                      <th className="font-medium py-1 pr-2 text-right">Delta</th>
                       <th className="font-medium py-1 pr-2 text-right">P&L</th>
+                      <th className="font-medium py-1 pr-2 text-right">Alert</th>
                       <th className="font-medium py-1 text-right">Exit</th>
                     </tr>
                   </thead>
@@ -165,13 +244,43 @@ export default function Portfolio({ legs, symbol, lotFor, kiteConnected, onParti
                             {r.side === "SELL" ? "S" : "B"}
                           </b>{" "}
                           {r.strike}{r.right} <span className="text-faint">{r.expiry} · {r.lots}L</span>
+                          {(r.sl != null || r.target != null) && (
+                            <span className="text-faint">
+                              {" "}· {r.sl != null && `≤${fm(r.sl, 0)}`}{r.sl != null && r.target != null && " "}
+                              {r.target != null && `≥${fm(r.target, 0)}`}
+                            </span>
+                          )}
                         </td>
                         <td className="py-1.5 pr-2 text-muted">{r.entryDate}</td>
                         <td className="py-1.5 pr-2 text-right">{fm(r.entryPrice)}</td>
                         <td className="py-1.5 pr-2 text-right">{r.ltp != null ? fm(r.ltp) : "—"}</td>
+                        <td className="py-1.5 pr-2 text-right text-muted">
+                          {r.g ? fm(r.dir * r.g.delta * r.qty, 1) : "—"}
+                        </td>
                         <td className={cx("py-1.5 pr-2 text-right font-medium",
                           r.pnl == null ? "text-faint" : r.pnl > 0 ? "text-gain" : r.pnl < 0 ? "text-loss" : "")}>
                           {r.pnl == null ? "—" : sgn(r.pnl)}
+                        </td>
+                        <td className="py-1.5 pr-2 text-right">
+                          {alertingId === r.id ? (
+                            <span className="inline-flex items-center gap-1">
+                              <input value={alertSl} onChange={(e) => setAlertSl(e.target.value.replace(/[^0-9.]/g, ""))}
+                                placeholder="≤" className="n" style={{ width: 44, textAlign: "right" }} />
+                              <input value={alertTarget} onChange={(e) => setAlertTarget(e.target.value.replace(/[^0-9.]/g, ""))}
+                                placeholder="≥" className="n" style={{ width: 44, textAlign: "right" }} />
+                              <button className="mini-btn" title="Save alert" onClick={() => saveAlert(r)}>
+                                <Check size={11} weight="bold" />
+                              </button>
+                              <button className="mini-btn is-danger" title="Cancel" onClick={() => setAlertingId(null)}>
+                                <X size={11} weight="bold" />
+                              </button>
+                            </span>
+                          ) : (
+                            <button className={cx("mini-btn", (r.sl != null || r.target != null) && "text-accent")}
+                              title="Set a price alert" onClick={() => startAlert(r)}>
+                              <Bell size={11} weight={r.sl != null || r.target != null ? "fill" : "bold"} />
+                            </button>
+                          )}
                         </td>
                         <td className="py-1.5 text-right whitespace-nowrap">
                           {exitingId === r.id ? (
@@ -207,6 +316,12 @@ export default function Portfolio({ legs, symbol, lotFor, kiteConnected, onParti
                   </tbody>
                 </table>
               </div>
+            )}
+            {open.length > 0 && notifPerm === "denied" && (
+              <p className="text-[10.5px] text-muted mt-2 px-1">
+                Browser notifications are blocked — alerts will still show inside the app the next
+                time you open it, just not as a system notification.
+              </p>
             )}
 
             {closed.length > 0 && (
@@ -255,6 +370,47 @@ export default function Portfolio({ legs, symbol, lotFor, kiteConnected, onParti
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+/* A hand-rolled SVG line, matching CandleChart's own reasoning: no charting
+   library has a lighter way to draw one line through a handful of points. */
+function PnlHistoryChart({ history }) {
+  const W = 640, H = 220, PAD = { top: 12, right: 12, bottom: 24, left: 56 };
+  const plotW = W - PAD.left - PAD.right, plotH = H - PAD.top - PAD.bottom;
+  const vals = history.map((h) => h.pnl);
+  const lo = Math.min(0, ...vals), hi = Math.max(0, ...vals);
+  const pad = (hi - lo) * 0.1 || 1;
+  const yMin = lo - pad, yMax = hi + pad;
+  const x = (i) => PAD.left + (history.length <= 1 ? plotW / 2 : (i / (history.length - 1)) * plotW);
+  const y = (v) => PAD.top + (1 - (v - yMin) / (yMax - yMin)) * plotH;
+  const path = history.map((h, i) => `${i === 0 ? "M" : "L"}${x(i)},${y(h.pnl)}`).join(" ");
+  const zero = y(0);
+
+  return (
+    <div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto">
+        <line x1={PAD.left} x2={W - PAD.right} y1={zero} y2={zero} stroke="var(--c-line)" />
+        <path d={path} fill="none" stroke="var(--c-accent)" strokeWidth={1.75} />
+        {history.map((h, i) => (
+          <circle key={h.date} cx={x(i)} cy={y(h.pnl)} r={2.5}
+            fill={h.pnl >= 0 ? "var(--c-gain)" : "var(--c-loss)"} />
+        ))}
+        {history.map((h, i) => (
+          (i === 0 || i === history.length - 1 || i % Math.ceil(history.length / 6) === 0) && (
+            <text key={h.date} x={x(i)} y={H - 6} textAnchor="middle" fontSize={9.5} fill="var(--c-muted)">
+              {new Date(h.date + "T00:00:00").toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}
+            </text>
+          )
+        ))}
+        <text x={PAD.left - 6} y={PAD.top + 4} textAnchor="end" fontSize={9.5} fill="var(--c-muted)">{fm(yMax, 0)}</text>
+        <text x={PAD.left - 6} y={H - PAD.bottom} textAnchor="end" fontSize={9.5} fill="var(--c-muted)">{fm(yMin, 0)}</text>
+      </svg>
+      <p className="text-[10.5px] text-muted mt-1 px-1">
+        Combined P&L (open + booked) as of each day this Portfolio was last opened — not a
+        continuous feed, so a day you never checked in on won't have a point.
+      </p>
     </div>
   );
 }

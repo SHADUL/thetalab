@@ -10,8 +10,9 @@ import {
 import { makeDemo } from "./lib/demo";
 import {
   fetchLiveChain, assumedKiteConnected, consumeKiteRedirectResult, kiteLoginUrl,
-  resolveIndexToken, fetchLiveCandles,
+  resolveIndexToken, fetchLiveCandles, fetchLiveQuotes,
 } from "./lib/kiteClient";
+import { kiteInstrument } from "./lib/kiteSymbol";
 import { buildMinuteSeries } from "./lib/liveMinutes";
 import Landing from "./components/Landing";
 import TopBar from "./components/TopBar";
@@ -741,6 +742,52 @@ export default function App() {
       { ...l, id: `${l.id}-x${Date.now()}`, lots: n, closedDate: closeDate, closePrice: price },
     ];
   }));
+  const setLegAlert = (id, { sl, target }) => setLegs((L) => L.map((l) =>
+    l.id === id ? { ...l, sl, target } : l));
+
+  /* Watches SL/target thresholds on every Portfolio-tracked position, not
+     just while Portfolio itself is open — the point of an alert is to catch
+     a crossing you weren't staring at. Polls only while the tab is actually
+     visible, both to respect Kite's rate limits and because a hidden tab
+     can't show a notification meaningfully anyway. A ref (not state) tracks
+     what's already fired so the same crossing doesn't re-notify every poll;
+     it resets whenever the thresholds themselves change. */
+  const alertedRef = useRef(new Set());
+  useEffect(() => {
+    const watched = book.filter((l) =>
+      l.source === "live" && !l.closedDate && (l.sl != null || l.target != null));
+    if (watched.length === 0 || !kiteConnected) return;
+    const exch = instrument === "SENSEX" ? "BFO" : "NFO";
+    let cancelled = false;
+
+    const check = async () => {
+      if (document.visibilityState !== "visible") return;
+      try {
+        const instruments = watched.map((l) => kiteInstrument(instrument, l.expiry, l.strike, l.right, exch));
+        const { quotes } = await fetchLiveQuotes(instruments);
+        if (cancelled) return;
+        watched.forEach((l) => {
+          const key = kiteInstrument(instrument, l.expiry, l.strike, l.right, exch);
+          const ltp = quotes[key]?.lastPrice;
+          if (ltp == null) return;
+          const hitSl = l.sl != null && ltp <= l.sl;
+          const hitTarget = l.target != null && ltp >= l.target;
+          if (!hitSl && !hitTarget) return;
+          const fireKey = `${l.id}:${l.sl}:${l.target}:${hitSl ? "sl" : "target"}`;
+          if (alertedRef.current.has(fireKey)) return;
+          alertedRef.current.add(fireKey);
+          if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+            new Notification(`${l.strike}${l.right} hit ${hitSl ? "stop" : "target"}`, {
+              body: `${instrument} · LTP ${ltp} (entry ${l.entryPrice})`, tag: fireKey,
+            });
+          }
+        });
+      } catch { /* transient network hiccup — next poll retries */ }
+    };
+    check();
+    const id = setInterval(check, 45000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [book, kiteConnected, instrument]);
 
   /* The wizard builds a structure for the expiry on screen; it replaces what
      is open on THAT expiry and leaves the rest of the book alone. */
@@ -824,7 +871,7 @@ export default function App() {
 
       {portfolioOpen && (
         <Portfolio legs={book} symbol={instrument} lotFor={lotFor} kiteConnected={kiteConnected}
-          onPartialExit={partialExitLeg} onClose={() => setPortfolioOpen(false)} />
+          onPartialExit={partialExitLeg} onSetAlert={setLegAlert} onClose={() => setPortfolioOpen(false)} />
       )}
 
       <MarketStrip ohlc={ohlc} prevClose={prevClose} spot={spot} synthFut={synthFut}

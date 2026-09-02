@@ -728,6 +728,19 @@ export default function App() {
      position from getting swept into Portfolio just for existing nearby. */
   const addLegsToPortfolio = (ids) => setLegs((L) => L.map((l) =>
     ids.includes(l.id) ? { ...l, source: "live" } : l));
+  /* Booking profit on part of a Portfolio position — the exited slice
+     splits off and closes immediately at the price Portfolio is showing;
+     the rest, if any, stays open under the same id so its row doesn't
+     remount. A full-quantity "partial" exit is just an ordinary close. */
+  const partialExitLeg = (id, exitLots, price, closeDate) => setLegs((L) => L.flatMap((l) => {
+    if (l.id !== id || l.closedDate) return [l];
+    const n = Math.max(1, Math.min(l.lots, Math.round(exitLots) || 1));
+    if (n >= l.lots) return [{ ...l, closedDate: closeDate, closePrice: price }];
+    return [
+      { ...l, lots: l.lots - n },
+      { ...l, id: `${l.id}-x${Date.now()}`, lots: n, closedDate: closeDate, closePrice: price },
+    ];
+  }));
 
   /* The wizard builds a structure for the expiry on screen; it replaces what
      is open on THAT expiry and leaves the rest of the book alone. */
@@ -811,7 +824,7 @@ export default function App() {
 
       {portfolioOpen && (
         <Portfolio legs={book} symbol={instrument} lotFor={lotFor} kiteConnected={kiteConnected}
-          onClose={() => setPortfolioOpen(false)} />
+          onPartialExit={partialExitLeg} onClose={() => setPortfolioOpen(false)} />
       )}
 
       <MarketStrip ohlc={ohlc} prevClose={prevClose} spot={spot} synthFut={synthFut}

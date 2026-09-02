@@ -16,13 +16,11 @@ const expShort = (d) => new Date(d + "T00:00:00")
   .replace(/(\d{2})$/, "'$1");
 
 /**
- * Portfolio-tracking is otherwise automatic — a leg opened while live gets
- * tagged the moment it's created (see App.jsx's addLeg). This is the escape
- * hatch for the case that misses: a leg built earlier in sim mode, before
- * "Today (Live)" was even toggled on, which the auto-tag never sees. Picking
- * specific legs here (rather than one "add everything held" button) matters
- * because a book can hold both a real live position and a what-if structure
- * built to compare against it — bulk-adding would track the what-if too.
+ * The only way a leg gets tracked in Portfolio — nothing is added
+ * automatically just for being opened while live, since a book can hold
+ * both a real position and a what-if structure built to compare against it,
+ * and the two need different fates. Picking specific legs (rather than one
+ * "add everything held" button) is what keeps that distinction possible.
  */
 function AddToPortfolioPicker({ legs, onAdd }) {
   const [open, setOpen] = useState(false);

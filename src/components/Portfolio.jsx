@@ -5,12 +5,15 @@ import { kiteInstrument } from "../lib/kiteSymbol";
 import { cx, sgn, fm } from "../lib/format";
 
 /**
- * Every position opened while "Today (Live)" was on, across every expiry —
- * not just the one tab happens to be on screen — re-priced from a fresh
- * batch of Kite quotes each time this opens. This is the "come back
- * tomorrow and see it" view: the simulator's own Positions tab only ever
- * looks at whichever single expiry/day is currently selected, which is the
- * wrong shape for "how did my real position do overnight."
+ * Every position explicitly added via the "Add to Portfolio" picker in
+ * Positions, across every expiry — not just the one tab happens to be on
+ * screen — re-priced from a fresh batch of Kite quotes each time this
+ * opens. This is the "come back tomorrow and see it" view: the simulator's
+ * own Positions tab only ever looks at whichever single expiry/day is
+ * currently selected, which is the wrong shape for "how did my real
+ * position do overnight." Nothing lands here just for being opened while
+ * live — that's a deliberate opt-in, not automatic, so a what-if leg built
+ * during live testing doesn't get tracked alongside a real position.
  *
  * A day-old Kite session (the access-token cookie is good for ~20h) means
  * the fetch below can come back needing a reconnect — that's surfaced
@@ -77,9 +80,9 @@ export default function Portfolio({ legs, symbol, lotFor, kiteConnected, onClose
 
         {open.length === 0 ? (
           <p className="text-[12.5px] text-muted leading-relaxed px-1">
-            No live positions yet. Open one while <b>Today (Live)</b> is on and it lands here
-            automatically — tracked with a real Kite quote every time you come back, not the
-            end-of-day price.
+            Nothing tracked yet. While <b>Today (Live)</b> is on, use <b>Add to Portfolio</b> in
+            Positions to pick which ones belong here — tracked with a real Kite quote every time
+            you come back, not the end-of-day price.
           </p>
         ) : !kiteConnected ? (
           <div className="flex gap-2.5 px-4 py-3.5 rounded-[12px]" style={{ border: "1px solid var(--c-line)" }}>

@@ -698,9 +698,10 @@ export default function App() {
       id: Date.now() + Math.random(), symbol: instrument, side, right, strike, expiry,
       lots: Number(defaultLots) || 1, entryDate: today, entryPrice: p,
       closedDate: null, closePrice: null, off: false,
-      /* Opened on a real Kite quote, not a bundle session — Portfolio uses
-         this to find positions worth re-pricing live on every visit. */
-      source: liveMode ? "live" : "sim",
+      /* Not tagged "live" here even if this was opened while live — Portfolio
+         tracking is opt-in only, via the "Add to Portfolio" picker below, so
+         a what-if leg built during live testing doesn't end up tracked just
+         because of when it happened to be created. */
     }]);
   };
   const setLots = (id, n) => setLegs((L) => L.map((l) =>
@@ -720,11 +721,11 @@ export default function App() {
   const removeLeg = (id) => setLegs((L) => L.filter((l) => l.id !== id));
   const toggleLeg = (id) => setLegs((L) => L.map((l) =>
     l.id === id ? { ...l, off: !l.off } : l));
-  /* Auto-tagging on open (see addLeg) only catches legs opened while live —
-     this is the manual path for a leg built earlier in sim mode and only
-     now, having gone live, worth tracking for real. Picking specific ids
-     rather than tagging the whole book keeps a what-if structure sitting
-     next to a real position from getting swept into Portfolio too. */
+  /* The only way anything ends up tracked in Portfolio — opening a leg
+     (however it was built: a chain click or the Quant Engine) never tags it
+     automatically. Picking specific ids rather than offering "add
+     everything held" keeps a what-if structure sitting next to a real
+     position from getting swept into Portfolio just for existing nearby. */
   const addLegsToPortfolio = (ids) => setLegs((L) => L.map((l) =>
     ids.includes(l.id) ? { ...l, source: "live" } : l));
 
@@ -740,7 +741,8 @@ export default function App() {
         strike: l.strike, expiry,
         lots: l.lots, entryDate: today, entryPrice: l.price,
         closedDate: null, closePrice: null, off: false,
-        source: liveMode ? "live" : "sim",
+        /* Loaded strategies aren't auto-tracked either — same reasoning as
+           addLeg: Portfolio is opt-in only, via the picker. */
       })),
     ]);
     setTab("payoff");

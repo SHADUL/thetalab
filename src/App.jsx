@@ -720,6 +720,13 @@ export default function App() {
   const removeLeg = (id) => setLegs((L) => L.filter((l) => l.id !== id));
   const toggleLeg = (id) => setLegs((L) => L.map((l) =>
     l.id === id ? { ...l, off: !l.off } : l));
+  /* Auto-tagging on open (see addLeg) only catches legs opened while live —
+     this is the manual path for a leg built earlier in sim mode and only
+     now, having gone live, worth tracking for real. Picking specific ids
+     rather than tagging the whole book keeps a what-if structure sitting
+     next to a real position from getting swept into Portfolio too. */
+  const addLegsToPortfolio = (ids) => setLegs((L) => L.map((l) =>
+    ids.includes(l.id) ? { ...l, source: "live" } : l));
 
   /* The wizard builds a structure for the expiry on screen; it replaces what
      is open on THAT expiry and leaves the rest of the book alone. */
@@ -861,7 +868,8 @@ export default function App() {
             exitAll={exitAll} multiplier={multiplier} setMultiplier={setMultiplier}
             onSave={onSave} onShare={onShare} targetPnlByLeg={targetPnlByLeg}
             targetDate={targetDate ?? today}
-            totals={{ ...totals, target: targetPnl }} />
+            totals={{ ...totals, target: targetPnl }}
+            live={liveMode} onAddToPortfolio={addLegsToPortfolio} />
         </div>
       </div>
 

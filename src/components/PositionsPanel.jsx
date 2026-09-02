@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Minus, Plus, X, SignOut, ArrowsDownUp, FloppyDisk, ShareNetwork,
-         Stack, Check } from "@phosphor-icons/react";
+         Stack, Check, Broadcast } from "@phosphor-icons/react";
 import { fm, sgn, inr, cx } from "../lib/format";
 
 const TABS = [["positions", "Positions"], ["greeks", "Greeks"], ["target", "Target P&L"]];
@@ -11,20 +11,89 @@ const Step = ({ icon, onClick, disabled }) => (
     className={cx("lot-step", disabled && "is-off")}>{icon}</button>
 );
 
+const expShort = (d) => new Date(d + "T00:00:00")
+  .toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "2-digit" })
+  .replace(/(\d{2})$/, "'$1");
+
+/**
+ * Portfolio-tracking is otherwise automatic — a leg opened while live gets
+ * tagged the moment it's created (see App.jsx's addLeg). This is the escape
+ * hatch for the case that misses: a leg built earlier in sim mode, before
+ * "Today (Live)" was even toggled on, which the auto-tag never sees. Picking
+ * specific legs here (rather than one "add everything held" button) matters
+ * because a book can hold both a real live position and a what-if structure
+ * built to compare against it — bulk-adding would track the what-if too.
+ */
+function AddToPortfolioPicker({ legs, onAdd }) {
+  const [open, setOpen] = useState(false);
+  const [selected, setSelected] = useState(new Set());
+  const ref = useRef(null);
+
+  const candidates = legs.filter((l) => l.source !== "live" && !l.closedDate);
+
+  useEffect(() => {
+    if (!open) return;
+    const away = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", away);
+    return () => document.removeEventListener("mousedown", away);
+  }, [open]);
+
+  const toggle = (id) => setSelected((s) => {
+    const n = new Set(s);
+    if (n.has(id)) n.delete(id); else n.add(id);
+    return n;
+  });
+
+  return (
+    <div className="relative" ref={ref}>
+      <button className="chip" onClick={() => setOpen((v) => !v)}>
+        <Broadcast size={11} weight="bold" />Add to Portfolio
+      </button>
+      {open && (
+        <div className="absolute bottom-full right-0 mb-2 w-72 rounded-[12px] p-3 z-20"
+          style={{ background: "var(--c-surface)", border: "1px solid var(--c-line)",
+            boxShadow: "0 8px 24px rgba(0,0,0,.18)" }}>
+          {candidates.length === 0 ? (
+            <p className="text-[11.5px] text-muted leading-relaxed">
+              Every open position is already tracked in Portfolio.
+            </p>
+          ) : (
+            <>
+              <p className="text-[11px] text-muted mb-2">
+                Track live — re-priced from Kite on every visit, not this session's chain:
+              </p>
+              <div className="flex flex-col gap-1 max-h-48 overflow-y-auto">
+                {candidates.map((l) => (
+                  <label key={l.id} className="flex items-center gap-2 text-[12px] py-0.5 cursor-pointer">
+                    <input type="checkbox" checked={selected.has(l.id)} onChange={() => toggle(l.id)} />
+                    <b className={l.side === "SELL" ? "text-loss" : "text-gain"}>{l.side[0]}</b>
+                    <span className="n">{l.strike}{l.right}</span>
+                    <span className="text-faint">{expShort(l.expiry)} · {l.lots}L</span>
+                  </label>
+                ))}
+              </div>
+              <button className="chip w-full mt-2 justify-center" disabled={selected.size === 0}
+                onClick={() => { onAdd([...selected]); setSelected(new Set()); setOpen(false); }}>
+                Add {selected.size > 0 ? selected.size : ""} to Portfolio
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function PositionsPanel({
   legs, today, lotQty, defaultLots, setDefaultLots, setLots, exitLeg, removeLeg,
   toggleLeg, clear, exitAll, multiplier, setMultiplier, onSave, onShare,
-  targetPnlByLeg, targetDate, totals,
+  targetPnlByLeg, targetDate, totals, live, onAddToPortfolio,
 }) {
   const [tab, setTab] = useState("positions");
   const [sortDesc, setSortDesc] = useState(false);
 
   const sorted = [...legs].sort((a, b) =>
     sortDesc ? b.strike - a.strike : a.strike - b.strike);
-
-  const expShort = (d) => new Date(d + "T00:00:00")
-    .toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "2-digit" })
-    .replace(/(\d{2})$/, "'$1");
 
   if (!legs.length) {
     return (
@@ -266,6 +335,7 @@ export default function PositionsPanel({
         <span className="ctrl"><span className="ctrl-k">Lot Size:</span>
           <span className="n ctrl-v">{lotQty}</span></span>
         <span className="flex-1" />
+        {live && <AddToPortfolioPicker legs={legs} onAdd={onAddToPortfolio} />}
         <button className="chip" onClick={exitAll}>Exit all</button>
         <button className="chip is-danger" onClick={clear}>Clear</button>
       </div>

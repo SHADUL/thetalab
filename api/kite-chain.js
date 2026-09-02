@@ -94,8 +94,13 @@ export default async function handler(req, res) {
       if (!q || q.last_price == null) continue;
       const key = String(strike);
       if (!chain[key]) chain[key] = {};
-      if (right === 'CE') { chain[key].c = q.last_price; chain[key].c0 = q.last_price; chain[key].co = q.oi ?? 0; }
-      else { chain[key].p = q.last_price; chain[key].p0 = q.last_price; chain[key].po = q.oi ?? 0; }
+      if (right === 'CE') {
+        chain[key].c = q.last_price; chain[key].c0 = q.last_price; chain[key].co = q.oi ?? 0;
+        chain[key].ceToken = q.instrument_token ?? null;
+      } else {
+        chain[key].p = q.last_price; chain[key].p0 = q.last_price; chain[key].po = q.oi ?? 0;
+        chain[key].peToken = q.instrument_token ?? null;
+      }
     }
 
     res.status(200).json({

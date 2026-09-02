@@ -1,22 +1,63 @@
 import { useEffect } from "react";
 import { CaretDoubleLeft, CaretDoubleRight, Play, Pause, Sun, Moon,
-         SkipBack, SkipForward, Broadcast, Info } from "@phosphor-icons/react";
+         SkipBack, SkipForward, Broadcast, Info, Clock } from "@phosphor-icons/react";
 import { cx } from "../lib/format";
 import DatePicker from "./DatePicker";
 
-/* The reference desk this is modelled on steps in minutes as well as days
-   (-2h, -15m, 1m+, SOD, EOD). Those still don't exist here — this project is
-   built on NSE's end-of-day bhavcopy, one session per day, and rendering an
-   intraday control that silently reused the closing price would be a lie
-   about the resolution of that data. "Today (Live)" isn't that: it's a
-   genuinely separate source (a real Kite quote fetch, not bhavcopy replayed
-   at finer resolution), which is exactly why it's its own toggle rather than
-   an extra notch on the day-stepper. */
+/* The day-stepper walks NSE's end-of-day bhavcopy, one session per day — it
+   has no finer resolution to offer, and never pretends to. "Today (Live)" is
+   a genuinely separate source (real Kite quotes, not bhavcopy replayed
+   faster), which is exactly why it swaps this whole control out for a
+   minute-stepper rather than adding an extra notch to the day one: the
+   minute-stepper's timeline comes from each held leg's own Kite minute
+   candles, not from a data source that was never sampled that finely. */
+
+function MinuteStepper({ minuteIdx, setMinuteIdx, minuteSeries, minuteLoading, minuteError }) {
+  const times = minuteSeries?.timestamps ?? [];
+  const lastIdx = times.length - 1;
+  const cur = minuteIdx ?? lastIdx;
+  const atStart = !minuteSeries || cur <= 0;
+  const atNow = !minuteSeries || minuteIdx == null;
+
+  const label = minuteLoading ? "Loading…"
+    : minuteError ? "No minute data"
+    : !minuteSeries ? "No position"
+    : minuteIdx == null ? "LIVE"
+    : new Date(times[minuteIdx]).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+
+  return (
+    <>
+      <button className={cx("topstep", atStart && "is-off")} disabled={atStart}
+        onClick={() => setMinuteIdx(0)} title="Start of today's session">
+        <SkipBack size={11} weight="fill" />
+      </button>
+      <button className={cx("topstep", atStart && "is-off")} disabled={atStart}
+        onClick={() => setMinuteIdx(Math.max(0, cur - 1))} title="Previous minute">
+        <CaretDoubleLeft size={11} weight="bold" />Min
+      </button>
+
+      <span className="datefield n" title={minuteError || "Steps through today's own minute candles"}>
+        {label}
+        <Clock size={12} weight="regular" />
+      </span>
+
+      <button className={cx("topstep", atNow && "is-off")} disabled={atNow}
+        onClick={() => setMinuteIdx(cur >= lastIdx ? null : cur + 1)} title="Next minute">
+        Min<CaretDoubleRight size={11} weight="bold" />
+      </button>
+      <button className={cx("topstep", atNow && "is-off")} disabled={atNow}
+        onClick={() => setMinuteIdx(null)} title="Jump to now">
+        <SkipForward size={11} weight="fill" />
+      </button>
+    </>
+  );
+}
 
 export default function TopBar({
   symbol, instruments = [], onPickSymbol, switching,
   dates, dayIdx, setDayIdx, expirySet, autoRun, setAutoRun, theme, toggleTheme,
-  live, liveDate, liveLoading, liveError, onToggleLive,
+  live, liveLoading, liveError, onToggleLive,
+  minuteIdx, setMinuteIdx, minuteSeries, minuteLoading, minuteError,
 }) {
   const last = dates.length - 1;
   const cur = dates[dayIdx];
@@ -50,24 +91,31 @@ export default function TopBar({
       </div>
 
       <div className="flex items-center gap-1.5 flex-wrap">
-        <Step onClick={() => setDayIdx(0)} disabled={live || dayIdx === 0} title="First session in the run-up">
-          <SkipBack size={11} weight="fill" />
-        </Step>
-        <Step onClick={() => setDayIdx(Math.max(0, dayIdx - 1))} disabled={live || dayIdx === 0}
-          title="Previous session">
-          <CaretDoubleLeft size={11} weight="bold" />Day
-        </Step>
+        {live ? (
+          <MinuteStepper minuteIdx={minuteIdx} setMinuteIdx={setMinuteIdx} minuteSeries={minuteSeries}
+            minuteLoading={minuteLoading} minuteError={minuteError} />
+        ) : (
+          <>
+            <Step onClick={() => setDayIdx(0)} disabled={dayIdx === 0} title="First session in the run-up">
+              <SkipBack size={11} weight="fill" />
+            </Step>
+            <Step onClick={() => setDayIdx(Math.max(0, dayIdx - 1))} disabled={dayIdx === 0}
+              title="Previous session">
+              <CaretDoubleLeft size={11} weight="bold" />Day
+            </Step>
 
-        <DatePicker value={live ? null : cur} focusDate={live ? liveDate : null}
-          dates={dates} expirySet={expirySet} onPick={(d) => setDayIdx(dates.indexOf(d))} />
+            <DatePicker value={cur} dates={dates} expirySet={expirySet}
+              onPick={(d) => setDayIdx(dates.indexOf(d))} />
 
-        <Step onClick={() => setDayIdx(Math.min(last, dayIdx + 1))} disabled={live || dayIdx >= last}
-          title="Next session">
-          Day<CaretDoubleRight size={11} weight="bold" />
-        </Step>
-        <Step onClick={() => setDayIdx(last)} disabled={live || dayIdx >= last} title="Jump to expiry">
-          <SkipForward size={11} weight="fill" />
-        </Step>
+            <Step onClick={() => setDayIdx(Math.min(last, dayIdx + 1))} disabled={dayIdx >= last}
+              title="Next session">
+              Day<CaretDoubleRight size={11} weight="bold" />
+            </Step>
+            <Step onClick={() => setDayIdx(last)} disabled={dayIdx >= last} title="Jump to expiry">
+              <SkipForward size={11} weight="fill" />
+            </Step>
+          </>
+        )}
 
         <button onClick={() => setAutoRun((v) => !v)} disabled={live || (dayIdx >= last && !autoRun)}
           className={cx("autorun", autoRun && "is-on", (live || (dayIdx >= last && !autoRun)) && "is-off")}

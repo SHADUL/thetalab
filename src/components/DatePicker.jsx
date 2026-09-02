@@ -16,22 +16,15 @@ const monthKey = (s) => s.slice(0, 7);
  * because they are the ones worth stepping to; everything else in the month is
  * shown but dimmed, so the shape of the month still reads normally.
  */
-export default function DatePicker({ value, focusDate, dates, expirySet, onPick }) {
+export default function DatePicker({ value, dates, expirySet, onPick }) {
   const [open, setOpen] = useState(false);
-  const [month, setMonth] = useState(() => monthKey(focusDate || value || iso(new Date())));
+  const [month, setMonth] = useState(() => monthKey(value || iso(new Date())));
   const ref = useRef(null);
 
   const selectable = useMemo(() => new Set(dates), [dates]);
   const first = dates[0], last = dates[dates.length - 1];
 
-  /* value drives the field's label (blank while live), but the popup's month
-     should still track wherever the app actually is — focusDate covers that
-     case (the live session's date) without making the field itself look
-     "selected". */
-  useEffect(() => {
-    const d = focusDate || value;
-    if (d) setMonth(monthKey(d));
-  }, [value, focusDate, open]);
+  useEffect(() => { if (value) setMonth(monthKey(value)); }, [value, open]);
 
   useEffect(() => {
     if (!open) return;

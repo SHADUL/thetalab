@@ -8,7 +8,11 @@ import {
   payoffDomain, pnlAt, breakevens,
 } from "./lib/chain";
 import { makeDemo } from "./lib/demo";
-import { fetchLiveChain, assumedKiteConnected, consumeKiteRedirectResult, kiteLoginUrl } from "./lib/kiteClient";
+import {
+  fetchLiveChain, assumedKiteConnected, consumeKiteRedirectResult, kiteLoginUrl,
+  resolveIndexToken, fetchLiveCandles,
+} from "./lib/kiteClient";
+import { buildMinuteSeries } from "./lib/liveMinutes";
 import Landing from "./components/Landing";
 import TopBar from "./components/TopBar";
 import MarketStrip from "./components/MarketStrip";
@@ -68,6 +72,13 @@ export default function App() {
   const [liveLoading, setLiveLoading] = useState(false);
   const [liveError, setLiveError] = useState(null);
   const [kiteConnected, setKiteConnected] = useState(() => assumedKiteConnected());
+  /* Minute-level scrubbing within live mode — declared up here (rather than
+     alongside the effect that fills it in, further down) because `spot`
+     below already needs to read it. */
+  const [minuteIdx, setMinuteIdx] = useState(null);
+  const [minuteSeries, setMinuteSeries] = useState(null); // { timestamps, spot, legs: {key: number[]} }
+  const [minuteLoading, setMinuteLoading] = useState(false);
+  const [minuteError, setMinuteError] = useState(null);
   useEffect(() => {
     const r = consumeKiteRedirectResult();
     if (r) setKiteConnected(r.connected);
@@ -236,7 +247,9 @@ export default function App() {
      rest of the app) reads `today`/`spot`/`chain` the same way regardless of
      source. */
   const today = liveMode ? (liveSnapshot?.date ?? null) : bundleToday;
-  const spot = liveMode ? (liveSnapshot?.spot ?? null) : bundleSpot;
+  const spot = liveMode
+    ? (minuteIdx != null && minuteSeries ? minuteSeries.spot[minuteIdx] ?? null : liveSnapshot?.spot ?? null)
+    : bundleSpot;
   const chain = liveMode ? (liveSnapshot?.chain ?? EMPTY_CHAIN) : bundleChain;
 
   const ohlc = !liveMode && today && ex?.ohlc ? ex.ohlc[today] : null;
@@ -268,6 +281,54 @@ export default function App() {
       .finally(() => { if (!cancelled) setLiveLoading(false); });
     return () => { cancelled = true; };
   }, [liveMode, expiry, instrument, bundle]);
+
+  /* ── minute-level scrubbing within "Today (Live)" ─────────────────────
+     Only for the book's own legs, not the whole visible chain — fetching
+     every strike's own minute history just to answer "what would my P&L
+     have been at 10:32" would be dozens of Kite calls for strikes the user
+     never even bought. */
+  const legKeys = useMemo(() => {
+    const s = new Set();
+    book.forEach((l) => {
+      if ((l.expiry ?? expiry) === expiry && !l.closedDate) s.add(`${l.strike}:${l.right}`);
+    });
+    return [...s].sort();
+  }, [book, expiry]);
+
+  useEffect(() => {
+    setMinuteIdx(null);
+    setMinuteSeries(null);
+    setMinuteError(null);
+    if (!liveMode || !liveSnapshot || legKeys.length === 0) return;
+    let cancelled = false;
+    setMinuteLoading(true);
+    (async () => {
+      try {
+        const indexToken = await resolveIndexToken(instrument);
+        if (!indexToken) throw new Error("Could not resolve the index's own instrument token.");
+        const legTokens = legKeys
+          .map((key) => {
+            const [strike, right] = key.split(":");
+            const r = liveSnapshot.chain[strike];
+            return { key, token: right === "CE" ? r?.ceToken : r?.peToken };
+          })
+          .filter((l) => l.token);
+
+        const range = { from: liveSnapshot.date, to: liveSnapshot.date };
+        const [indexCandles, ...legCandles] = await Promise.all([
+          fetchLiveCandles(indexToken, "minute", range).then((r) => r.candles),
+          ...legTokens.map((l) => fetchLiveCandles(l.token, "minute", range).then((r) => r.candles)),
+        ]);
+        if (cancelled) return;
+        setMinuteSeries(buildMinuteSeries(indexCandles, legTokens.map((l, i) => [l.key, legCandles[i]])));
+      } catch (e) {
+        if (!cancelled) setMinuteError(e.message);
+      } finally {
+        if (!cancelled) setMinuteLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [liveMode, liveSnapshot, legKeys, instrument]);
 
   const toggleLive = () => {
     if (liveMode) { setLiveMode(false); return; }
@@ -352,11 +413,20 @@ export default function App() {
 
   /* ── legs, marked to the session in view ───────────────────────────── */
   /* Any leg, any expiry, any session. */
-  const priceOf = useCallback((expKey, date, strike, right) => {
+  const priceOf = useCallback((expKey, date, strike, right, ignoreMinute = false) => {
     /* A live pseudo-day is never in the bundle at all, so it needs its own
        lookup — c/c0 (and p/p0) are the same live number by construction
        (see kite-chain.js), so priceBasis is irrelevant here. */
     if (liveMode && liveSnapshot && date === liveSnapshot.date && expKey === expiry) {
+      /* Scrubbed to a minute in the past — only resolvable for a leg that
+         was already in the book when the scrubber's fetch ran (see
+         legKeys above); anything else (e.g. pricing a brand-new strike to
+         add) correctly falls through to null rather than a stale guess.
+         ignoreMinute lets a trading action (open/close a leg) always price
+         off "now" even while the view is scrubbed to the past. */
+      if (!ignoreMinute && minuteIdx != null && minuteSeries) {
+        return minuteSeries.legs[`${strike}:${right}`]?.[minuteIdx] ?? null;
+      }
       const r = liveSnapshot.chain[String(strike)];
       if (!r) return null;
       return right === "CE" ? (r.c ?? null) : (r.p ?? null);
@@ -367,7 +437,7 @@ export default function App() {
       ? (priceBasis === "open" ? "c0" : "c")
       : (priceBasis === "open" ? "p0" : "p");
     return r[k] ?? null;
-  }, [bundle, priceBasis, liveMode, liveSnapshot, expiry]);
+  }, [bundle, priceBasis, liveMode, liveSnapshot, expiry, minuteIdx, minuteSeries]);
 
   /* Each expiry in the book prices off its own forward and its own tenor, so
      the context is built once per expiry rather than once per leg. */
@@ -588,7 +658,12 @@ export default function App() {
 
   /* ── actions ───────────────────────────────────────────────────────── */
   const addLeg = (strike, right, side) => {
-    const p = priceOf(expiry, today, strike, right); if (p == null) return;
+    /* Opening a position always happens at the live price, never a
+       scrubbed-past one (priceOf's ignoreMinute) — and the view snaps back
+       to "now" too, so the freshly-added leg isn't shown next to positions
+       still marked at some earlier minute. */
+    const p = priceOf(expiry, today, strike, right, true); if (p == null) return;
+    setMinuteIdx(null);
     setLegs((L) => [...L, {
       id: Date.now() + Math.random(), symbol: instrument, side, right, strike, expiry,
       lots: Number(defaultLots) || 1, entryDate: today, entryPrice: p,
@@ -599,15 +674,15 @@ export default function App() {
     l.id === id && !l.closedDate ? { ...l, lots: Math.max(1, Math.min(999, n)) } : l));
   const closeAt = (l) => ({
     ...l, closedDate: today,
-    closePrice: priceOf(l.expiry ?? expiry, today, l.strike, l.right),
+    closePrice: priceOf(l.expiry ?? expiry, today, l.strike, l.right, true),
   });
-  const exitLeg = (id) => setLegs((L) => L.map((l) =>
-    l.id === id && !l.closedDate ? closeAt(l) : l));
+  const exitLeg = (id) => { setMinuteIdx(null); setLegs((L) => L.map((l) =>
+    l.id === id && !l.closedDate ? closeAt(l) : l)); };
   /* Only legs quoted on this session can be closed at a real price. */
   const mine = (l) => (l.symbol ?? "NIFTY") === instrument;
-  const exitAll = () => setLegs((L) => L.map((l) =>
-    !mine(l) || l.closedDate || priceOf(l.expiry ?? expiry, today, l.strike, l.right) == null
-      ? l : closeAt(l)));
+  const exitAll = () => { setMinuteIdx(null); setLegs((L) => L.map((l) =>
+    !mine(l) || l.closedDate || priceOf(l.expiry ?? expiry, today, l.strike, l.right, true) == null
+      ? l : closeAt(l))); };
   const clearBook = () => setLegs((L) => L.filter((l) => !mine(l)));
   const removeLeg = (id) => setLegs((L) => L.filter((l) => l.id !== id));
   const toggleLeg = (id) => setLegs((L) => L.map((l) =>
@@ -616,6 +691,7 @@ export default function App() {
   /* The wizard builds a structure for the expiry on screen; it replaces what
      is open on THAT expiry and leaves the rest of the book alone. */
   const loadStrategy = (strategyLegs) => {
+    setMinuteIdx(null);
     setLegs((L) => [
       ...L.filter((l) => (l.symbol ?? "NIFTY") !== instrument
                       || (l.expiry ?? expiry) !== expiry || l.closedDate),
@@ -684,8 +760,10 @@ export default function App() {
         switching={switching} dates={dates} dayIdx={dayIdx}
         setDayIdx={setDayIdxAndExitLive} expirySet={expirySet} autoRun={autoRun} setAutoRun={setAutoRun}
         theme={theme} toggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
-        live={liveMode} liveDate={liveSnapshot?.date ?? null}
-        liveLoading={liveLoading} liveError={liveError} onToggleLive={toggleLive} />
+        live={liveMode}
+        liveLoading={liveLoading} liveError={liveError} onToggleLive={toggleLive}
+        minuteIdx={minuteIdx} setMinuteIdx={setMinuteIdx} minuteSeries={minuteSeries}
+        minuteLoading={minuteLoading} minuteError={minuteError} />
 
       <MarketStrip ohlc={ohlc} prevClose={prevClose} spot={spot} synthFut={synthFut}
         expiry={expiry}

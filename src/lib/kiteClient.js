@@ -113,11 +113,16 @@ const DEFAULT_LOOKBACK_DAYS = {
 /**
  * @param {number|string} token  instrument_token, from a live quote/chain response
  * @param {string} interval      one of CANDLE_INTERVALS' ids
+ * @param {{from?: string, to?: string}} [range]  explicit "YYYY-MM-DD" bounds,
+ *   overriding the default lookback window — the minute-stepper uses this to
+ *   ask for exactly today's session rather than the last few days of it.
  * @returns {Promise<{interval: string, candles: Array<{t,o,h,l,c,v}>}>}
  */
-export async function fetchLiveCandles(token, interval) {
-  const to = new Date();
-  const from = new Date(to.getTime() - (DEFAULT_LOOKBACK_DAYS[interval] ?? 30) * 86_400_000);
+export async function fetchLiveCandles(token, interval, range) {
+  const to = range?.to ? new Date(range.to) : new Date();
+  const from = range?.from
+    ? new Date(range.from)
+    : new Date(to.getTime() - (DEFAULT_LOOKBACK_DAYS[interval] ?? 30) * 86_400_000);
   const fmt = (d) => d.toISOString().slice(0, 10);
   const qs = new URLSearchParams({ token: String(token), interval, from: fmt(from), to: fmt(to) });
   const resp = await fetch(`/api/kite-candles?${qs}`);

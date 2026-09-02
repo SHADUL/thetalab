@@ -391,6 +391,20 @@ export default function App() {
     return on.includes(expiry) ? on : [...on, expiry].filter(Boolean).sort();
   }, [bundle, today, expiry, liveMode]);
 
+  /* The tab in view can go stale just by sitting open — go live a day after
+     loading (or after an expiry rolls off) and the live-fetch effect above
+     would otherwise ask Kite for quotes on a now-delisted contract and get
+     back nothing at all: every option-derived field blank while Spot, which
+     doesn't depend on the expiry, keeps working. Roll forward to the
+     nearest expiry actually live on the exchange right now. This only
+     starts correcting once `today` is known from a real fetch (see
+     liveExpiries above), so it costs one wasted round-trip on the stale
+     expiry rather than guessing "now" from the client clock. */
+  useEffect(() => {
+    if (!liveMode || liveExpiries.length === 0) return;
+    if (!liveExpiries.includes(expiry)) setExpiry(liveExpiries[0]);
+  }, [liveMode, liveExpiries, expiry]);
+
   const tags = useMemo(
     () => tagExpiries(bundle?._usable ?? [], today), [bundle, today]);
 

@@ -21,10 +21,15 @@ const expShort = (d) => new Date(d + "T00:00:00")
  * both a real position and a what-if structure built to compare against it,
  * and the two need different fates. Picking specific legs (rather than one
  * "add everything held" button) is what keeps that distinction possible.
+ *
+ * An optional name tags every leg added together as one basket, so a
+ * second, unrelated structure added later shows up as its own group in
+ * Portfolio instead of merging into one undifferentiated list.
  */
 function AddToPortfolioPicker({ legs, onAdd }) {
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState(new Set());
+  const [name, setName] = useState("");
   const ref = useRef(null);
 
   const candidates = legs.filter((l) => l.source !== "live" && !l.closedDate);
@@ -70,8 +75,15 @@ function AddToPortfolioPicker({ legs, onAdd }) {
                   </label>
                 ))}
               </div>
-              <button className="chip w-full mt-2 justify-center" disabled={selected.size === 0}
-                onClick={() => { onAdd([...selected]); setSelected(new Set()); setOpen(false); }}>
+              <input value={name} onChange={(e) => setName(e.target.value)}
+                placeholder="Name this basket (optional)"
+                className="w-full text-[12px] px-2 py-1.5 mt-2 rounded-[8px]"
+                style={{ border: "1px solid var(--c-line-2)", background: "var(--c-surface-2)" }} />
+              <button className="chip w-full mt-1.5 justify-center" disabled={selected.size === 0}
+                onClick={() => {
+                  onAdd([...selected], name.trim());
+                  setSelected(new Set()); setName(""); setOpen(false);
+                }}>
                 Add {selected.size > 0 ? selected.size : ""} to Portfolio
               </button>
             </>

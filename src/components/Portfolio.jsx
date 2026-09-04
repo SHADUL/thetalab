@@ -32,6 +32,11 @@ const IST_DATE = (iso) => new Date(iso).toLocaleDateString("en-CA", { timeZone: 
  * spirit: a notification, not an order — App.jsx's own polling effect (not
  * this component, so it keeps running while Portfolio is closed) is what
  * actually watches for a crossing.
+ *
+ * Legs added together through one trip through the picker can share a
+ * basket name, and render as their own named group below — several
+ * strategies tracked side by side, Sensibull-style, rather than one
+ * undifferentiated list every leg from every trade gets dumped into.
  */
 export default function Portfolio({
   legs, symbol, lotFor, kiteConnected, onPartialExit, onSetAlert, onClose,
@@ -113,6 +118,27 @@ export default function Portfolio({
   });
   const realized = closedRows.reduce((s, r) => s + r.pnl, 0);
   const combined = (unrealized ?? 0) + realized;
+
+  /* Every leg added to Portfolio together (one trip through the "Add to
+     Portfolio" picker) can carry a shared basket name — grouped here so a
+     second, unrelated structure added later shows up as its own card
+     instead of merging into one flat list of legs from different trades.
+     Groups only get their own header once there's more than one; a single
+     basket (named or not) still renders as a plain list, unchanged from
+     before this existed. */
+  const groupByBasket = (list) => {
+    const map = new Map();
+    list.forEach((r) => {
+      const key = r.basket || "";
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(r);
+    });
+    return [...map.entries()].map(([name, items]) => ({
+      name, items, subtotal: items.reduce((s, r) => s + (r.pnl ?? 0), 0),
+    }));
+  };
+  const openGroups = groupByBasket(rows);
+  const closedGroups = groupByBasket(closedRows);
 
   /* One point a day, keyed off whatever's actually been seen — a passive
      record of "how am I doing," not a fetch of its own. */
@@ -221,102 +247,113 @@ export default function Portfolio({
               </div>
             )}
 
-            {open.length > 0 && (
-              <div className="overflow-x-auto">
-                <table className="w-full text-[12px]">
-                  <thead>
-                    <tr className="text-muted text-left">
-                      <th className="font-medium py-1 pr-2">Leg</th>
-                      <th className="font-medium py-1 pr-2">Opened</th>
-                      <th className="font-medium py-1 pr-2 text-right">Entry</th>
-                      <th className="font-medium py-1 pr-2 text-right">LTP</th>
-                      <th className="font-medium py-1 pr-2 text-right">Delta</th>
-                      <th className="font-medium py-1 pr-2 text-right">P&L</th>
-                      <th className="font-medium py-1 pr-2 text-right">Alert</th>
-                      <th className="font-medium py-1 text-right">Exit</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rows.map((r) => (
-                      <tr key={r.id} style={{ borderTop: "1px solid var(--c-line)" }}>
-                        <td className="py-1.5 pr-2">
-                          <b className={r.side === "SELL" ? "text-loss" : "text-gain"}>
-                            {r.side === "SELL" ? "S" : "B"}
-                          </b>{" "}
-                          {r.strike}{r.right} <span className="text-faint">{r.expiry} · {r.lots}L</span>
-                          {(r.sl != null || r.target != null) && (
-                            <span className="text-faint">
-                              {" "}· {r.sl != null && `≤${fm(r.sl, 0)}`}{r.sl != null && r.target != null && " "}
-                              {r.target != null && `≥${fm(r.target, 0)}`}
-                            </span>
-                          )}
-                        </td>
-                        <td className="py-1.5 pr-2 text-muted">{r.entryDate}</td>
-                        <td className="py-1.5 pr-2 text-right">{fm(r.entryPrice)}</td>
-                        <td className="py-1.5 pr-2 text-right">{r.ltp != null ? fm(r.ltp) : "—"}</td>
-                        <td className="py-1.5 pr-2 text-right text-muted">
-                          {r.g ? fm(r.dir * r.g.delta * r.qty, 1) : "—"}
-                        </td>
-                        <td className={cx("py-1.5 pr-2 text-right font-medium",
-                          r.pnl == null ? "text-faint" : r.pnl > 0 ? "text-gain" : r.pnl < 0 ? "text-loss" : "")}>
-                          {r.pnl == null ? "—" : sgn(r.pnl)}
-                        </td>
-                        <td className="py-1.5 pr-2 text-right">
-                          {alertingId === r.id ? (
-                            <span className="inline-flex items-center gap-1">
-                              <input value={alertSl} onChange={(e) => setAlertSl(e.target.value.replace(/[^0-9.]/g, ""))}
-                                placeholder="≤" className="n" style={{ width: 44, textAlign: "right" }} />
-                              <input value={alertTarget} onChange={(e) => setAlertTarget(e.target.value.replace(/[^0-9.]/g, ""))}
-                                placeholder="≥" className="n" style={{ width: 44, textAlign: "right" }} />
-                              <button className="mini-btn" title="Save alert" onClick={() => saveAlert(r)}>
-                                <Check size={11} weight="bold" />
-                              </button>
-                              <button className="mini-btn is-danger" title="Cancel" onClick={() => setAlertingId(null)}>
-                                <X size={11} weight="bold" />
-                              </button>
-                            </span>
-                          ) : (
-                            <button className={cx("mini-btn", (r.sl != null || r.target != null) && "text-accent")}
-                              title="Set a price alert" onClick={() => startAlert(r)}>
-                              <Bell size={11} weight={r.sl != null || r.target != null ? "fill" : "bold"} />
-                            </button>
-                          )}
-                        </td>
-                        <td className="py-1.5 text-right whitespace-nowrap">
-                          {exitingId === r.id ? (
-                            <span className="inline-flex items-center gap-1">
-                              <button className="mini-btn" disabled={exitQty <= 1}
-                                onClick={() => setExitQty((q) => Math.max(1, q - 1))}>
-                                <Minus size={10} weight="bold" />
-                              </button>
-                              <span className="n" style={{ minWidth: 18, display: "inline-block", textAlign: "center" }}>
-                                {exitQty}
-                              </span>
-                              <button className="mini-btn" disabled={exitQty >= r.lots}
-                                onClick={() => setExitQty((q) => Math.min(r.lots, q + 1))}>
-                                <Plus size={10} weight="bold" />
-                              </button>
-                              <button className="mini-btn" title="Confirm exit" disabled={r.ltp == null}
-                                onClick={() => confirmExit(r, r.ltp)}>
-                                <Check size={11} weight="bold" />
-                              </button>
-                              <button className="mini-btn is-danger" title="Cancel" onClick={() => setExitingId(null)}>
-                                <X size={11} weight="bold" />
-                              </button>
-                            </span>
-                          ) : (
-                            <button className="mini-btn" title={r.ltp == null ? "No live price yet" : "Book profit / exit"}
-                              disabled={r.ltp == null} onClick={() => startExit(r)}>
-                              <SignOut size={11} weight="bold" />
-                            </button>
-                          )}
-                        </td>
+            {open.length > 0 && openGroups.map((group) => (
+              <div key={group.name} className="mb-3 last:mb-0">
+                {openGroups.length > 1 && (
+                  <div className="flex items-center justify-between px-1 mb-1">
+                    <span className="text-[11.5px] font-semibold">{group.name || "Other positions"}</span>
+                    <span className={cx("text-[11.5px] font-medium",
+                      group.subtotal > 0 ? "text-gain" : group.subtotal < 0 ? "text-loss" : "text-muted")}>
+                      {sgn(group.subtotal)}
+                    </span>
+                  </div>
+                )}
+                <div className="overflow-x-auto">
+                  <table className="w-full text-[12px]">
+                    <thead>
+                      <tr className="text-muted text-left">
+                        <th className="font-medium py-1 pr-2">Leg</th>
+                        <th className="font-medium py-1 pr-2">Opened</th>
+                        <th className="font-medium py-1 pr-2 text-right">Entry</th>
+                        <th className="font-medium py-1 pr-2 text-right">LTP</th>
+                        <th className="font-medium py-1 pr-2 text-right">Delta</th>
+                        <th className="font-medium py-1 pr-2 text-right">P&L</th>
+                        <th className="font-medium py-1 pr-2 text-right">Alert</th>
+                        <th className="font-medium py-1 text-right">Exit</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {group.items.map((r) => (
+                        <tr key={r.id} style={{ borderTop: "1px solid var(--c-line)" }}>
+                          <td className="py-1.5 pr-2">
+                            <b className={r.side === "SELL" ? "text-loss" : "text-gain"}>
+                              {r.side === "SELL" ? "S" : "B"}
+                            </b>{" "}
+                            {r.strike}{r.right} <span className="text-faint">{r.expiry} · {r.lots}L</span>
+                            {(r.sl != null || r.target != null) && (
+                              <span className="text-faint">
+                                {" "}· {r.sl != null && `≤${fm(r.sl, 0)}`}{r.sl != null && r.target != null && " "}
+                                {r.target != null && `≥${fm(r.target, 0)}`}
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-1.5 pr-2 text-muted">{r.entryDate}</td>
+                          <td className="py-1.5 pr-2 text-right">{fm(r.entryPrice)}</td>
+                          <td className="py-1.5 pr-2 text-right">{r.ltp != null ? fm(r.ltp) : "—"}</td>
+                          <td className="py-1.5 pr-2 text-right text-muted">
+                            {r.g ? fm(r.dir * r.g.delta * r.qty, 1) : "—"}
+                          </td>
+                          <td className={cx("py-1.5 pr-2 text-right font-medium",
+                            r.pnl == null ? "text-faint" : r.pnl > 0 ? "text-gain" : r.pnl < 0 ? "text-loss" : "")}>
+                            {r.pnl == null ? "—" : sgn(r.pnl)}
+                          </td>
+                          <td className="py-1.5 pr-2 text-right">
+                            {alertingId === r.id ? (
+                              <span className="inline-flex items-center gap-1">
+                                <input value={alertSl} onChange={(e) => setAlertSl(e.target.value.replace(/[^0-9.]/g, ""))}
+                                  placeholder="≤" className="n" style={{ width: 44, textAlign: "right" }} />
+                                <input value={alertTarget} onChange={(e) => setAlertTarget(e.target.value.replace(/[^0-9.]/g, ""))}
+                                  placeholder="≥" className="n" style={{ width: 44, textAlign: "right" }} />
+                                <button className="mini-btn" title="Save alert" onClick={() => saveAlert(r)}>
+                                  <Check size={11} weight="bold" />
+                                </button>
+                                <button className="mini-btn is-danger" title="Cancel" onClick={() => setAlertingId(null)}>
+                                  <X size={11} weight="bold" />
+                                </button>
+                              </span>
+                            ) : (
+                              <button className={cx("mini-btn", (r.sl != null || r.target != null) && "text-accent")}
+                                title="Set a price alert" onClick={() => startAlert(r)}>
+                                <Bell size={11} weight={r.sl != null || r.target != null ? "fill" : "bold"} />
+                              </button>
+                            )}
+                          </td>
+                          <td className="py-1.5 text-right whitespace-nowrap">
+                            {exitingId === r.id ? (
+                              <span className="inline-flex items-center gap-1">
+                                <button className="mini-btn" disabled={exitQty <= 1}
+                                  onClick={() => setExitQty((q) => Math.max(1, q - 1))}>
+                                  <Minus size={10} weight="bold" />
+                                </button>
+                                <span className="n" style={{ minWidth: 18, display: "inline-block", textAlign: "center" }}>
+                                  {exitQty}
+                                </span>
+                                <button className="mini-btn" disabled={exitQty >= r.lots}
+                                  onClick={() => setExitQty((q) => Math.min(r.lots, q + 1))}>
+                                  <Plus size={10} weight="bold" />
+                                </button>
+                                <button className="mini-btn" title="Confirm exit" disabled={r.ltp == null}
+                                  onClick={() => confirmExit(r, r.ltp)}>
+                                  <Check size={11} weight="bold" />
+                                </button>
+                                <button className="mini-btn is-danger" title="Cancel" onClick={() => setExitingId(null)}>
+                                  <X size={11} weight="bold" />
+                                </button>
+                              </span>
+                            ) : (
+                              <button className="mini-btn" title={r.ltp == null ? "No live price yet" : "Book profit / exit"}
+                                disabled={r.ltp == null} onClick={() => startExit(r)}>
+                                <SignOut size={11} weight="bold" />
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
-            )}
+            ))}
             {open.length > 0 && notifPerm === "denied" && (
               <p className="text-[10.5px] text-muted mt-2 px-1">
                 Browser notifications are blocked — alerts will still show inside the app the next
@@ -331,40 +368,51 @@ export default function Portfolio({
                   {closedShown ? <CaretUp size={10} weight="bold" /> : <CaretDown size={10} weight="bold" />}
                   Booked ({closed.length}) · {sgn(realized)}
                 </button>
-                {closedShown && (
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-[12px]">
-                      <thead>
-                        <tr className="text-muted text-left">
-                          <th className="font-medium py-1 pr-2">Leg</th>
-                          <th className="font-medium py-1 pr-2">Closed</th>
-                          <th className="font-medium py-1 pr-2 text-right">Entry</th>
-                          <th className="font-medium py-1 pr-2 text-right">Exit</th>
-                          <th className="font-medium py-1 text-right">P&L</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {closedRows.map((r) => (
-                          <tr key={r.id} style={{ borderTop: "1px solid var(--c-line)" }} className="opacity-80">
-                            <td className="py-1.5 pr-2">
-                              <b className={r.side === "SELL" ? "text-loss" : "text-gain"}>
-                                {r.side === "SELL" ? "S" : "B"}
-                              </b>{" "}
-                              {r.strike}{r.right} <span className="text-faint">{r.expiry} · {r.lots}L</span>
-                            </td>
-                            <td className="py-1.5 pr-2 text-muted">{r.closedDate}</td>
-                            <td className="py-1.5 pr-2 text-right">{fm(r.entryPrice)}</td>
-                            <td className="py-1.5 pr-2 text-right">{fm(r.closePrice)}</td>
-                            <td className={cx("py-1.5 text-right font-medium",
-                              r.pnl > 0 ? "text-gain" : r.pnl < 0 ? "text-loss" : "")}>
-                              {sgn(r.pnl)}
-                            </td>
+                {closedShown && closedGroups.map((group) => (
+                  <div key={group.name} className="mb-3 last:mb-0">
+                    {closedGroups.length > 1 && (
+                      <div className="flex items-center justify-between px-1 mb-1">
+                        <span className="text-[11px] font-semibold text-muted">{group.name || "Other positions"}</span>
+                        <span className={cx("text-[11px] font-medium",
+                          group.subtotal > 0 ? "text-gain" : group.subtotal < 0 ? "text-loss" : "text-muted")}>
+                          {sgn(group.subtotal)}
+                        </span>
+                      </div>
+                    )}
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-[12px]">
+                        <thead>
+                          <tr className="text-muted text-left">
+                            <th className="font-medium py-1 pr-2">Leg</th>
+                            <th className="font-medium py-1 pr-2">Closed</th>
+                            <th className="font-medium py-1 pr-2 text-right">Entry</th>
+                            <th className="font-medium py-1 pr-2 text-right">Exit</th>
+                            <th className="font-medium py-1 text-right">P&L</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody>
+                          {group.items.map((r) => (
+                            <tr key={r.id} style={{ borderTop: "1px solid var(--c-line)" }} className="opacity-80">
+                              <td className="py-1.5 pr-2">
+                                <b className={r.side === "SELL" ? "text-loss" : "text-gain"}>
+                                  {r.side === "SELL" ? "S" : "B"}
+                                </b>{" "}
+                                {r.strike}{r.right} <span className="text-faint">{r.expiry} · {r.lots}L</span>
+                              </td>
+                              <td className="py-1.5 pr-2 text-muted">{r.closedDate}</td>
+                              <td className="py-1.5 pr-2 text-right">{fm(r.entryPrice)}</td>
+                              <td className="py-1.5 pr-2 text-right">{fm(r.closePrice)}</td>
+                              <td className={cx("py-1.5 text-right font-medium",
+                                r.pnl > 0 ? "text-gain" : r.pnl < 0 ? "text-loss" : "")}>
+                                {sgn(r.pnl)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
-                )}
+                ))}
               </div>
             )}
           </>

@@ -727,8 +727,8 @@ export default function App() {
      automatically. Picking specific ids rather than offering "add
      everything held" keeps a what-if structure sitting next to a real
      position from getting swept into Portfolio just for existing nearby. */
-  const addLegsToPortfolio = (ids) => setLegs((L) => L.map((l) =>
-    ids.includes(l.id) ? { ...l, source: "live" } : l));
+  const addLegsToPortfolio = (ids, basketName) => setLegs((L) => L.map((l) =>
+    ids.includes(l.id) ? { ...l, source: "live", basket: basketName || undefined } : l));
   /* Booking profit on part of a Portfolio position — the exited slice
      splits off and closes immediately at the price Portfolio is showing;
      the rest, if any, stays open under the same id so its row doesn't
@@ -790,12 +790,18 @@ export default function App() {
   }, [book, kiteConnected, instrument]);
 
   /* The wizard builds a structure for the expiry on screen; it replaces what
-     is open on THAT expiry and leaves the rest of the book alone. */
+     is open on THAT expiry and leaves the rest of the book alone — except a
+     leg already tracked in Portfolio (source:"live"), which is never
+     something a wizard reload should be able to silently delete. Without
+     this carve-out, loading any new what-if structure on the same expiry as
+     a real tracked position wiped that position out of the book entirely,
+     not just out of Portfolio. */
   const loadStrategy = (strategyLegs) => {
     setMinuteIdx(null);
     setLegs((L) => [
       ...L.filter((l) => (l.symbol ?? "NIFTY") !== instrument
-                      || (l.expiry ?? expiry) !== expiry || l.closedDate),
+                      || (l.expiry ?? expiry) !== expiry || l.closedDate
+                      || l.source === "live"),
       ...strategyLegs.map((l, i) => ({
         id: Date.now() + i, symbol: instrument, side: l.side, right: l.right,
         strike: l.strike, expiry,

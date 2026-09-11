@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-import { parseBhavcopy } from '../scripts/backfillDailyOhlcv.ts';
+import { parseBhavcopy, isStaleResponse } from '../scripts/backfillDailyOhlcv.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const sample = readFileSync(join(here, 'bhavcopySample.csv'), 'utf8');
@@ -27,4 +27,14 @@ test('parseBhavcopy excludes non-EQ series (BE, GS, ...)', () => {
   const rows = parseBhavcopy(sample);
   assert.ok(!rows.some((r) => r.symbol === '3IINFOLTD'), 'BE series should be filtered out');
   assert.ok(!rows.some((r) => r.symbol === '574GS2026'), 'GS series should be filtered out');
+});
+
+test('isStaleResponse catches NSE serving a previous trading day back on a weekend/holiday', () => {
+  const rows = parseBhavcopy(sample); // every row here is dated 2026-09-09
+  assert.equal(isStaleResponse(rows, '2026-09-09'), false, 'the date actually requested is never stale');
+  assert.equal(isStaleResponse(rows, '2026-09-12'), true, 'a Saturday request answered with Wednesday\'s file is stale');
+});
+
+test('isStaleResponse treats a genuinely empty response as not stale', () => {
+  assert.equal(isStaleResponse([], '2026-09-12'), false, 'empty-but-200 is a different, already-handled case');
 });

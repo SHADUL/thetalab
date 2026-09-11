@@ -81,6 +81,14 @@ async function fetchBhavcopy(date: Date): Promise<BhavRow[] | null> {
   return parseBhavcopy(await resp.text());
 }
 
+/** True when NSE served an earlier trading day's file back instead of the
+ *  requested date — see the call site in the backfill loop. An empty
+ *  `rows` (a genuinely empty-but-200 response) is never stale by this
+ *  definition; that's a separate, already-handled case. */
+export function isStaleResponse(rows: BhavRow[], requestedIso: string): boolean {
+  return rows.length > 0 && rows[0].date !== requestedIso;
+}
+
 function argVal(flag: string, fallback: string): string {
   const i = process.argv.indexOf(flag);
   return i === -1 ? fallback : process.argv[i + 1];
@@ -115,6 +123,15 @@ async function main() {
     const iso = fmtISO(d);
     const rows = await fetchBhavcopy(d);
     if (!rows) { daysWithoutData++; continue; }
+
+    // NSE's archive doesn't cleanly 404 every non-trading day — on some
+    // weekends/holidays it serves the *previous* trading day's file back
+    // with a 200. The content's own DATE1 field gives that away even
+    // though the request URL and HTTP status don't; matching against it
+    // is what makes this loop idempotent rather than silently re-writing
+    // (harmlessly, but wastefully, and confusingly in the logs) a date
+    // already covered by the day it actually belongs to.
+    if (isStaleResponse(rows, iso)) { daysWithoutData++; continue; }
 
     const filtered = rows
       .filter((r) => universe.has(r.symbol))

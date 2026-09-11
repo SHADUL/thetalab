@@ -102,7 +102,12 @@ create table market_regime (
   nifty_above_20ema boolean, nifty_above_50ema boolean, nifty_above_200sma boolean,
   india_vix numeric,
   pct_stocks_above_20ema numeric, pct_stocks_above_50ema numeric, pct_stocks_above_200sma numeric,
-  regime text not null                  -- 'STRONG_BULLISH' | 'BULLISH' | 'NEUTRAL' | 'CAUTIOUS' | 'BEARISH'
+  -- Nullable, not required: this table is filled in multiple passes
+  -- (nifty_close first, from existing options data; breadth/EMA/regime
+  -- classification later, once there's a reason to compute them daily
+  -- rather than backfill once) — a row mid-backfill legitimately has this
+  -- unset, and that's a different thing from a data error.
+  regime text                           -- 'STRONG_BULLISH' | 'BULLISH' | 'NEUTRAL' | 'CAUTIOUS' | 'BEARISH'
 );
 
 -- User-facing state — watchlist and alerts (spec §37/§39). No multi-user

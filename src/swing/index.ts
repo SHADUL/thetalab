@@ -15,3 +15,4 @@ export * from './indicators/oscillators.ts';
 export * from './indicators/trend.ts';
 export * from './indicators/bands.ts';
 export * from './indicators/volume.ts';
+export * from './indicators/splitAdjust.ts';

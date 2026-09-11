@@ -38,9 +38,13 @@ test('52-week distance and ATH track a rolling high correctly', () => {
 });
 
 test('ATH only ever rises, never falls back with price', () => {
-  const bars: Bar[] = [bar('2026-01-01', 100), bar('2026-01-02', 150), bar('2026-01-03', 130), bar('2026-01-04', 160)];
+  // Kept within a single day's realistic trading range on purpose — a
+  // 100->150 jump would trip the split-adjustment threshold in
+  // computeSymbolIndicators and this test would stop testing what it says
+  // it tests.
+  const bars: Bar[] = [bar('2026-01-01', 100), bar('2026-01-02', 140), bar('2026-01-03', 120), bar('2026-01-04', 145)];
   const rows = computeSymbolIndicators(bars, new Map());
-  assert.deepEqual(rows.map((r) => r.high_ath), [100, 150, 150, 160]);
+  assert.deepEqual(rows.map((r) => r.high_ath), [100, 140, 140, 145]);
 });
 
 test('missing NIFTY data for a date degrades relative strength to null, not a wrong number', () => {

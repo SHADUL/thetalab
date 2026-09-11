@@ -30,6 +30,7 @@ import { rsi, macd } from '../indicators/oscillators.ts';
 import { atr, atrPct, adx } from '../indicators/trend.ts';
 import { bollinger } from '../indicators/bands.ts';
 import { volumeRatio } from '../indicators/volume.ts';
+import { adjustForSplits } from '../indicators/splitAdjust.ts';
 
 interface OhlcvRow { symbol: string; date: string; open: number; high: number; low: number; close: number; volume: number; }
 
@@ -66,9 +67,13 @@ function pct(a: number, b: number | null): number | null {
   return b == null || b === 0 ? null : ((a - b) / b) * 100;
 }
 
-/** Pure: takes one symbol's bars (ascending by date) plus a date->NIFTY-close
- *  lookup, returns one row per bar ready to upsert into `indicators`. */
-export function computeSymbolIndicators(bars: Bar[], niftyClose: Map<string, number>) {
+/** Pure: takes one symbol's bars (ascending by date, raw/unadjusted) plus a
+ *  date->NIFTY-close lookup, returns one row per bar ready to upsert into
+ *  `indicators`. Split/bonus-adjusts internally before computing anything —
+ *  every indicator here is derived from the adjusted series, never the raw
+ *  one, so a caller can't accidentally skip that step. */
+export function computeSymbolIndicators(rawBars: Bar[], niftyClose: Map<string, number>) {
+  const bars = adjustForSplits(rawBars);
   const closes = bars.map((b) => b.c);
   const highs = bars.map((b) => b.h);
   const lows = bars.map((b) => b.l);
@@ -120,23 +125,37 @@ export function computeSymbolIndicators(bars: Bar[], niftyClose: Map<string, num
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- supabase-js's generic client type
 // doesn't unify cleanly across separately-inferred createClient() calls; this script only ever
 // touches .from().select().order().range(), so the precision isn't worth fighting for here.
-async function fetchAllOhlcv(supabase: any, onlySymbol?: string): Promise<OhlcvRow[]> {
+//
+// PostgREST caps any unpaginated select() at a default row limit (1000) —
+// silently, no error, no indication which rows survived without an
+// explicit order. Every multi-row read in this script goes through this
+// one paginator specifically so that cap can never bite again quietly.
+async function fetchAllPages<T>(
+  supabase: any, table: string, select: string, orderBy: [string, boolean][], filter?: (q: any) => any,
+): Promise<T[]> {
   const PAGE = 1000;
-  const rows: OhlcvRow[] = [];
+  const rows: T[] = [];
   let from = 0;
   for (;;) {
-    let query = supabase.from('daily_ohlcv').select('symbol,date,open,high,low,close,volume')
-      .order('symbol', { ascending: true }).order('date', { ascending: true })
-      .range(from, from + PAGE - 1);
-    if (onlySymbol) query = query.eq('symbol', onlySymbol);
-    const { data, error } = await query;
+    let query = supabase.from(table).select(select);
+    for (const [col, asc] of orderBy) query = query.order(col, { ascending: asc });
+    if (filter) query = filter(query);
+    const { data, error } = await query.range(from, from + PAGE - 1);
     if (error) throw error;
     if (!data || data.length === 0) break;
-    rows.push(...(data as OhlcvRow[]));
+    rows.push(...(data as T[]));
     if (data.length < PAGE) break;
     from += PAGE;
   }
   return rows;
+}
+
+async function fetchAllOhlcv(supabase: any, onlySymbol?: string): Promise<OhlcvRow[]> {
+  return fetchAllPages<OhlcvRow>(
+    supabase, 'daily_ohlcv', 'symbol,date,open,high,low,close,volume',
+    [['symbol', true], ['date', true]],
+    onlySymbol ? (q: any) => q.eq('symbol', onlySymbol) : undefined,
+  );
 }
 
 async function main() {
@@ -148,11 +167,10 @@ async function main() {
   const onlySymbol = process.argv[2];
 
   console.log('Loading NIFTY close history...');
-  const { data: regimeRows, error: regimeErr } = await supabase.from('market_regime').select('date,nifty_close');
-  if (regimeErr) throw regimeErr;
+  const regimeRows = await fetchAllPages<{ date: string; nifty_close: number | null }>(
+    supabase, 'market_regime', 'date,nifty_close', [['date', true]]);
   const niftyClose = new Map<string, number>(
-    (regimeRows ?? []).filter((r: { nifty_close: number | null }) => r.nifty_close != null)
-      .map((r: { date: string; nifty_close: number }) => [r.date, r.nifty_close]));
+    regimeRows.filter((r) => r.nifty_close != null).map((r) => [r.date, r.nifty_close!]));
   console.log(`  ${niftyClose.size} NIFTY close dates loaded.`);
 
   console.log('Loading daily_ohlcv' + (onlySymbol ? ` for ${onlySymbol}` : ' (full universe)') + '...');

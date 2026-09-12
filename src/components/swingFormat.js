@@ -2,6 +2,15 @@
 // table, and the sizing/settings modals) — pulled out once a third
 // consumer needed the same formatting rather than a fourth copy-paste.
 
+export const PRESETS = [
+  { id: "balanced", label: "Balanced" },
+  { id: "momentum", label: "Momentum" },
+  { id: "breakout", label: "Breakout" },
+  { id: "early_breakout", label: "Early Breakout" },
+  { id: "pullback", label: "Pullback" },
+  { id: "aggressive", label: "Aggressive" },
+];
+
 export function toneClass(tone, prefix = "text") {
   return { gain: `${prefix}-gain`, loss: `${prefix}-loss`, warn: `${prefix}-warn`, accent: `${prefix}-accent`, muted: `${prefix}-muted` }[tone] ?? `${prefix}-muted`;
 }

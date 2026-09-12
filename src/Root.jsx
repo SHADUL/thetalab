@@ -9,9 +9,19 @@ import SwingScanner from "./components/SwingScanner.jsx";
  * route to yet that a URL needs to address (no per-stock deep links, no
  * shareable scanner filters), so introducing a router now would be
  * structure ahead of an actual need for it.
+ *
+ * Persisted to localStorage (not just useState) because Kite's login flow
+ * is a full-page redirect away and back — without this, connecting Kite
+ * from the Swing Scanner would always land back on Options Desk.
  */
+const SECTION_KEY = "thetalabSection";
+
 export default function Root() {
-  const [section, setSection] = useState("options");
+  const [section, setSectionState] = useState(() => localStorage.getItem(SECTION_KEY) ?? "options");
+  const setSection = (s) => {
+    setSectionState(s);
+    try { localStorage.setItem(SECTION_KEY, s); } catch { /* private browsing, etc. — just won't persist */ }
+  };
 
   return (
     <div className="flex flex-col min-h-screen">

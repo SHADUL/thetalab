@@ -147,6 +147,76 @@ create table swing_settings (
 );
 insert into swing_settings (id) values (1);
 
+-- Auto-trade: a separate reserved pool of capital and risk %, deliberately
+-- not the same as swing_settings' fund — manual "Add to Portfolio" adds
+-- and bot-placed trades must not compete for the same money. `enabled` is
+-- the master kill switch: defaults false, so a deploy of this feature
+-- never starts placing real orders until a human flips it on.
+create table auto_trade_settings (
+  id integer primary key default 1,
+  enabled boolean not null default false,
+  reserved_fund numeric not null default 0,
+  risk_pct numeric not null default 5,
+  max_positions integer not null default 5,
+  preset text not null default 'balanced',
+  updated_at timestamptz not null default now(),
+  constraint auto_trade_settings_singleton check (id = 1)
+);
+insert into auto_trade_settings (id) values (1);
+
+-- Kite's access_token normally lives ONLY in the browser's HttpOnly cookie
+-- (kite-callback.js) so the server never holds it. The auto-trader is a
+-- cron-driven backend job with no browser attached, so it needs its own
+-- copy — persisted here after each morning login, same short daily
+-- lifetime as the cookie. This is a materially smaller exposure than
+-- storing a password/TOTP (already ruled out elsewhere in this schema's
+-- history): the token already exists in plaintext in the browser, expires
+-- same-day, and this table is only ever touched by service_role.
+create table kite_session (
+  id integer primary key default 1,
+  access_token text,
+  obtained_at timestamptz,
+  constraint kite_session_singleton check (id = 1)
+);
+insert into kite_session (id) values (1);
+
+-- One row per bot-placed position. Separate from `watchlist` (manual,
+-- no broker order/GTT ids, no protection state) — different lifecycle,
+-- different concept, same "don't overload one table" reasoning as every
+-- other portfolio-shaped table here.
+create table auto_trade_positions (
+  id bigint generated always as identity primary key,
+  symbol text not null references stocks(symbol),
+  status text not null default 'OPEN',      -- 'OPEN' | 'CLOSED'
+  entry_order_id text,
+  gtt_id bigint,                             -- set when the two-leg GTT (stop+target) placed cleanly
+  stop_order_id text,                        -- set only on the SL-M fallback path, when GTT placement failed
+  protection text not null default 'NONE',   -- 'GTT' | 'SL_ONLY' | 'NONE' — what's actually guarding this position
+  entry_date date not null,
+  entry_price numeric not null,
+  entry_swing_score numeric,
+  shares numeric not null,
+  stop numeric,
+  target numeric,
+  exit_date date,
+  exit_price numeric,
+  exit_reason text,                          -- 'TARGET' | 'STOP' | 'MANUAL' | 'GTT_TRIGGERED' | ...
+  created_at timestamptz not null default now()
+);
+create index auto_trade_positions_status_idx on auto_trade_positions(status);
+
+-- Append-only audit trail — every order placed, every skip, every
+-- failure. This IS the transparency mechanism for a system placing real
+-- money orders unattended: the UI's activity log is a straight read of
+-- this table, nothing summarized away.
+create table auto_trade_log (
+  id bigint generated always as identity primary key,
+  at timestamptz not null default now(),
+  level text not null default 'info',        -- 'info' | 'error'
+  message text not null,
+  detail jsonb
+);
+
 create table alert_rules (
   id bigint generated always as identity primary key,
   symbol text references stocks(symbol),   -- null = applies to every scanned symbol
@@ -182,5 +252,9 @@ alter table sector_strength enable row level security;
 alter table market_regime enable row level security;
 alter table watchlist enable row level security;
 alter table swing_settings enable row level security;
+alter table auto_trade_settings enable row level security;
+alter table kite_session enable row level security;
+alter table auto_trade_positions enable row level security;
+alter table auto_trade_log enable row level security;
 alter table alert_rules enable row level security;
 alter table alert_events enable row level security;

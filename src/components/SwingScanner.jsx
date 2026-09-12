@@ -2,16 +2,8 @@ import { useState, useEffect, useCallback } from "react";
 import { MagnifyingGlass, Info, CaretDown, Wallet } from "@phosphor-icons/react";
 import SwingPortfolio from "./SwingPortfolio.jsx";
 import { FundSettingsModal, PositionSizeModal } from "./SwingModals.jsx";
-import { toneClass, fm, inr, pctSigned, scoreTone } from "./swingFormat.js";
-
-const PRESETS = [
-  { id: "balanced", label: "Balanced" },
-  { id: "momentum", label: "Momentum" },
-  { id: "breakout", label: "Breakout" },
-  { id: "early_breakout", label: "Early Breakout" },
-  { id: "pullback", label: "Pullback" },
-  { id: "aggressive", label: "Aggressive" },
-];
+import SwingAutoTrade from "./SwingAutoTrade.jsx";
+import { toneClass, fm, inr, pctSigned, scoreTone, PRESETS } from "./swingFormat.js";
 
 const ENTRY_STATUS_LABEL = {
   BUY_ZONE: "Buy Zone", NEAR_ENTRY: "Near Entry", WAIT_FOR_BREAKOUT: "Wait for Breakout",
@@ -201,6 +193,8 @@ export default function SwingScanner() {
               onClick={() => setView("scanner")} className="seg">Scanner</button>
             <button role="tab" aria-selected={view === "portfolio"} data-on={view === "portfolio"}
               onClick={() => setView("portfolio")} className="seg">My Portfolio</button>
+            <button role="tab" aria-selected={view === "autotrade"} data-on={view === "autotrade"}
+              onClick={() => setView("autotrade")} className="seg">Auto Trade</button>
           </div>
           {view === "scanner" && (
             <div className="relative">
@@ -222,6 +216,15 @@ export default function SwingScanner() {
             them — not re-ranked against the rest of the market like the Scanner is.
           </p>
           <SwingPortfolio refreshKey={portfolioRefreshKey} />
+        </>
+      ) : view === "autotrade" ? (
+        <>
+          <p className="text-[11px] text-muted mb-4 max-w-[70ch]">
+            Places real orders on your connected Zerodha account against a separate reserved fund — enters up to your
+            max positions from the top-ranked stocks, protects each with a stop/target, and rolls into the next best
+            one when a position closes. Off by default; nothing trades until you turn it on below.
+          </p>
+          <SwingAutoTrade />
         </>
       ) : (
       <>

@@ -9,8 +9,15 @@
  * Kite's access tokens expire around 6am IST the next day, not on a fixed
  * duration from issuance. 20 hours is a deliberately conservative cover for
  * "the rest of today" without meaningfully overstaying that boundary.
+ *
+ * Also mirrors the token into the `kite_session` table (service_role only)
+ * for the auto-trade cron job — a backend job with no browser attached
+ * can't read an HttpOnly cookie, so it needs its own copy. This is the one
+ * place that write happens; if it fails, the cookie-based login (options
+ * desk quotes/candles) still succeeds, since that's independent of it.
  */
 import { createHash } from 'node:crypto';
+import { createClient } from '@supabase/supabase-js';
 
 const TOKEN_COOKIE = 'kite_token';
 const COOKIE_MAX_AGE_S = 20 * 60 * 60;
@@ -54,6 +61,17 @@ export default async function handler(req, res) {
       'HttpOnly', 'Secure', 'SameSite=Lax', 'Path=/', `Max-Age=${COOKIE_MAX_AGE_S}`,
     ].join('; ');
     res.setHeader('Set-Cookie', cookie);
+
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (supabaseUrl && supabaseKey) {
+      try {
+        const supabase = createClient(supabaseUrl, supabaseKey, { auth: { persistSession: false } });
+        await supabase.from('kite_session')
+          .upsert({ id: 1, access_token: body.data.access_token, obtained_at: new Date().toISOString() });
+      } catch { /* auto-trade will just see no session and no-op until next login */ }
+    }
+
     res.writeHead(302, { Location: '/?kite=connected' });
     res.end();
   } catch {

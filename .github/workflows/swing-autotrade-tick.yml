@@ -1,0 +1,22 @@
+name: Swing Auto-Trade Tick
+
+# Runs every 5 minutes across a window comfortably wider than NSE market
+# hours (9:15-15:30 IST = 3:45-10:00 UTC) — the endpoint itself checks the
+# real IST clock and no-ops outside actual market hours, so this window
+# only needs to be a superset, not exact. Using GitHub Actions rather than
+# Vercel's own cron so this isn't gated by Vercel plan-specific interval
+# limits.
+on:
+  schedule:
+    - cron: '*/5 3-10 * * 1-5'
+  workflow_dispatch: {}
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call auto-trade tick endpoint
+        run: |
+          curl -sf -X POST "https://thetalab-beta.vercel.app/api/swing-autotrade-tick" \
+            -H "Authorization: Bearer ${{ secrets.AUTOTRADE_CRON_SECRET }}" \
+            -w "\nHTTP %{http_code}\n"

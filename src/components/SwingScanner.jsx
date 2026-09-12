@@ -168,6 +168,13 @@ export default function SwingScanner() {
     });
     const body = await res.json();
     if (!res.ok || body.error) throw new Error(body.message || body.error || "Failed to add.");
+    if (body.alreadyTracked) {
+      // The entry point is captured once and never overwritten, so a
+      // second "add" on an already-tracked symbol is a no-op by design —
+      // but resolving silently would look like this sizing was applied
+      // when it wasn't. Surface it as an error in the modal instead.
+      throw new Error(`${symbol} is already in your portfolio — remove it first to re-add with a new share count.`);
+    }
     setPortfolioRefreshKey((k) => k + 1);
     setView("portfolio");
     setSelected(null);

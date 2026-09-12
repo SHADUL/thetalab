@@ -218,14 +218,7 @@ export default function SwingScanner() {
           <SwingPortfolio refreshKey={portfolioRefreshKey} />
         </>
       ) : view === "autotrade" ? (
-        <>
-          <p className="text-[11px] text-muted mb-4 max-w-[70ch]">
-            Places real orders on your connected Zerodha account against a separate reserved fund — enters up to your
-            max positions from the top-ranked stocks, protects each with a stop/target, and rolls into the next best
-            one when a position closes. Off by default; nothing trades until you turn it on below.
-          </p>
-          <SwingAutoTrade />
-        </>
+        <SwingAutoTrade />
       ) : (
       <>
       <p className="text-[11px] text-muted mb-4 max-w-[70ch]">

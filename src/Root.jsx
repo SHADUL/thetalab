@@ -1,0 +1,35 @@
+import { useState } from "react";
+import App from "./App.jsx";
+import SwingScanner from "./components/SwingScanner.jsx";
+
+/**
+ * Options Desk and Swing Scanner are two genuinely separate products that
+ * happen to share this codebase and design system — not two views of the
+ * same data. A plain state switch is enough for that; there's nothing to
+ * route to yet that a URL needs to address (no per-stock deep links, no
+ * shareable scanner filters), so introducing a router now would be
+ * structure ahead of an actual need for it.
+ */
+export default function Root() {
+  const [section, setSection] = useState("options");
+
+  return (
+    <div className="flex flex-col min-h-screen">
+      <div className="flex items-center justify-between px-3 py-1.5 shrink-0"
+        style={{ borderBottom: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+        <span className="text-[12px] font-bold tracking-[-0.02em]">
+          theta<span className="text-accent">lab</span>
+        </span>
+        <div className="seg-track" role="tablist" aria-label="Section">
+          <button role="tab" aria-selected={section === "options"} data-on={section === "options"}
+            onClick={() => setSection("options")} className="seg">Options Desk</button>
+          <button role="tab" aria-selected={section === "swing"} data-on={section === "swing"}
+            onClick={() => setSection("swing")} className="seg">Swing Scanner</button>
+        </div>
+      </div>
+      <div className="flex-1 min-h-0">
+        {section === "options" ? <App /> : <SwingScanner />}
+      </div>
+    </div>
+  );
+}

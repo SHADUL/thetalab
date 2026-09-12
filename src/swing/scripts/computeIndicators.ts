@@ -30,6 +30,7 @@ import { rsi, macd } from '../indicators/oscillators.ts';
 import { atr, atrPct, adx } from '../indicators/trend.ts';
 import { bollinger } from '../indicators/bands.ts';
 import { volumeRatio } from '../indicators/volume.ts';
+import { fetchAllPages } from './dbPaging.ts';
 import { adjustForSplits } from '../indicators/splitAdjust.ts';
 
 interface OhlcvRow { symbol: string; date: string; open: number; high: number; low: number; close: number; volume: number; }
@@ -120,34 +121,6 @@ export function computeSymbolIndicators(rawBars: Bar[], niftyClose: Map<string, 
       rs_vs_sector_20d: null, // needs sector_strength built first — separate pass
     };
   });
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- supabase-js's generic client type
-// doesn't unify cleanly across separately-inferred createClient() calls; this script only ever
-// touches .from().select().order().range(), so the precision isn't worth fighting for here.
-//
-// PostgREST caps any unpaginated select() at a default row limit (1000) —
-// silently, no error, no indication which rows survived without an
-// explicit order. Every multi-row read in this script goes through this
-// one paginator specifically so that cap can never bite again quietly.
-async function fetchAllPages<T>(
-  supabase: any, table: string, select: string, orderBy: [string, boolean][], filter?: (q: any) => any,
-): Promise<T[]> {
-  const PAGE = 1000;
-  const rows: T[] = [];
-  let from = 0;
-  for (;;) {
-    let query = supabase.from(table).select(select);
-    for (const [col, asc] of orderBy) query = query.order(col, { ascending: asc });
-    if (filter) query = filter(query);
-    const { data, error } = await query.range(from, from + PAGE - 1);
-    if (error) throw error;
-    if (!data || data.length === 0) break;
-    rows.push(...(data as T[]));
-    if (data.length < PAGE) break;
-    from += PAGE;
-  }
-  return rows;
 }
 
 async function fetchAllOhlcv(supabase: any, onlySymbol?: string): Promise<OhlcvRow[]> {

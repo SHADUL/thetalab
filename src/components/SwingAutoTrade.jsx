@@ -31,7 +31,7 @@ function SettingsPanel({ settings, onSaved }) {
     setSaving(true);
     setError(null);
     try {
-      const res = await fetch("/api/swing-autotrade-settings", {
+      const res = await fetch("/api/swing-autotrade", {
         method: "PUT", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: nextEnabled, reservedFund: rf, riskPct: rp, maxPositions: mp, preset }),
       });
@@ -177,7 +177,7 @@ export default function SwingAutoTrade() {
   const load = useCallback(() => {
     setLoading(true);
     setError(null);
-    fetch("/api/swing-autotrade-positions")
+    fetch("/api/swing-autotrade")
       .then((r) => r.json())
       .then((body) => {
         if (body.error) throw new Error(body.message || body.error);

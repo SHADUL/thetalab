@@ -32,6 +32,19 @@ async function latestScoredDate(supabase) {
   return data?.date ?? null;
 }
 
+// swing_settings may not exist yet on a deploy that lands before its
+// migration is run — fall back to an unset fund (0/5%) rather than
+// failing the whole endpoint, since the rest of the response (entry vs
+// current price/score) works fine without it.
+async function loadFundSettings(supabase) {
+  let settingsRow = null;
+  try {
+    const { data } = await supabase.from('swing_settings').select('total_fund,risk_pct').eq('id', 1).maybeSingle();
+    settingsRow = data;
+  } catch { /* not migrated yet */ }
+  return { totalFund: settingsRow?.total_fund ?? 0, riskPct: settingsRow?.risk_pct ?? 5 };
+}
+
 export default async function handler(req, res) {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -45,32 +58,25 @@ export default async function handler(req, res) {
     if (req.method === 'GET') {
       const { data: watchRows, error: watchErr } = await supabase.from('watchlist').select('*').order('added_at', { ascending: false });
       if (watchErr) throw watchErr;
-      if (!watchRows.length) { res.status(200).json({ date: null, positions: [] }); return; }
+      if (!watchRows.length) {
+        const { totalFund, riskPct } = await loadFundSettings(supabase);
+        res.status(200).json({ date: null, positions: [], fund: { totalFund, riskPct, allocated: 0, available: totalFund } });
+        return;
+      }
 
       const symbols = watchRows.map((w) => w.symbol);
       const date = await latestScoredDate(supabase);
 
-      const [{ data: stocksData, error: stocksErr }, scoresResult, ohlcvResult] = await Promise.all([
+      const [{ data: stocksData, error: stocksErr }, scoresResult, ohlcvResult, { totalFund, riskPct }] = await Promise.all([
         supabase.from('stocks').select('symbol,name,sector').in('symbol', symbols),
         date ? supabase.from('swing_scores').select('symbol,swing_score,entry_status,target,stop')
           .eq('date', date).eq('preset', 'balanced').in('symbol', symbols) : { data: [] },
         date ? supabase.from('daily_ohlcv').select('symbol,close').eq('date', date).in('symbol', symbols) : { data: [] },
+        loadFundSettings(supabase),
       ]);
       if (stocksErr) throw stocksErr;
       if (scoresResult.error) throw scoresResult.error;
       if (ohlcvResult.error) throw ohlcvResult.error;
-
-      // swing_settings may not exist yet on a deploy that lands before its
-      // migration is run — fall back to an unset fund (0/5%) rather than
-      // failing the whole endpoint, since the rest of this response (entry
-      // vs current price/score) works fine without it.
-      let settingsRow = null;
-      try {
-        const { data } = await supabase.from('swing_settings').select('total_fund,risk_pct').eq('id', 1).maybeSingle();
-        settingsRow = data;
-      } catch { /* not migrated yet */ }
-      const totalFund = settingsRow?.total_fund ?? 0;
-      const riskPct = settingsRow?.risk_pct ?? 5;
 
       const stocksBySymbol = new Map(stocksData.map((s) => [s.symbol, s]));
       const scoresBySymbol = new Map((scoresResult.data ?? []).map((s) => [s.symbol, s]));

@@ -80,6 +80,10 @@ create table swing_scores (
   setup_type text,                      -- 'BREAKOUT' | 'MOMENTUM' | 'PULLBACK' | ...
   entry_status text,                    -- 'BUY_ZONE' | 'NEAR_ENTRY' | 'EXTENDED' | ...
   extension_risk text,                  -- 'LOW' | 'MEDIUM' | 'HIGH'
+  entry numeric,                        -- the trade plan (spec §20) — persisted here, not
+  stop numeric,                         -- recomputed per API request, since that would mean
+  target numeric,                       -- re-fetching full price history for every symbol on
+  risk_reward numeric,                  -- every page load just to redisplay numbers already known
   preset text not null default 'balanced', -- which weighting produced this row (spec §22/§57)
   primary key (symbol, date, preset)
 );

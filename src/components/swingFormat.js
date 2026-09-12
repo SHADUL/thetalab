@@ -1,0 +1,21 @@
+// Shared display helpers for the Swing Scanner UI (scanner table, portfolio
+// table, and the sizing/settings modals) — pulled out once a third
+// consumer needed the same formatting rather than a fourth copy-paste.
+
+export function toneClass(tone, prefix = "text") {
+  return { gain: `${prefix}-gain`, loss: `${prefix}-loss`, warn: `${prefix}-warn`, accent: `${prefix}-accent`, muted: `${prefix}-muted` }[tone] ?? `${prefix}-muted`;
+}
+export function fm(v, d = 2) { return v == null || Number.isNaN(v) ? "—" : Number(v).toFixed(d); }
+export function inr(v) {
+  if (v == null || Number.isNaN(v)) return "—";
+  return `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+}
+export function pctSigned(v) {
+  if (v == null) return "—";
+  return `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`;
+}
+export function scoreTone(score) {
+  if (score >= 80) return "gain";
+  if (score >= 60) return "accent";
+  return "muted";
+}

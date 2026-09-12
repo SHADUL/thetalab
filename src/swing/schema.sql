@@ -126,8 +126,26 @@ create table watchlist (
   -- this done since I added it" has no starting point to compare against.
   entry_date date,
   entry_price numeric,
-  entry_swing_score numeric
+  entry_swing_score numeric,
+  -- How many shares this position was sized at, computed client-side at
+  -- add time from swing_settings' fund + risk% and this stock's stop
+  -- distance (never a guessed flat count) — captured once, same as the
+  -- other entry_* columns.
+  shares numeric
 );
+
+-- Singleton: one fund, one risk-per-trade %, read by the position-sizing
+-- calculation before a stock is added to the watchlist. Not per-symbol —
+-- deliberately global, same "no multi-user concept" reasoning as every
+-- other table here.
+create table swing_settings (
+  id integer primary key default 1,
+  total_fund numeric not null default 0,
+  risk_pct numeric not null default 5,
+  updated_at timestamptz not null default now(),
+  constraint swing_settings_singleton check (id = 1)
+);
+insert into swing_settings (id) values (1);
 
 create table alert_rules (
   id bigint generated always as identity primary key,
@@ -163,5 +181,6 @@ alter table swing_scores enable row level security;
 alter table sector_strength enable row level security;
 alter table market_regime enable row level security;
 alter table watchlist enable row level security;
+alter table swing_settings enable row level security;
 alter table alert_rules enable row level security;
 alter table alert_events enable row level security;

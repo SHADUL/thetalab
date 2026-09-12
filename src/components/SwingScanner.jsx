@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
-import { MagnifyingGlass, Info, CaretDown } from "@phosphor-icons/react";
+import { MagnifyingGlass, Info, CaretDown, Wallet } from "@phosphor-icons/react";
 import SwingPortfolio from "./SwingPortfolio.jsx";
+import { FundSettingsModal, PositionSizeModal } from "./SwingModals.jsx";
+import { toneClass, fm, inr, pctSigned, scoreTone } from "./swingFormat.js";
 
 const PRESETS = [
   { id: "balanced", label: "Balanced" },
@@ -30,21 +32,12 @@ const FACTOR_LABEL = {
   volume: "Volume", sector: "Sector", volatility: "Volatility", riskReward: "Risk/Reward",
 };
 
-function toneClass(tone, prefix = "text") {
-  return { gain: `${prefix}-gain`, loss: `${prefix}-loss`, warn: `${prefix}-warn`, accent: `${prefix}-accent`, muted: `${prefix}-muted` }[tone] ?? `${prefix}-muted`;
-}
-
 function scoreLabel(score) {
   if (score >= 90) return "VERY STRONG";
   if (score >= 80) return "STRONG";
   if (score >= 70) return "GOOD";
   if (score >= 60) return "FAIR";
   return "WEAK";
-}
-function scoreTone(score) {
-  if (score >= 80) return "gain";
-  if (score >= 60) return "accent";
-  return "muted";
 }
 
 function ScoreBadge({ score, size = "md" }) {
@@ -65,16 +58,6 @@ function ScoreBadge({ score, size = "md" }) {
   );
 }
 
-function fm(v, d = 2) { return v == null || Number.isNaN(v) ? "—" : Number(v).toFixed(d); }
-function inr(v) {
-  if (v == null) return "—";
-  return `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
-}
-function pctSigned(v) {
-  if (v == null) return "—";
-  return `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`;
-}
-
 function FactorBar({ label, value }) {
   const tone = scoreTone(value);
   return (
@@ -90,23 +73,7 @@ function FactorBar({ label, value }) {
   );
 }
 
-function DetailPanel({ stock, onClose, onAdd }) {
-  const [addState, setAddState] = useState("idle"); // idle | adding | added | already | error
-  const [addError, setAddError] = useState(null);
-
-  const handleAdd = async () => {
-    setAddState("adding");
-    setAddError(null);
-    try {
-      const body = await onAdd(stock.symbol);
-      setAddState(body?.alreadyTracked ? "already" : "added");
-    } catch (e) {
-      setAddState("error");
-      setAddError(e.message);
-    }
-  };
-  const addLabel = { idle: "Add to Portfolio", adding: "Adding…", added: "Added ✓", already: "Already Tracked", error: "Retry" }[addState];
-
+function DetailPanel({ stock, onClose, onAddClick }) {
   return (
     <div className="p-4 rounded-[14px]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
       <div className="flex items-start justify-between mb-3">
@@ -118,14 +85,10 @@ function DetailPanel({ stock, onClose, onAdd }) {
           <span className="text-[11px] text-muted">{stock.sector ?? "Sector unknown"}</span>
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={handleAdd} disabled={addState === "adding" || addState === "added" || addState === "already"}
-            className={`topstep ${addState === "added" || addState === "already" ? "text-gain" : ""}`}>
-            {addLabel}
-          </button>
+          <button onClick={() => onAddClick(stock)} className="topstep">Add to Portfolio</button>
           <button onClick={onClose} className="topstep">Close</button>
         </div>
       </div>
-      {addState === "error" && <p className="text-[11px] text-loss mb-3">{addError}</p>}
 
       <div className="flex items-center gap-4 mb-4">
         <ScoreBadge score={stock.swingScore} size="lg" />
@@ -173,6 +136,15 @@ export default function SwingScanner() {
   const [error, setError] = useState(null);
   const [selected, setSelected] = useState(null);
   const [portfolioRefreshKey, setPortfolioRefreshKey] = useState(0);
+  const [settings, setSettings] = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [sizingStock, setSizingStock] = useState(null);
+
+  useEffect(() => {
+    fetch("/api/swing-settings").then((r) => r.json()).then((body) => {
+      if (!body.error) setSettings(body);
+    }).catch(() => {});
+  }, []);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -190,13 +162,15 @@ export default function SwingScanner() {
 
   useEffect(() => { load(); }, [load]);
 
-  const addToPortfolio = useCallback(async (symbol) => {
+  const confirmAddToPortfolio = useCallback(async (symbol, shares) => {
     const res = await fetch("/api/swing-watchlist", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ symbol }),
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ symbol, shares }),
     });
     const body = await res.json();
     if (!res.ok || body.error) throw new Error(body.message || body.error || "Failed to add.");
     setPortfolioRefreshKey((k) => k + 1);
+    setView("portfolio");
+    setSelected(null);
     return body;
   }, []);
 
@@ -211,6 +185,10 @@ export default function SwingScanner() {
           {view === "scanner" && data?.date && <span className="text-[11px] text-muted">as of {data.date}</span>}
         </div>
         <div className="flex items-center gap-3">
+          <button onClick={() => setShowSettings(true)} className="topstep flex items-center gap-1.5">
+            <Wallet size={12} weight="bold" />
+            {settings ? `${inr(settings.totalFund)} · ${settings.riskPct}% risk` : "Set Fund"}
+          </button>
           <div className="seg-track" role="tablist" aria-label="View">
             <button role="tab" aria-selected={view === "scanner"} data-on={view === "scanner"}
               onClick={() => setView("scanner")} className="seg">Scanner</button>
@@ -306,10 +284,18 @@ export default function SwingScanner() {
               </tbody>
             </table>
           </div>
-          {selected && <DetailPanel key={selected.symbol} stock={selected} onClose={() => setSelected(null)} onAdd={addToPortfolio} />}
+          {selected && <DetailPanel key={selected.symbol} stock={selected} onClose={() => setSelected(null)} onAddClick={setSizingStock} />}
         </div>
       )}
       </>
+      )}
+
+      {showSettings && (
+        <FundSettingsModal settings={settings} onClose={() => setShowSettings(false)} onSaved={setSettings} />
+      )}
+      {sizingStock && (
+        <PositionSizeModal stock={sizingStock} onClose={() => setSizingStock(null)}
+          onConfirm={(shares) => confirmAddToPortfolio(sizingStock.symbol, shares)} />
       )}
     </div>
   );

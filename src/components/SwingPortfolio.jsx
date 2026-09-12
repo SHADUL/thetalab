@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { Info, X } from "@phosphor-icons/react";
+import { toneClass, inr, pctSigned } from "./swingFormat.js";
 
 const STATUS_LABEL = {
   TARGET_HIT: "Target Hit", NEAR_TARGET: "Near Target", HOLD: "Hold",
@@ -8,17 +9,6 @@ const STATUS_LABEL = {
 const STATUS_TONE = {
   TARGET_HIT: "gain", NEAR_TARGET: "gain", HOLD: "muted", WEAKENING: "warn", STOP_RISK: "loss",
 };
-function toneClass(tone) {
-  return { gain: "text-gain", loss: "text-loss", warn: "text-warn", accent: "text-accent", muted: "text-muted" }[tone] ?? "text-muted";
-}
-function inr(v) {
-  if (v == null) return "—";
-  return `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
-}
-function pctSigned(v) {
-  if (v == null) return "—";
-  return `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`;
-}
 
 /**
  * "My Portfolio" — spec §46's ACTIVE SWINGS view. Deliberately its own
@@ -60,6 +50,9 @@ export default function SwingPortfolio({ refreshKey }) {
   };
 
   const positions = data?.positions ?? [];
+  const fund = data?.fund;
+  const totalPnlAmount = positions.reduce((sum, p) => sum + (p.pnlAmount ?? 0), 0);
+  const hasAnyPnl = positions.some((p) => p.pnlAmount != null);
 
   if (loading) return <p className="text-[12.5px] text-muted py-10 text-center">Loading…</p>;
   if (error) {
@@ -70,67 +63,88 @@ export default function SwingPortfolio({ refreshKey }) {
       </div>
     );
   }
-  if (positions.length === 0) {
-    return (
-      <p className="text-[12.5px] text-muted leading-relaxed py-10 text-center max-w-[50ch] mx-auto">
-        Nothing tracked yet. Open a stock from the Scanner and use <b>Add to Portfolio</b> to start
-        watching its performance day over day, from whatever price and score it had when you added it.
-      </p>
-    );
-  }
 
   return (
-    <div className="overflow-x-auto rounded-[14px]" style={{ border: "1px solid var(--c-line)" }}>
-      <table className="w-full text-[12px]">
-        <thead>
-          <tr className="text-muted text-left" style={{ background: "var(--c-surface-2)" }}>
-            <th className="font-medium py-2 pl-3 pr-2">Stock</th>
-            <th className="font-medium py-2 pr-2 text-right">Entry</th>
-            <th className="font-medium py-2 pr-2 text-right">Current</th>
-            <th className="font-medium py-2 pr-2 text-right">P&amp;L%</th>
-            <th className="font-medium py-2 pr-2 text-right">Days Held</th>
-            <th className="font-medium py-2 pr-2 text-right">Target</th>
-            <th className="font-medium py-2 pr-2 text-right">Dist. to Target</th>
-            <th className="font-medium py-2 pr-2 text-right">Stop</th>
-            <th className="font-medium py-2 pr-2 text-right">Score</th>
-            <th className="font-medium py-2 pr-2 text-right">Score Δ</th>
-            <th className="font-medium py-2 pr-2">Status</th>
-            <th className="font-medium py-2 pr-3" />
-          </tr>
-        </thead>
-        <tbody>
-          {positions.map((p) => (
-            <tr key={p.symbol} style={{ borderTop: "1px solid var(--c-line)" }}>
-              <td className="py-2 pl-3 pr-2">
-                <div className="font-semibold">{p.symbol}</div>
-                <div className="text-[10.5px] text-faint">{p.entryDate}</div>
-              </td>
-              <td className="py-2 pr-2 text-right n">{inr(p.entryPrice)}</td>
-              <td className="py-2 pr-2 text-right n">{inr(p.currentPrice)}</td>
-              <td className={`py-2 pr-2 text-right n font-semibold ${p.pnlPct == null ? "text-faint" : p.pnlPct >= 0 ? "text-gain" : "text-loss"}`}>
-                {pctSigned(p.pnlPct)}
-              </td>
-              <td className="py-2 pr-2 text-right n text-muted">{p.daysHeld ?? "—"}</td>
-              <td className="py-2 pr-2 text-right n text-gain">{inr(p.target)}</td>
-              <td className="py-2 pr-2 text-right n">{pctSigned(p.distanceToTargetPct)}</td>
-              <td className="py-2 pr-2 text-right n text-loss">{inr(p.stop)}</td>
-              <td className="py-2 pr-2 text-right n">{p.currentSwingScore ?? "—"}</td>
-              <td className={`py-2 pr-2 text-right n font-semibold ${p.scoreChange == null ? "text-faint" : p.scoreChange >= 0 ? "text-gain" : "text-loss"}`}>
-                {p.scoreChange == null ? "—" : `${p.scoreChange >= 0 ? "+" : ""}${p.scoreChange}`}
-              </td>
-              <td className={`py-2 pr-2 text-[11px] font-medium ${toneClass(STATUS_TONE[p.status])}`}>
-                {STATUS_LABEL[p.status] ?? p.status}
-              </td>
-              <td className="py-2 pr-3 text-right">
-                <button onClick={() => remove(p.symbol)} disabled={removing === p.symbol}
-                  className="mini-btn is-danger" title="Remove from Portfolio">
-                  <X size={11} weight="bold" />
-                </button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="flex flex-col gap-3">
+      {fund && (
+        <div className="grid grid-cols-4 gap-2.5 p-3 rounded-[12px] text-[11px]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface-2)" }}>
+          <div><div className="text-muted">Total Fund</div><div className="n font-semibold">{inr(fund.totalFund)}</div></div>
+          <div><div className="text-muted">Allocated</div><div className="n font-semibold">{inr(fund.allocated)}</div></div>
+          <div><div className="text-muted">Available</div><div className={`n font-semibold ${fund.available < 0 ? "text-loss" : ""}`}>{inr(fund.available)}</div></div>
+          <div>
+            <div className="text-muted">Open P&amp;L</div>
+            <div className={`n font-semibold ${!hasAnyPnl ? "text-faint" : totalPnlAmount >= 0 ? "text-gain" : "text-loss"}`}>
+              {hasAnyPnl ? inr(totalPnlAmount) : "—"}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {positions.length === 0 ? (
+        <p className="text-[12.5px] text-muted leading-relaxed py-10 text-center max-w-[50ch] mx-auto">
+          Nothing tracked yet. Open a stock from the Scanner and use <b>Add to Portfolio</b> to start
+          watching its performance day over day, from whatever price and score it had when you added it.
+        </p>
+      ) : (
+        <div className="overflow-x-auto rounded-[14px]" style={{ border: "1px solid var(--c-line)" }}>
+          <table className="w-full text-[12px]">
+            <thead>
+              <tr className="text-muted text-left" style={{ background: "var(--c-surface-2)" }}>
+                <th className="font-medium py-2 pl-3 pr-2">Stock</th>
+                <th className="font-medium py-2 pr-2 text-right">Shares</th>
+                <th className="font-medium py-2 pr-2 text-right">Entry</th>
+                <th className="font-medium py-2 pr-2 text-right">Current</th>
+                <th className="font-medium py-2 pr-2 text-right">P&amp;L</th>
+                <th className="font-medium py-2 pr-2 text-right">P&amp;L%</th>
+                <th className="font-medium py-2 pr-2 text-right">Days Held</th>
+                <th className="font-medium py-2 pr-2 text-right">Target</th>
+                <th className="font-medium py-2 pr-2 text-right">Dist. to Target</th>
+                <th className="font-medium py-2 pr-2 text-right">Stop</th>
+                <th className="font-medium py-2 pr-2 text-right">Score</th>
+                <th className="font-medium py-2 pr-2 text-right">Score Δ</th>
+                <th className="font-medium py-2 pr-2">Status</th>
+                <th className="font-medium py-2 pr-3" />
+              </tr>
+            </thead>
+            <tbody>
+              {positions.map((p) => (
+                <tr key={p.symbol} style={{ borderTop: "1px solid var(--c-line)" }}>
+                  <td className="py-2 pl-3 pr-2">
+                    <div className="font-semibold">{p.symbol}</div>
+                    <div className="text-[10.5px] text-faint">{p.entryDate}</div>
+                  </td>
+                  <td className="py-2 pr-2 text-right n">{p.shares ?? "—"}</td>
+                  <td className="py-2 pr-2 text-right n">{inr(p.entryPrice)}</td>
+                  <td className="py-2 pr-2 text-right n">{inr(p.currentPrice)}</td>
+                  <td className={`py-2 pr-2 text-right n font-semibold ${p.pnlAmount == null ? "text-faint" : p.pnlAmount >= 0 ? "text-gain" : "text-loss"}`}>
+                    {p.pnlAmount == null ? "—" : inr(p.pnlAmount)}
+                  </td>
+                  <td className={`py-2 pr-2 text-right n font-semibold ${p.pnlPct == null ? "text-faint" : p.pnlPct >= 0 ? "text-gain" : "text-loss"}`}>
+                    {pctSigned(p.pnlPct)}
+                  </td>
+                  <td className="py-2 pr-2 text-right n text-muted">{p.daysHeld ?? "—"}</td>
+                  <td className="py-2 pr-2 text-right n text-gain">{inr(p.target)}</td>
+                  <td className="py-2 pr-2 text-right n">{pctSigned(p.distanceToTargetPct)}</td>
+                  <td className="py-2 pr-2 text-right n text-loss">{inr(p.stop)}</td>
+                  <td className="py-2 pr-2 text-right n">{p.currentSwingScore ?? "—"}</td>
+                  <td className={`py-2 pr-2 text-right n font-semibold ${p.scoreChange == null ? "text-faint" : p.scoreChange >= 0 ? "text-gain" : "text-loss"}`}>
+                    {p.scoreChange == null ? "—" : `${p.scoreChange >= 0 ? "+" : ""}${p.scoreChange}`}
+                  </td>
+                  <td className={`py-2 pr-2 text-[11px] font-medium ${toneClass(STATUS_TONE[p.status])}`}>
+                    {STATUS_LABEL[p.status] ?? p.status}
+                  </td>
+                  <td className="py-2 pr-3 text-right">
+                    <button onClick={() => remove(p.symbol)} disabled={removing === p.symbol}
+                      className="mini-btn is-danger" title="Remove from Portfolio">
+                      <X size={11} weight="bold" />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

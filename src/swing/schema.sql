@@ -120,7 +120,13 @@ create table market_regime (
 create table watchlist (
   symbol text primary key references stocks(symbol),
   added_at timestamptz not null default now(),
-  note text
+  note text,
+  -- Captured at add time so performance-since-added (spec §46's "ACTIVE
+  -- SWINGS" view) has something to measure from — without these, "how has
+  -- this done since I added it" has no starting point to compare against.
+  entry_date date,
+  entry_price numeric,
+  entry_swing_score numeric
 );
 
 create table alert_rules (

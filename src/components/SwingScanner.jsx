@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { MagnifyingGlass, Info, CaretDown } from "@phosphor-icons/react";
+import SwingPortfolio from "./SwingPortfolio.jsx";
 
 const PRESETS = [
   { id: "balanced", label: "Balanced" },
@@ -89,7 +90,23 @@ function FactorBar({ label, value }) {
   );
 }
 
-function DetailPanel({ stock, onClose }) {
+function DetailPanel({ stock, onClose, onAdd }) {
+  const [addState, setAddState] = useState("idle"); // idle | adding | added | already | error
+  const [addError, setAddError] = useState(null);
+
+  const handleAdd = async () => {
+    setAddState("adding");
+    setAddError(null);
+    try {
+      const body = await onAdd(stock.symbol);
+      setAddState(body?.alreadyTracked ? "already" : "added");
+    } catch (e) {
+      setAddState("error");
+      setAddError(e.message);
+    }
+  };
+  const addLabel = { idle: "Add to Portfolio", adding: "Adding…", added: "Added ✓", already: "Already Tracked", error: "Retry" }[addState];
+
   return (
     <div className="p-4 rounded-[14px]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
       <div className="flex items-start justify-between mb-3">
@@ -100,8 +117,15 @@ function DetailPanel({ stock, onClose }) {
           </div>
           <span className="text-[11px] text-muted">{stock.sector ?? "Sector unknown"}</span>
         </div>
-        <button onClick={onClose} className="topstep">Close</button>
+        <div className="flex items-center gap-2">
+          <button onClick={handleAdd} disabled={addState === "adding" || addState === "added" || addState === "already"}
+            className={`topstep ${addState === "added" || addState === "already" ? "text-gain" : ""}`}>
+            {addLabel}
+          </button>
+          <button onClick={onClose} className="topstep">Close</button>
+        </div>
       </div>
+      {addState === "error" && <p className="text-[11px] text-loss mb-3">{addError}</p>}
 
       <div className="flex items-center gap-4 mb-4">
         <ScoreBadge score={stock.swingScore} size="lg" />
@@ -142,11 +166,13 @@ function DetailPanel({ stock, onClose }) {
 }
 
 export default function SwingScanner() {
+  const [view, setView] = useState("scanner"); // "scanner" | "portfolio"
   const [preset, setPreset] = useState("balanced");
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [selected, setSelected] = useState(null);
+  const [portfolioRefreshKey, setPortfolioRefreshKey] = useState(0);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -164,6 +190,16 @@ export default function SwingScanner() {
 
   useEffect(() => { load(); }, [load]);
 
+  const addToPortfolio = useCallback(async (symbol) => {
+    const res = await fetch("/api/swing-watchlist", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ symbol }),
+    });
+    const body = await res.json();
+    if (!res.ok || body.error) throw new Error(body.message || body.error || "Failed to add.");
+    setPortfolioRefreshKey((k) => k + 1);
+    return body;
+  }, []);
+
   const stocks = data?.stocks ?? [];
 
   return (
@@ -172,17 +208,38 @@ export default function SwingScanner() {
         <div className="flex items-center gap-2">
           <MagnifyingGlass size={16} weight="bold" className="text-accent" />
           <h1 className="text-[16px] font-bold">Swing Scanner</h1>
-          {data?.date && <span className="text-[11px] text-muted">as of {data.date}</span>}
+          {view === "scanner" && data?.date && <span className="text-[11px] text-muted">as of {data.date}</span>}
         </div>
-        <div className="relative">
-          <select value={preset} onChange={(e) => setPreset(e.target.value)}
-            className="n appearance-none text-[12px] font-medium pl-3 pr-8 py-1.5 rounded-[8px] cursor-pointer"
-            style={{ border: "1px solid var(--c-line-2)", background: "var(--c-surface)" }}>
-            {PRESETS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
-          </select>
-          <CaretDown size={11} weight="bold" className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-muted" />
+        <div className="flex items-center gap-3">
+          <div className="seg-track" role="tablist" aria-label="View">
+            <button role="tab" aria-selected={view === "scanner"} data-on={view === "scanner"}
+              onClick={() => setView("scanner")} className="seg">Scanner</button>
+            <button role="tab" aria-selected={view === "portfolio"} data-on={view === "portfolio"}
+              onClick={() => setView("portfolio")} className="seg">My Portfolio</button>
+          </div>
+          {view === "scanner" && (
+            <div className="relative">
+              <select value={preset} onChange={(e) => setPreset(e.target.value)}
+                className="n appearance-none text-[12px] font-medium pl-3 pr-8 py-1.5 rounded-[8px] cursor-pointer"
+                style={{ border: "1px solid var(--c-line-2)", background: "var(--c-surface)" }}>
+                {PRESETS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+              </select>
+              <CaretDown size={11} weight="bold" className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-muted" />
+            </div>
+          )}
         </div>
       </div>
+
+      {view === "portfolio" ? (
+        <>
+          <p className="text-[11px] text-muted mb-4 max-w-[70ch]">
+            Positions you've added from the Scanner, tracked from the price and score they had at the moment you added
+            them — not re-ranked against the rest of the market like the Scanner is.
+          </p>
+          <SwingPortfolio refreshKey={portfolioRefreshKey} />
+        </>
+      ) : (
+      <>
       <p className="text-[11px] text-muted mb-4 max-w-[70ch]">
         Ranked by Swing Score under the {PRESETS.find((p) => p.id === preset)?.label.toLowerCase()} weighting — a technical
         opportunity read, not a profitability guarantee. Data refreshes once daily from NSE's own end-of-day prices.
@@ -249,8 +306,10 @@ export default function SwingScanner() {
               </tbody>
             </table>
           </div>
-          {selected && <DetailPanel stock={selected} onClose={() => setSelected(null)} />}
+          {selected && <DetailPanel key={selected.symbol} stock={selected} onClose={() => setSelected(null)} onAdd={addToPortfolio} />}
         </div>
+      )}
+      </>
       )}
     </div>
   );

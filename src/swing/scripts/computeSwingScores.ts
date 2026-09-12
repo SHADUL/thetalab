@@ -154,6 +154,8 @@ async function main() {
         setup_type: primarySetupType(pattern.setupTypes),
         entry_status: pattern.entryStatus,
         extension_risk: pattern.extensionRisk,
+        entry: result.tradePlan.entry, stop: result.tradePlan.stop,
+        target: result.tradePlan.target, risk_reward: result.tradePlan.riskReward,
       });
     }
     processed++;

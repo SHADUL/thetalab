@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { MagnifyingGlass, Info, CaretDown, Wallet } from "@phosphor-icons/react";
+import { MagnifyingGlass, Info, CaretDown, Wallet, ChartLineUp } from "@phosphor-icons/react";
 import SwingPortfolio from "./SwingPortfolio.jsx";
 import { FundSettingsModal, PositionSizeModal } from "./SwingModals.jsx";
 import SwingAutoTrade from "./SwingAutoTrade.jsx";
@@ -77,6 +77,10 @@ function DetailPanel({ stock, onClose, onAddClick }) {
           <span className="text-[11px] text-muted">{stock.sector ?? "Sector unknown"}</span>
         </div>
         <div className="flex items-center gap-2">
+          <a href={`https://www.tradingview.com/chart/?symbol=NSE%3A${encodeURIComponent(stock.symbol)}`}
+            target="_blank" rel="noopener noreferrer" className="topstep flex items-center gap-1.5">
+            <ChartLineUp size={12} weight="bold" /> TradingView
+          </a>
           <button onClick={() => onAddClick(stock)} className="topstep">Add to Portfolio</button>
           <button onClick={onClose} className="topstep">Close</button>
         </div>

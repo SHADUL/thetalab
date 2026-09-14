@@ -217,6 +217,18 @@ create table auto_trade_log (
   detail jsonb
 );
 
+-- One row per run of src/swing/scripts/runBacktest.ts (spec §31-34) — the
+-- aggregate result (overall + by score bucket + by regime + by setup
+-- type, per preset), not per-trade rows. Trade-level storage can be added
+-- later if drill-down into individual signals is wanted; the summary is
+-- what the UI/reporting needs today.
+create table backtest_runs (
+  id bigint generated always as identity primary key,
+  run_at timestamptz not null default now(),
+  params jsonb not null,
+  summary jsonb not null
+);
+
 create table alert_rules (
   id bigint generated always as identity primary key,
   symbol text references stocks(symbol),   -- null = applies to every scanned symbol
@@ -256,5 +268,6 @@ alter table auto_trade_settings enable row level security;
 alter table kite_session enable row level security;
 alter table auto_trade_positions enable row level security;
 alter table auto_trade_log enable row level security;
+alter table backtest_runs enable row level security;
 alter table alert_rules enable row level security;
 alter table alert_events enable row level security;

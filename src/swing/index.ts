@@ -24,3 +24,7 @@ export * from './scoring/riskReward.ts';
 export * from './scoring/sectorStrength.ts';
 export * from './scoring/presets.ts';
 export * from './scoring/swingScore.ts';
+export * from './backtest/types.ts';
+export * from './backtest/simulate.ts';
+export * from './backtest/regime.ts';
+export * from './backtest/metrics.ts';

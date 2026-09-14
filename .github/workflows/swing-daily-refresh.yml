@@ -1,0 +1,48 @@
+name: Swing Daily Data Refresh
+
+# Keeps the Scanner's EOD data current — without this, every script here
+# only ever reflects whatever date someone last ran it by hand (the gap
+# that made Momentum/Structure Scan show Friday's data on a Monday).
+# Scheduled for well after NSE's own bhavcopy publishes (usually a few
+# hours after the 15:30 IST close) so the backfill step isn't racing an
+# unpublished file. Uses NSE bhavcopy, not Kite, so — like the historical
+# backfill itself — this needs no daily login and can run fully
+# unattended (see backfillDailyOhlcv.ts's own header for why).
+#
+# Runs each stage in order since every later one reads what the one
+# before it just wrote: new OHLCV -> indicators -> Momentum Score ->
+# weekly OHLCV rollup -> Structure Score. Every script here is written to
+# default to "the latest date" and is safe to re-run (idempotent), so a
+# skipped trading day or a manual re-run never corrupts anything.
+on:
+  schedule:
+    - cron: '0 15 * * 1-5' # 15:00 UTC = 20:30 IST, Mon-Fri
+  workflow_dispatch: {}
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci
+
+      - name: Backfill daily OHLCV
+        run: node --experimental-strip-types src/swing/scripts/backfillDailyOhlcv.ts
+
+      - name: Compute indicators
+        run: node --experimental-strip-types src/swing/scripts/computeIndicators.ts
+
+      - name: Compute Momentum Score (swing_scores)
+        run: node --experimental-strip-types src/swing/scripts/computeSwingScores.ts
+
+      - name: Roll up weekly OHLCV
+        run: node --experimental-strip-types src/swing/scripts/computeWeeklyOhlcv.ts
+
+      - name: Compute Structure Score
+        run: node --experimental-strip-types src/swing/scripts/computeStructureScores.ts

@@ -1,25 +1,34 @@
 import { useState, useRef, useCallback, useEffect } from "react";
+import { createChart, CandlestickSeries, HistogramSeries } from "lightweight-charts";
 
 const HOVER_DELAY_MS = 300;
-const WIDTH = 400;
-const HEIGHT = 340;
+const WIDTH = 380;
+const HEIGHT = 300;
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
 
 /**
- * Wraps a symbol so hovering it (after a short delay, to avoid flickering
- * while the pointer just passes over a row) pops up a real TradingView
- * daily chart with MACD + RSI — the same thing the "Open in TradingView"
- * button opens in a new tab, but inline so a dozen stocks can be eyeballed
- * without leaving the table. Uses TradingView's own public embed widget
- * (no API key), reinitialized per-hover via their documented
- * replace-the-script-tag pattern — there's no supported way to just swap
- * the symbol on a live widget instance for this embed type.
+ * Wraps a symbol so hovering it (after a short delay, to avoid popping up
+ * on every pointer pass over a row) shows a real daily candlestick +
+ * volume chart — no need to click into TradingView separately just to
+ * eyeball one. Rendered from our own daily_ohlcv via lightweight-charts
+ * (a self-contained, open-source charting library), not TradingView's
+ * embeddable widget — that widget turned out not to resolve NSE symbols
+ * at all (confirmed against several, including well-known ones), so
+ * anything reliable for this app has to be built from data we hold
+ * ourselves.
  */
 export default function ChartHoverPreview({ symbol, children }) {
   const [show, setShow] = useState(false);
   const [pos, setPos] = useState(null);
+  const [candles, setCandles] = useState(null);
+  const [error, setError] = useState(null);
   const timerRef = useRef(null);
   const wrapRef = useRef(null);
-  const widgetContainerRef = useRef(null);
+  const chartContainerRef = useRef(null);
+  const chartRef = useRef(null);
 
   const onEnter = useCallback(() => {
     timerRef.current = setTimeout(() => {
@@ -44,41 +53,76 @@ export default function ChartHoverPreview({ symbol, children }) {
   }, [cancel]);
 
   useEffect(() => {
-    if (!show || !widgetContainerRef.current) return;
-    const container = widgetContainerRef.current;
-    container.innerHTML = '<div class="tradingview-widget-container__widget" style="height:100%;width:100%"></div>';
-    const script = document.createElement("script");
-    script.type = "text/javascript";
-    script.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
-    script.async = true;
-    script.text = JSON.stringify({
-      autosize: true,
-      symbol: `NSE:${symbol}`,
-      interval: "D",
-      timezone: "Asia/Kolkata",
-      theme: "light",
-      style: "1",
-      locale: "en",
-      studies: ["MACD@tv-basicstudies", "RSI@tv-basicstudies"],
-      hide_top_toolbar: false,
-      hide_legend: false,
-      save_image: false,
-      support_host: "https://www.tradingview.com",
-    });
-    container.appendChild(script);
+    if (!show) return;
+    let cancelled = false;
+    setCandles(null);
+    setError(null);
+    fetch(`/api/swing-scanner?candles=${encodeURIComponent(symbol)}&limit=150`)
+      .then((r) => r.json())
+      .then((body) => {
+        if (cancelled) return;
+        if (body.error) throw new Error(body.message || body.error);
+        setCandles(body.bars ?? []);
+      })
+      .catch((e) => { if (!cancelled) setError(e.message); });
+    return () => { cancelled = true; };
   }, [show, symbol]);
+
+  useEffect(() => {
+    if (!show || !candles || !chartContainerRef.current) return;
+    const container = chartContainerRef.current;
+    const gain = cssVar("--c-gain") || "#067A55";
+    const loss = cssVar("--c-loss") || "#C8342B";
+    const text = cssVar("--c-text-2") || "#5A6478";
+    const line = cssVar("--c-line") || "#E2E7EF";
+
+    const chart = createChart(container, {
+      width: container.clientWidth,
+      height: container.clientHeight,
+      layout: { background: { color: "transparent" }, textColor: text, fontSize: 10 },
+      grid: { vertLines: { color: line }, horzLines: { color: line } },
+      rightPriceScale: { borderColor: line },
+      timeScale: { borderColor: line, timeVisible: false },
+      crosshair: { mode: 0 },
+    });
+    chartRef.current = chart;
+
+    const candleSeries = chart.addSeries(CandlestickSeries, {
+      upColor: gain, downColor: loss, borderVisible: false, wickUpColor: gain, wickDownColor: loss,
+    });
+    candleSeries.setData(candles.map((b) => ({ time: b.date, open: b.open, high: b.high, low: b.low, close: b.close })));
+
+    const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: "volume" }, priceScaleId: "" });
+    volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+    volumeSeries.setData(candles.map((b) => ({ time: b.date, value: b.volume, color: b.close >= b.open ? `${gain}66` : `${loss}66` })));
+
+    chart.timeScale().fitContent();
+
+    return () => { chart.remove(); chartRef.current = null; };
+  }, [show, candles]);
 
   return (
     <span ref={wrapRef} onMouseEnter={onEnter} onMouseLeave={onLeave} className="relative inline-block">
       {children}
       {show && pos && (
         <div
-          className="fixed z-[9999] rounded-[10px] overflow-hidden shadow-xl"
+          className="fixed z-[9999] rounded-[10px] overflow-hidden shadow-xl flex flex-col"
           style={{ left: pos.left, top: pos.top, width: WIDTH, height: HEIGHT, border: "1px solid var(--c-line)", background: "var(--c-surface)" }}
           onMouseEnter={cancel}
           onMouseLeave={onLeave}
         >
-          <div ref={widgetContainerRef} className="tradingview-widget-container" style={{ width: "100%", height: "100%" }} />
+          <div className="px-2.5 py-1.5 text-[11px] font-semibold text-ink shrink-0" style={{ borderBottom: "1px solid var(--c-line)" }}>
+            {symbol} <span className="text-faint font-normal">· Daily</span>
+          </div>
+          <div className="flex-1 min-h-0 relative">
+            {error ? (
+              <p className="text-[11px] text-loss p-3">{error}</p>
+            ) : !candles ? (
+              <p className="text-[11px] text-muted p-3">Loading chart…</p>
+            ) : (
+              <div ref={chartContainerRef} className="w-full h-full" />
+            )}
+          </div>
         </div>
       )}
     </span>

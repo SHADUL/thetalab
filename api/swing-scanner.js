@@ -8,8 +8,15 @@
  * recomputes anything: re-deriving indicators or trade plans per request
  * would mean re-fetching full price history for the whole universe on
  * every page load, which is exactly the "hundreds of separate API calls"
- * spec §54 says to avoid. One endpoint for both rather than a second file,
- * to stay under Vercel Hobby's 12-serverless-function cap.
+ * spec §54 says to avoid.
+ *
+ * `?candles=SYMBOL` is a third, unrelated mode: recent raw daily OHLCV
+ * for one symbol, for the hover chart preview (ChartHoverPreview.jsx) —
+ * TradingView's own embeddable widget doesn't resolve NSE symbols at all,
+ * so that preview is rendered from our own data instead.
+ *
+ * One file for all three modes, rather than separate ones, to stay under
+ * Vercel Hobby's 12-serverless-function cap.
  */
 import { createClient } from '@supabase/supabase-js';
 
@@ -130,6 +137,26 @@ async function handleStructure(supabase, req, res) {
   }
 }
 
+async function handleCandles(supabase, req, res) {
+  const symbol = String(req.query.candles || '').toUpperCase().trim();
+  if (!symbol) { res.status(400).json({ error: 'bad_request', message: 'candles must be a symbol.' }); return; }
+  const limit = Math.min(Math.max(Number(req.query.limit) || 150, 30), 500);
+
+  try {
+    // Raw (unadjusted) prices — fine for a quick visual reference chart;
+    // a stock with a split inside the visible window could show a jump.
+    // Not used for scoring/sizing, which always read the adjusted series.
+    const { data, error } = await supabase.from('daily_ohlcv')
+      .select('date,open,high,low,close,volume')
+      .eq('symbol', symbol).order('date', { ascending: false }).limit(limit);
+    if (error) throw error;
+    const bars = (data ?? []).slice().reverse();
+    res.status(200).json({ symbol, bars });
+  } catch (err) {
+    res.status(502).json({ error: 'supabase_error', message: err.message });
+  }
+}
+
 export default async function handler(req, res) {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -138,6 +165,8 @@ export default async function handler(req, res) {
     return;
   }
   const supabase = createClient(url, key, { auth: { persistSession: false } });
+
+  if (req.query.candles) { await handleCandles(supabase, req, res); return; }
 
   const strategy = String(req.query.strategy || 'momentum').toLowerCase();
   if (strategy === 'structure') { await handleStructure(supabase, req, res); return; }

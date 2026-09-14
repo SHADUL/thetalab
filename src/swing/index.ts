@@ -16,6 +16,7 @@ export * from './indicators/trend.ts';
 export * from './indicators/bands.ts';
 export * from './indicators/volume.ts';
 export * from './indicators/splitAdjust.ts';
+export * from './indicators/weekly.ts';
 export * from './patterns/types.ts';
 export * from './patterns/detect.ts';
 export * from './scoring/types.ts';

@@ -39,12 +39,12 @@ export function evaluateStructureSetup(input: {
   // Proximity to the 52w high: 0 right at the 75% gate, 100 at the high itself.
   const pctOf52wHigh = high52w != null && high52w > 0 ? close / high52w : null;
   const proximity = pctOf52wHigh != null
-    ? clamp(((pctOf52wHigh - NEAR_52W_HIGH_PCT) / (1 - NEAR_52W_HIGH_PCT)) * 100, 0, 100)
+    ? Math.round(clamp(((pctOf52wHigh - NEAR_52W_HIGH_PCT) / (1 - NEAR_52W_HIGH_PCT)) * 100, 0, 100))
     : 0;
 
   // Trend strength: distance above the daily EMA20, scaled so +8% reads as fully strong.
   const pctAboveEma20 = ema20 != null && ema20 > 0 ? ((close - ema20) / ema20) * 100 : null;
-  const trend = pctAboveEma20 != null ? clamp(50 + (pctAboveEma20 / 8) * 50, 0, 100) : 0;
+  const trend = pctAboveEma20 != null ? Math.round(clamp(50 + (pctAboveEma20 / 8) * 50, 0, 100)) : 0;
 
   // Weekly momentum health — the same sweet-spot shape as the Momentum
   // Score's own RSI banding (55-65 is "strong," tapering as it nears this
@@ -61,7 +61,7 @@ export function evaluateStructureSetup(input: {
   // Weekly breakout strength: magnitude of the new weekly high over the prior week's.
   const pctNewHigh = weeklyHigh != null && prevWeeklyHigh != null && prevWeeklyHigh > 0
     ? ((weeklyHigh - prevWeeklyHigh) / prevWeeklyHigh) * 100 : null;
-  const weeklyBreakout = pctNewHigh != null ? clamp(50 + (pctNewHigh / 5) * 50, 0, 100) : 0;
+  const weeklyBreakout = pctNewHigh != null ? Math.round(clamp(50 + (pctNewHigh / 5) * 50, 0, 100)) : 0;
 
   const factors: StructureFactorScores = { proximity, trend, weeklyMomentum, weeklyBreakout };
   const score = passesAll ? Math.round((proximity + trend + weeklyMomentum + weeklyBreakout) / 4) : null;

@@ -29,6 +29,14 @@ export function scoreTone(score) {
   return "muted";
 }
 
+export function scoreLabel(score) {
+  if (score >= 90) return "VERY STRONG";
+  if (score >= 80) return "STRONG";
+  if (score >= 70) return "GOOD";
+  if (score >= 60) return "FAIR";
+  return "WEAK";
+}
+
 export function tradingViewUrl(symbol) {
   return `https://www.tradingview.com/chart/?symbol=NSE%3A${encodeURIComponent(symbol)}`;
 }

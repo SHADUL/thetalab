@@ -34,6 +34,12 @@ create index daily_ohlcv_date_idx on daily_ohlcv(date);
 create table weekly_ohlcv (
   symbol text not null references stocks(symbol),
   week_start date not null,             -- Monday of the week
+  -- Last actual trading day seen that week — a week with a Monday holiday
+  -- or that hasn't finished yet has week_end != week_start+4. This is what
+  -- point-in-time alignment against a daily series needs: a weekly bar is
+  -- only "closed" (safe to read) once the daily series has moved past
+  -- week_end, not just past week_start.
+  week_end date,
   open numeric not null,
   high numeric not null,
   low numeric not null,
@@ -229,6 +235,40 @@ create table backtest_runs (
   summary jsonb not null
 );
 
+-- "Structure Score" — a second, independent strategy alongside the
+-- weighted "Momentum Score" (swing_scores above): a fixed rule set
+-- (src/swing/structure) where a stock either passes every gate or
+-- doesn't qualify at all, rather than a continuous weighted blend.
+-- score is null for non-qualifying stocks — there's no meaningful rank
+-- for a setup that isn't actually a qualifying one.
+create table structure_scores (
+  symbol text not null references stocks(symbol),
+  date date not null,
+  passes_all boolean not null,
+  score numeric,
+  gate_price_floor boolean not null,
+  gate_liquidity boolean not null,
+  gate_near_52w_high boolean not null,
+  gate_above_ema20 boolean not null,
+  gate_weekly_rsi_ceiling boolean not null,
+  gate_weekly_higher_high boolean not null,
+  proximity_score numeric,
+  trend_score numeric,
+  weekly_momentum_score numeric,
+  weekly_breakout_score numeric,
+  -- Raw supporting values, kept alongside the derived scores so the UI's
+  -- detail view can show real numbers ("87% of 52w high"), not just a
+  -- pass/fail checkmark.
+  close numeric,
+  pct_of_52w_high numeric,
+  pct_above_ema20 numeric,
+  weekly_rsi14 numeric,
+  weekly_high numeric,
+  prev_weekly_high numeric,
+  primary key (symbol, date)
+);
+create index structure_scores_date_score_idx on structure_scores(date, score desc);
+
 create table alert_rules (
   id bigint generated always as identity primary key,
   symbol text references stocks(symbol),   -- null = applies to every scanned symbol
@@ -269,5 +309,6 @@ alter table kite_session enable row level security;
 alter table auto_trade_positions enable row level security;
 alter table auto_trade_log enable row level security;
 alter table backtest_runs enable row level security;
+alter table structure_scores enable row level security;
 alter table alert_rules enable row level security;
 alter table alert_events enable row level security;

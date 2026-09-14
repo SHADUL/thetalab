@@ -29,3 +29,5 @@ export * from './backtest/types.ts';
 export * from './backtest/simulate.ts';
 export * from './backtest/regime.ts';
 export * from './backtest/metrics.ts';
+export * from './structure/types.ts';
+export * from './structure/evaluate.ts';

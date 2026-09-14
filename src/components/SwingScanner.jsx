@@ -3,7 +3,9 @@ import { MagnifyingGlass, Info, CaretDown, Wallet, ChartLineUp } from "@phosphor
 import SwingPortfolio from "./SwingPortfolio.jsx";
 import { FundSettingsModal, PositionSizeModal } from "./SwingModals.jsx";
 import SwingAutoTrade from "./SwingAutoTrade.jsx";
-import { toneClass, fm, inr, pctSigned, scoreTone, tradingViewUrl, PRESETS } from "./swingFormat.js";
+import StructureScanner from "./StructureScanner.jsx";
+import { toneClass, fm, inr, pctSigned, tradingViewUrl, PRESETS } from "./swingFormat.js";
+import { ScoreBadge, FactorBar } from "./ScoreWidgets.jsx";
 
 const ENTRY_STATUS_LABEL = {
   BUY_ZONE: "Buy Zone", NEAR_ENTRY: "Near Entry", WAIT_FOR_BREAKOUT: "Wait for Breakout",
@@ -24,46 +26,6 @@ const FACTOR_LABEL = {
   volume: "Volume", sector: "Sector", volatility: "Volatility", riskReward: "Risk/Reward",
 };
 
-function scoreLabel(score) {
-  if (score >= 90) return "VERY STRONG";
-  if (score >= 80) return "STRONG";
-  if (score >= 70) return "GOOD";
-  if (score >= 60) return "FAIR";
-  return "WEAK";
-}
-
-function ScoreBadge({ score, size = "md" }) {
-  const dim = size === "lg" ? 46 : 34;
-  const tone = scoreTone(score);
-  return (
-    <div className="flex items-center gap-2">
-      <div className="flex items-center justify-center rounded-full font-bold shrink-0"
-        style={{
-          width: dim, height: dim, fontSize: size === "lg" ? 15 : 12.5,
-          border: `2px solid var(--c-${tone === "muted" ? "line-2" : tone})`,
-          color: `var(--c-${tone === "muted" ? "text-2" : tone})`,
-        }}>
-        {score}
-      </div>
-      {size === "lg" && <span className={`text-[10.5px] font-semibold ${toneClass(tone)}`}>{scoreLabel(score)}</span>}
-    </div>
-  );
-}
-
-function FactorBar({ label, value }) {
-  const tone = scoreTone(value);
-  return (
-    <div>
-      <div className="flex items-center justify-between text-[11px] mb-0.5">
-        <span className="text-muted">{label}</span>
-        <span className={`font-semibold ${toneClass(tone)}`}>{value}</span>
-      </div>
-      <div className="h-[5px] rounded-full overflow-hidden" style={{ background: "var(--c-surface-3)" }}>
-        <div className="h-full rounded-full" style={{ width: `${value}%`, background: `var(--c-${tone === "muted" ? "text-2" : tone})` }} />
-      </div>
-    </div>
-  );
-}
 
 function DetailPanel({ stock, onClose, onAddClick }) {
   return (
@@ -193,7 +155,9 @@ export default function SwingScanner() {
           </button>
           <div className="seg-track" role="tablist" aria-label="View">
             <button role="tab" aria-selected={view === "scanner"} data-on={view === "scanner"}
-              onClick={() => setView("scanner")} className="seg">Scanner</button>
+              onClick={() => setView("scanner")} className="seg">Momentum Scan</button>
+            <button role="tab" aria-selected={view === "structure"} data-on={view === "structure"}
+              onClick={() => setView("structure")} className="seg">Structure Scan</button>
             <button role="tab" aria-selected={view === "portfolio"} data-on={view === "portfolio"}
               onClick={() => setView("portfolio")} className="seg">My Portfolio</button>
             <button role="tab" aria-selected={view === "autotrade"} data-on={view === "autotrade"}
@@ -222,11 +186,14 @@ export default function SwingScanner() {
         </>
       ) : view === "autotrade" ? (
         <SwingAutoTrade />
+      ) : view === "structure" ? (
+        <StructureScanner />
       ) : (
       <>
       <p className="text-[11px] text-muted mb-4 max-w-[70ch]">
-        Ranked by Swing Score under the {PRESETS.find((p) => p.id === preset)?.label.toLowerCase()} weighting — a technical
-        opportunity read, not a profitability guarantee. Data refreshes once daily from NSE's own end-of-day prices.
+        Ranked by <b>Momentum Score</b> under the {PRESETS.find((p) => p.id === preset)?.label.toLowerCase()} weighting — a
+        weighted blend of trend/momentum/relative-strength/setup factors, a technical opportunity read, not a
+        profitability guarantee. Data refreshes once daily from NSE's own end-of-day prices.
       </p>
 
       {loading ? (

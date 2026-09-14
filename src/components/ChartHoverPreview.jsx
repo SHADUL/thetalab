@@ -1,12 +1,35 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { createChart, CandlestickSeries, HistogramSeries } from "lightweight-charts";
 
-const HOVER_DELAY_MS = 300;
-const WIDTH = 380;
-const HEIGHT = 300;
+const HOVER_DELAY_MS = 250;
+const WIDTH = 560;
+const HEIGHT = 440;
 
 function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+// Module-scoped so it survives across every ChartHoverPreview instance and
+// every hover, not just one row's — re-hovering a symbol you already
+// looked at (even in a different table) is instant, and the very first
+// hover on a symbol starts fetching immediately rather than waiting for
+// the show-delay to elapse first, so the network round trip overlaps the
+// debounce instead of stacking after it.
+const candleCache = new Map(); // symbol -> Promise<Bar[]>
+
+function fetchCandlesCached(symbol) {
+  let pending = candleCache.get(symbol);
+  if (!pending) {
+    pending = fetch(`/api/swing-scanner?candles=${encodeURIComponent(symbol)}&limit=150`)
+      .then((r) => r.json())
+      .then((body) => {
+        if (body.error) throw new Error(body.message || body.error);
+        return body.bars ?? [];
+      });
+    pending.catch(() => { candleCache.delete(symbol); }); // don't cache failures — allow a retry on the next hover
+    candleCache.set(symbol, pending);
+  }
+  return pending;
 }
 
 /**
@@ -31,6 +54,7 @@ export default function ChartHoverPreview({ symbol, children }) {
   const chartRef = useRef(null);
 
   const onEnter = useCallback(() => {
+    fetchCandlesCached(symbol); // kick off (or reuse) the fetch right away, before the show-delay
     timerRef.current = setTimeout(() => {
       const rect = wrapRef.current?.getBoundingClientRect();
       if (!rect) return;
@@ -41,7 +65,7 @@ export default function ChartHoverPreview({ symbol, children }) {
       setPos({ left, top });
       setShow(true);
     }, HOVER_DELAY_MS);
-  }, []);
+  }, [symbol]);
 
   const cancel = useCallback(() => {
     if (timerRef.current) clearTimeout(timerRef.current);
@@ -57,13 +81,8 @@ export default function ChartHoverPreview({ symbol, children }) {
     let cancelled = false;
     setCandles(null);
     setError(null);
-    fetch(`/api/swing-scanner?candles=${encodeURIComponent(symbol)}&limit=150`)
-      .then((r) => r.json())
-      .then((body) => {
-        if (cancelled) return;
-        if (body.error) throw new Error(body.message || body.error);
-        setCandles(body.bars ?? []);
-      })
+    fetchCandlesCached(symbol)
+      .then((bars) => { if (!cancelled) setCandles(bars); })
       .catch((e) => { if (!cancelled) setError(e.message); });
     return () => { cancelled = true; };
   }, [show, symbol]);
@@ -79,7 +98,7 @@ export default function ChartHoverPreview({ symbol, children }) {
     const chart = createChart(container, {
       width: container.clientWidth,
       height: container.clientHeight,
-      layout: { background: { color: "transparent" }, textColor: text, fontSize: 10 },
+      layout: { background: { color: "transparent" }, textColor: text, fontSize: 11 },
       grid: { vertLines: { color: line }, horzLines: { color: line } },
       rightPriceScale: { borderColor: line },
       timeScale: { borderColor: line, timeVisible: false },
@@ -111,7 +130,7 @@ export default function ChartHoverPreview({ symbol, children }) {
           onMouseEnter={cancel}
           onMouseLeave={onLeave}
         >
-          <div className="px-2.5 py-1.5 text-[11px] font-semibold text-ink shrink-0" style={{ borderBottom: "1px solid var(--c-line)" }}>
+          <div className="px-3 py-2 text-[12px] font-semibold text-ink shrink-0" style={{ borderBottom: "1px solid var(--c-line)" }}>
             {symbol} <span className="text-faint font-normal">· Daily</span>
           </div>
           <div className="flex-1 min-h-0 relative">

@@ -151,6 +151,11 @@ async function handleCandles(supabase, req, res) {
       .eq('symbol', symbol).order('date', { ascending: false }).limit(limit);
     if (error) throw error;
     const bars = (data ?? []).slice().reverse();
+    // Data only changes once a day (the nightly refresh); safe for the
+    // CDN/browser to reuse a response for a while rather than every hover
+    // hitting Supabase again — stale-while-revalidate keeps it fast even
+    // right as a cached entry ages out.
+    res.setHeader('Cache-Control', 'public, max-age=1800, stale-while-revalidate=86400');
     res.status(200).json({ symbol, bars });
   } catch (err) {
     res.status(502).json({ error: 'supabase_error', message: err.message });

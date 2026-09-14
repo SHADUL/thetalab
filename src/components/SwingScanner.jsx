@@ -3,7 +3,7 @@ import { MagnifyingGlass, Info, CaretDown, Wallet, ChartLineUp } from "@phosphor
 import SwingPortfolio from "./SwingPortfolio.jsx";
 import { FundSettingsModal, PositionSizeModal } from "./SwingModals.jsx";
 import SwingAutoTrade from "./SwingAutoTrade.jsx";
-import { toneClass, fm, inr, pctSigned, scoreTone, PRESETS } from "./swingFormat.js";
+import { toneClass, fm, inr, pctSigned, scoreTone, tradingViewUrl, PRESETS } from "./swingFormat.js";
 
 const ENTRY_STATUS_LABEL = {
   BUY_ZONE: "Buy Zone", NEAR_ENTRY: "Near Entry", WAIT_FOR_BREAKOUT: "Wait for Breakout",
@@ -77,8 +77,7 @@ function DetailPanel({ stock, onClose, onAddClick }) {
           <span className="text-[11px] text-muted">{stock.sector ?? "Sector unknown"}</span>
         </div>
         <div className="flex items-center gap-2">
-          <a href={`https://www.tradingview.com/chart/?symbol=NSE%3A${encodeURIComponent(stock.symbol)}`}
-            target="_blank" rel="noopener noreferrer" className="topstep flex items-center gap-1.5">
+          <a href={tradingViewUrl(stock.symbol)} target="_blank" rel="noopener noreferrer" className="topstep flex items-center gap-1.5">
             <ChartLineUp size={12} weight="bold" /> TradingView
           </a>
           <button onClick={() => onAddClick(stock)} className="topstep">Add to Portfolio</button>

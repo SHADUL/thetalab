@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import {
-  MagnifyingGlass, ShieldCheck, Power, WarningOctagon, DownloadSimple, Trash, CircleNotch,
+  MagnifyingGlass, ShieldCheck, Power, WarningOctagon, DownloadSimple, Trash, CircleNotch, ChartLineUp,
 } from "@phosphor-icons/react";
-import { inr, pctSigned, PRESETS } from "./swingFormat.js";
+import { inr, pctSigned, tradingViewUrl, PRESETS } from "./swingFormat.js";
 import { kiteLoginUrl, assumedKiteConnected, consumeKiteRedirectResult } from "../lib/kiteClient.js";
 
 /**
@@ -300,9 +300,14 @@ function PositionsTable({ positions, maxPositions, reservedFund, onExit, exiting
                   <div className={`text-[11px] ${(p.pnlAmount ?? 0) >= 0 ? "text-gain" : "text-loss"}`}>{pctSigned(p.pnlPct)} Return</div>
                 </td>
                 <td className="py-3 px-4 text-center">
-                  <button onClick={() => onExit(p)} disabled={exitingId === p.id} className="mini-btn is-danger disabled:opacity-50" title="Cancel protection and market-sell this position now">
-                    {exitingId === p.id ? "Exiting…" : "Exit"}
-                  </button>
+                  <div className="flex items-center justify-center gap-1">
+                    <a href={tradingViewUrl(p.symbol)} target="_blank" rel="noopener noreferrer" className="mini-btn" title="Open in TradingView">
+                      <ChartLineUp size={11} weight="bold" />
+                    </a>
+                    <button onClick={() => onExit(p)} disabled={exitingId === p.id} className="mini-btn is-danger disabled:opacity-50" title="Cancel protection and market-sell this position now">
+                      {exitingId === p.id ? "Exiting…" : "Exit"}
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}

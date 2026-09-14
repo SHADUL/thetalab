@@ -28,3 +28,7 @@ export function scoreTone(score) {
   if (score >= 60) return "accent";
   return "muted";
 }
+
+export function tradingViewUrl(symbol) {
+  return `https://www.tradingview.com/chart/?symbol=NSE%3A${encodeURIComponent(symbol)}`;
+}

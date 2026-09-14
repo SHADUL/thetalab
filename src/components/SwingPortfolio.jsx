@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
-import { Info, X } from "@phosphor-icons/react";
-import { toneClass, inr, pctSigned } from "./swingFormat.js";
+import { Info, X, ChartLineUp } from "@phosphor-icons/react";
+import { toneClass, inr, pctSigned, tradingViewUrl } from "./swingFormat.js";
 
 const STATUS_LABEL = {
   TARGET_HIT: "Target Hit", NEAR_TARGET: "Near Target", HOLD: "Hold",
@@ -134,10 +134,16 @@ export default function SwingPortfolio({ refreshKey }) {
                     {STATUS_LABEL[p.status] ?? p.status}
                   </td>
                   <td className="py-2 pr-3 text-right">
-                    <button onClick={() => remove(p.symbol)} disabled={removing === p.symbol}
-                      className="mini-btn is-danger" title="Remove from Portfolio">
-                      <X size={11} weight="bold" />
-                    </button>
+                    <div className="flex items-center justify-end gap-1">
+                      <a href={tradingViewUrl(p.symbol)} target="_blank" rel="noopener noreferrer"
+                        className="mini-btn" title="Open in TradingView">
+                        <ChartLineUp size={11} weight="bold" />
+                      </a>
+                      <button onClick={() => remove(p.symbol)} disabled={removing === p.symbol}
+                        className="mini-btn is-danger" title="Remove from Portfolio">
+                        <X size={11} weight="bold" />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}

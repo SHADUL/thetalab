@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { ChartBar, Info, ChartLineUp, CheckCircle, XCircle } from "@phosphor-icons/react";
 import { toneClass, fm, inr, pctSigned, tradingViewUrl } from "./swingFormat.js";
 import { ScoreBadge, FactorBar } from "./ScoreWidgets.jsx";
+import ChartHoverPreview from "./ChartHoverPreview.jsx";
 
 const GATE_LABEL = {
   priceFloor: "Close > ₹20",
@@ -147,7 +148,7 @@ export default function StructureScanner() {
                     className={selected?.symbol === s.symbol ? "" : "hover:bg-[var(--c-surface-2)]"}>
                     <td className="py-2 pl-3 pr-2 text-muted n">{i + 1}</td>
                     <td className="py-2 pr-2">
-                      <div className="font-semibold">{s.symbol}</div>
+                      <div className="font-semibold"><ChartHoverPreview symbol={s.symbol}>{s.symbol}</ChartHoverPreview></div>
                       <div className="text-[10.5px] text-faint">{s.sector ?? "—"}</div>
                     </td>
                     <td className="py-2 pr-2"><ScoreBadge score={s.score} /></td>

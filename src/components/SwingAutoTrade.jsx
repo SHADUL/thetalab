@@ -3,6 +3,7 @@ import {
   MagnifyingGlass, ShieldCheck, Power, WarningOctagon, DownloadSimple, Trash, CircleNotch, ChartLineUp,
 } from "@phosphor-icons/react";
 import { inr, pctSigned, tradingViewUrl, PRESETS } from "./swingFormat.js";
+import ChartHoverPreview from "./ChartHoverPreview.jsx";
 import { kiteLoginUrl, assumedKiteConnected, consumeKiteRedirectResult } from "../lib/kiteClient.js";
 
 /**
@@ -271,7 +272,7 @@ function PositionsTable({ positions, maxPositions, reservedFund, onExit, exiting
                     </div>
                     <div>
                       <div className="font-semibold flex items-center gap-1.5 text-ink">
-                        {p.symbol}
+                        <ChartHoverPreview symbol={p.symbol}>{p.symbol}</ChartHoverPreview>
                         <span className="text-[10px] px-1 rounded text-faint" style={{ background: "var(--c-surface-3)" }}>NSE</span>
                       </div>
                       <div className="text-[11px] text-faint">{p.name}</div>

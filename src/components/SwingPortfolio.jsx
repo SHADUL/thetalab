@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Info, X, ChartLineUp } from "@phosphor-icons/react";
 import { toneClass, inr, pctSigned, tradingViewUrl } from "./swingFormat.js";
+import ChartHoverPreview from "./ChartHoverPreview.jsx";
 
 const STATUS_LABEL = {
   TARGET_HIT: "Target Hit", NEAR_TARGET: "Near Target", HOLD: "Hold",
@@ -110,7 +111,7 @@ export default function SwingPortfolio({ refreshKey }) {
               {positions.map((p) => (
                 <tr key={p.symbol} style={{ borderTop: "1px solid var(--c-line)" }}>
                   <td className="py-2 pl-3 pr-2">
-                    <div className="font-semibold">{p.symbol}</div>
+                    <div className="font-semibold"><ChartHoverPreview symbol={p.symbol}>{p.symbol}</ChartHoverPreview></div>
                     <div className="text-[10.5px] text-faint">{p.entryDate}</div>
                   </td>
                   <td className="py-2 pr-2 text-right n">{p.shares ?? "—"}</td>

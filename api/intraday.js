@@ -368,12 +368,24 @@ export function evaluateIntradaySignal({ bars, direction, regimeInfo, rankFactor
   const currentAtr = atr14[atr14.length - 1];
   const extension = computeExtension(last.c, vwapSeries[vwapSeries.length - 1], ema9[ema9.length - 1] ?? last.c, currentAtr, settings.max_extension_atr ?? 2.5);
 
+  const entry = last.c;
   const baseRange = detectConsolidationRange(bars.slice(0, -1));
+  // ORB/Breakout stops are provably on the correct side of entry — each
+  // setup's own fire condition already requires last.c beyond that exact
+  // level, in the trade direction. The VWAP-anchored ATR fallback below
+  // has no such guarantee: it was written for the case where price sits
+  // close to VWAP, but once price has moved further from VWAP than the
+  // 0.5*ATR buffer (common once a move is already underway), "vwap +-
+  // 0.5*ATR" can land on the WRONG side of entry — a stop that offers no
+  // real protection. Clamp it to always sit at least 0.1*ATR on the
+  // adverse side of entry, so a stop here is always an actual stop.
   let stop = null;
   if (bestSetup?.type === 'ORB' && or) stop = direction === 'LONG' ? or.low : or.high;
   else if ((bestSetup?.type === 'BREAKOUT' || bestSetup?.type === 'BREAKOUT_RETEST') && baseRange) stop = direction === 'LONG' ? baseRange.low : baseRange.high;
-  else if (currentAtr) stop = direction === 'LONG' ? vwapSeries[vwapSeries.length - 1] - 0.5 * currentAtr : vwapSeries[vwapSeries.length - 1] + 0.5 * currentAtr;
-  const entry = last.c;
+  else if (currentAtr) {
+    const vwapBasedStop = direction === 'LONG' ? vwapSeries[vwapSeries.length - 1] - 0.5 * currentAtr : vwapSeries[vwapSeries.length - 1] + 0.5 * currentAtr;
+    stop = direction === 'LONG' ? Math.min(vwapBasedStop, entry - 0.1 * currentAtr) : Math.max(vwapBasedStop, entry + 0.1 * currentAtr);
+  }
   const riskPerShare = stop != null ? Math.abs(entry - stop) : null;
   const structuralTarget = currentAtr ? (direction === 'LONG' ? entry + 2 * currentAtr : entry - 2 * currentAtr) : null;
   const riskReward = riskPerShare && structuralTarget ? Math.abs(structuralTarget - entry) / riskPerShare : null;

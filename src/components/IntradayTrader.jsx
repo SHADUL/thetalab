@@ -109,7 +109,6 @@ export default function IntradayTrader() {
   const [killSwitchBusy, setKillSwitchBusy] = useState(false);
   const [killSwitchResult, setKillSwitchResult] = useState(null);
   const [signals, setSignals] = useState([]);
-  const [chartSymbol, setChartSymbol] = useState(null);
   const timerRef = useRef(null);
 
   useEffect(() => {
@@ -205,12 +204,21 @@ export default function IntradayTrader() {
   const candidates = data?.candidates ?? [];
   const priceBySymbol = new Map(candidates.map((c) => [c.symbol, c.price]));
   const topCards = computeTopCards(candidates);
-  const chartCandidate = chartSymbol ? candidates.find((c) => c.symbol === chartSymbol) : null;
 
   const timeline = [
-    ...signals.map((s) => ({ time: s.created_at, type: "SIGNAL_CONFIRMED", symbol: s.symbol, detail: `${SETUP_LABEL[s.setup_type] ?? s.setup_type ?? "Signal"} · score ${s.score} · ${s.confidence?.replace("_", "+") ?? ""}` })),
-    ...positions.open.map((p) => ({ time: p.entry_time, type: "POSITION_OPENED", symbol: p.symbol, detail: `${p.direction} ${p.shares} @ ${inr(p.entry_price)}` })),
-    ...positions.closed.map((p) => ({ time: p.exit_time, type: "POSITION_CLOSED", symbol: p.symbol, detail: `${p.exit_reason ?? ""} · ${p.pnl != null ? (p.pnl >= 0 ? "+" : "") + inr(p.pnl) : "—"}` })),
+    ...signals.map((s) => ({
+      time: s.created_at, type: "SIGNAL_CONFIRMED", symbol: s.symbol,
+      detail: `${SETUP_LABEL[s.setup_type] ?? s.setup_type ?? "Signal"} · score ${s.score} · ${s.confidence?.replace("_", "+") ?? ""}`,
+      candidate: { signal: { entry: s.entry, stop: s.stop, target1: s.target1, target2: s.target2, riskReward: s.risk_reward } },
+    })),
+    ...positions.open.map((p) => ({
+      time: p.entry_time, type: "POSITION_OPENED", symbol: p.symbol, detail: `${p.direction} ${p.shares} @ ${inr(p.entry_price)}`,
+      candidate: { signal: { entry: p.entry_price, stop: p.stop, target1: p.target1, target2: p.target2 } },
+    })),
+    ...positions.closed.map((p) => ({
+      time: p.exit_time, type: "POSITION_CLOSED", symbol: p.symbol, detail: `${p.exit_reason ?? ""} · ${p.pnl != null ? (p.pnl >= 0 ? "+" : "") + inr(p.pnl) : "—"}`,
+      candidate: { signal: { entry: p.entry_price, stop: p.stop, target1: p.target1, target2: p.target2 } },
+    })),
   ].filter((e) => e.time).sort((a, b) => new Date(b.time) - new Date(a.time)).slice(0, 20);
 
   return (
@@ -372,23 +380,26 @@ export default function IntradayTrader() {
                 { label: "Fastest Momentum", cand: topCards.fastestMomentum, metric: (c) => `Momentum ${c.signal.momentumScore}` },
                 { label: "Best R:R", cand: topCards.bestRR, metric: (c) => `R:R ${c.signal.riskReward.toFixed(1)}` },
                 { label: "Early Breakout", cand: topCards.earlyBreakout, metric: (c) => SETUP_LABEL[c.signal.setupType] ?? c.signal.setupType },
-              ].map(({ label, cand, metric }) => (
-                <button
-                  key={label} disabled={!cand} onClick={() => cand && setChartSymbol(cand.symbol)}
-                  className="p-2.5 rounded-[12px] text-left disabled:opacity-40"
-                  style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}
-                >
-                  <div className="text-[10px] text-muted mb-1">{label}</div>
-                  {cand ? (
-                    <>
-                      <div className="text-[13px] font-bold">{cand.symbol}</div>
-                      <div className={`text-[10.5px] ${cand.direction === "LONG" ? "text-gain" : "text-loss"}`}>{cand.direction} · {metric(cand)}</div>
-                    </>
-                  ) : (
-                    <div className="text-[11px] text-faint">—</div>
-                  )}
-                </button>
-              ))}
+              ].map(({ label, cand, metric }) => {
+                const body = (
+                  <div className="p-2.5 rounded-[12px]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+                    <div className="text-[10px] text-muted mb-1">{label}</div>
+                    {cand ? (
+                      <>
+                        <div className="text-[13px] font-bold">{cand.symbol}</div>
+                        <div className={`text-[10.5px] ${cand.direction === "LONG" ? "text-gain" : "text-loss"}`}>{cand.direction} · {metric(cand)}</div>
+                      </>
+                    ) : (
+                      <div className="text-[11px] text-faint">—</div>
+                    )}
+                  </div>
+                );
+                return cand ? (
+                  <IntradaySignalChart key={label} symbol={cand.symbol} candidate={cand} className="block">{body}</IntradaySignalChart>
+                ) : (
+                  <div key={label} className="opacity-40">{body}</div>
+                );
+              })}
             </div>
           )}
 
@@ -417,13 +428,14 @@ export default function IntradayTrader() {
                     const s = c.signal;
                     return (
                     <tr
-                      key={c.symbol} onClick={() => setChartSymbol(c.symbol)} className="cursor-pointer"
+                      key={c.symbol}
                       style={{ borderTop: "1px solid var(--c-line)", background: s?.status === "SIGNAL_CONFIRMED" ? "var(--c-gain-soft, transparent)" : undefined }}
-                      title="Click to view chart"
                     >
                       <td className="py-2 pl-3 pr-2 text-muted n">{i + 1}</td>
                       <td className="py-2 pr-2">
-                        <div className="font-semibold flex items-center gap-1">{c.symbol}<ChartLine size={11} className="text-faint" /></div>
+                        <IntradaySignalChart symbol={c.symbol} candidate={c}>
+                          <div className="font-semibold flex items-center gap-1">{c.symbol}<ChartLine size={11} className="text-faint" /></div>
+                        </IntradaySignalChart>
                         <div className="text-[10.5px] text-faint">{c.sector ?? "—"}</div>
                       </td>
                       <td className="py-2 pr-2"><ScoreBadge score={s?.score ?? c.rankScore} /></td>
@@ -487,7 +499,9 @@ export default function IntradayTrader() {
                     return (
                       <tr key={p.id} style={{ borderTop: "1px solid var(--c-line)" }}>
                         <td className="py-2 pl-3 pr-2">
-                          <div className="font-semibold">{p.symbol}</div>
+                          <IntradaySignalChart symbol={p.symbol} candidate={{ signal: { entry: p.entry_price, stop: p.stop, target1: p.target1, target2: p.target2 } }}>
+                            <div className="font-semibold">{p.symbol}</div>
+                          </IntradaySignalChart>
                           <div className="text-[10.5px] text-faint">{p.sector ?? "—"}</div>
                         </td>
                         <td className="py-2 pr-2 text-[11px]">{SETUP_LABEL[p.setup_type] ?? p.setup_type ?? "—"}</td>
@@ -517,25 +531,23 @@ export default function IntradayTrader() {
                 const Icon = e.type === "SIGNAL_CONFIRMED" ? Bell : e.type === "POSITION_OPENED" ? SignIn : SignOut;
                 const tone = e.type === "SIGNAL_CONFIRMED" ? "text-gain" : e.type === "POSITION_OPENED" ? "text-accent" : "text-muted";
                 return (
-                  <button
-                    key={`${e.type}-${e.symbol}-${e.time}-${i}`} onClick={() => setChartSymbol(e.symbol)}
-                    className="w-full flex items-center gap-2.5 px-3 py-2 text-left"
+                  <div
+                    key={`${e.type}-${e.symbol}-${e.time}-${i}`}
+                    className="flex items-center gap-2.5 px-3 py-2"
                     style={{ borderTop: i > 0 ? "1px solid var(--c-line)" : "none", background: "var(--c-surface)" }}
                   >
                     <Icon size={13} weight="bold" className={`shrink-0 ${tone}`} />
                     <span className="text-[11px] text-faint n shrink-0 w-[62px]">{new Date(e.time).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</span>
-                    <span className="text-[12px] font-semibold shrink-0">{e.symbol}</span>
+                    <IntradaySignalChart symbol={e.symbol} candidate={e.candidate} className="shrink-0">
+                      <span className="text-[12px] font-semibold">{e.symbol}</span>
+                    </IntradaySignalChart>
                     <span className="text-[11.5px] text-ink2 truncate">{e.detail}</span>
-                  </button>
+                  </div>
                 );
               })}
             </div>
           )}
         </>
-      )}
-
-      {chartSymbol && (
-        <IntradaySignalChart symbol={chartSymbol} candidate={chartCandidate} onClose={() => setChartSymbol(null)} />
       )}
     </div>
   );

@@ -1,47 +1,89 @@
-import { useEffect, useRef, useState } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { createChart, CandlestickSeries, LineSeries } from "lightweight-charts";
-import { X } from "@phosphor-icons/react";
 import { inr } from "./swingFormat.js";
 
-const WIDTH = 720;
-const HEIGHT = 460;
+const HOVER_DELAY_MS = 250;
+const WIDTH = 640;
+const HEIGHT = 440;
 
 function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
+// Module-scoped like ChartHoverPreview's own candleCache — survives across
+// every instance and every hover, so re-hovering a symbol you already
+// looked at is instant, and the fetch starts right away rather than
+// waiting for the show-delay to elapse first.
+const chartCache = new Map(); // symbol -> Promise<ChartData>
+
+function fetchChartCached(symbol) {
+  let pending = chartCache.get(symbol);
+  if (!pending) {
+    pending = fetch(`/api/intraday?resource=chart&symbol=${encodeURIComponent(symbol)}`)
+      .then((r) => r.json())
+      .then((body) => {
+        if (body.error) throw new Error(body.message || body.error);
+        return body;
+      });
+    pending.catch(() => { chartCache.delete(symbol); }); // don't cache failures — allow a retry on the next hover
+    chartCache.set(symbol, pending);
+  }
+  return pending;
+}
+
 /**
- * On-demand per-stock chart for one candidate — today's 5-min bars with
- * VWAP/EMA9/EMA20 overlaid as line series and entry/stop/target/opening-
- * range levels as horizontal price lines, via lightweight-charts (same
- * library ChartHoverPreview.jsx already uses for the Swing Scanner's
- * daily hover preview, just intraday bars + more overlays here). Fetches
- * `/api/intraday?resource=chart&symbol=X` only when opened — this data
- * isn't part of the regular 20s scan poll.
+ * Same hover-to-preview pattern as ChartHoverPreview.jsx (Swing Scanner's
+ * daily chart) — wraps a symbol so hovering it (after a short delay)
+ * shows today's 5-min candles with VWAP/EMA9/EMA20 overlaid and entry/
+ * stop/target/opening-range as price lines. No modal/backdrop, same as
+ * the Swing version.
  */
-export default function IntradaySignalChart({ symbol, candidate, onClose }) {
+export default function IntradaySignalChart({ symbol, candidate, children, className }) {
+  const [show, setShow] = useState(false);
+  const [pos, setPos] = useState(null);
   const [chartData, setChartData] = useState(null);
   const [error, setError] = useState(null);
+  const timerRef = useRef(null);
+  const wrapRef = useRef(null);
   const containerRef = useRef(null);
   const chartRef = useRef(null);
 
+  const onEnter = useCallback(() => {
+    fetchChartCached(symbol);
+    timerRef.current = setTimeout(() => {
+      const rect = wrapRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      let left = rect.right + 8;
+      if (left + WIDTH > window.innerWidth) left = Math.max(8, rect.left - WIDTH - 8);
+      let top = Math.min(rect.top, window.innerHeight - HEIGHT - 8);
+      top = Math.max(8, top);
+      setPos({ left, top });
+      setShow(true);
+    }, HOVER_DELAY_MS);
+  }, [symbol]);
+
+  const cancel = useCallback(() => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+  }, []);
+
+  const onLeave = useCallback(() => {
+    cancel();
+    setShow(false);
+  }, [cancel]);
+
   useEffect(() => {
+    if (!show) return;
     let cancelled = false;
     setChartData(null);
     setError(null);
-    fetch(`/api/intraday?resource=chart&symbol=${encodeURIComponent(symbol)}`)
-      .then((r) => r.json())
-      .then((body) => {
-        if (cancelled) return;
-        if (body.error) { setError(body.message || body.error); return; }
-        setChartData(body);
-      })
+    fetchChartCached(symbol)
+      .then((body) => { if (!cancelled) setChartData(body); })
       .catch((e) => { if (!cancelled) setError(e.message); });
     return () => { cancelled = true; };
-  }, [symbol]);
+  }, [show, symbol]);
 
   useEffect(() => {
-    if (!chartData || !containerRef.current) return;
+    if (!show || !chartData || !containerRef.current) return;
     const container = containerRef.current;
     const gain = cssVar("--c-gain") || "#067A55";
     const loss = cssVar("--c-loss") || "#C8342B";
@@ -99,41 +141,41 @@ export default function IntradaySignalChart({ symbol, candidate, onClose }) {
     chart.timeScale().fitContent();
 
     return () => { chart.remove(); chartRef.current = null; };
-  }, [chartData, candidate]);
+  }, [show, chartData, candidate]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.45)" }} onClick={onClose}>
-      <div
-        className="rounded-[14px] flex flex-col"
-        style={{ width: WIDTH, maxWidth: "100%", border: "1px solid var(--c-line)", background: "var(--c-surface)" }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between px-4 py-3" style={{ borderBottom: "1px solid var(--c-line)" }}>
-          <div>
-            <span className="text-[14px] font-bold">{symbol}</span>
-            <span className="text-[11px] text-faint ml-2">5-min · VWAP · EMA9/20{candidate?.signal ? " · Entry/Stop/Targets" : ""}</span>
+    <div ref={wrapRef} onMouseEnter={onEnter} onMouseLeave={onLeave} className={className ?? "relative inline-block"}>
+      {children}
+      {show && pos && (
+        <div
+          className="fixed z-[9999] rounded-[10px] overflow-hidden shadow-xl flex flex-col"
+          style={{ left: pos.left, top: pos.top, width: WIDTH, height: HEIGHT, border: "1px solid var(--c-line)", background: "var(--c-surface)" }}
+          onMouseEnter={cancel}
+          onMouseLeave={onLeave}
+        >
+          <div className="px-3 py-2 text-[12px] font-semibold text-ink shrink-0" style={{ borderBottom: "1px solid var(--c-line)" }}>
+            {symbol} <span className="text-faint font-normal">· 5-min · VWAP · EMA9/20{candidate?.signal ? " · Entry/Stop/Targets" : ""}</span>
           </div>
-          <button onClick={onClose} className="text-muted"><X size={16} weight="bold" /></button>
-        </div>
-        <div style={{ height: HEIGHT }} className="relative">
-          {error ? (
-            <p className="text-[12px] text-loss p-4">{error}</p>
-          ) : !chartData ? (
-            <p className="text-[12px] text-muted p-4">Loading chart…</p>
-          ) : (
-            <div ref={containerRef} className="w-full h-full" />
+          <div className="flex-1 min-h-0 relative">
+            {error ? (
+              <p className="text-[11px] text-loss p-3">{error}</p>
+            ) : !chartData ? (
+              <p className="text-[11px] text-muted p-3">Loading chart…</p>
+            ) : (
+              <div ref={containerRef} className="w-full h-full" />
+            )}
+          </div>
+          {candidate?.signal && (
+            <div className="px-3 py-2 text-[10.5px] text-faint flex flex-wrap gap-x-3 gap-y-0.5 shrink-0" style={{ borderTop: "1px solid var(--c-line)" }}>
+              <span>Entry <b className="text-ink2 n">{inr(candidate.signal.entry)}</b></span>
+              <span>Stop <b className="text-loss n">{inr(candidate.signal.stop)}</b></span>
+              {candidate.signal.target1 != null && <span>T1 <b className="text-gain n">{inr(candidate.signal.target1)}</b></span>}
+              {candidate.signal.target2 != null && <span>T2 <b className="text-gain n">{inr(candidate.signal.target2)}</b></span>}
+              {candidate.signal.riskReward != null && <span>R:R <b className="n">{candidate.signal.riskReward.toFixed(1)}</b></span>}
+            </div>
           )}
         </div>
-        {candidate?.signal && (
-          <div className="px-4 py-2.5 text-[11px] text-faint flex flex-wrap gap-x-4 gap-y-1" style={{ borderTop: "1px solid var(--c-line)" }}>
-            <span>Entry <b className="text-ink2 n">{inr(candidate.signal.entry)}</b></span>
-            <span>Stop <b className="text-loss n">{inr(candidate.signal.stop)}</b></span>
-            {candidate.signal.target1 != null && <span>T1 <b className="text-gain n">{inr(candidate.signal.target1)}</b></span>}
-            {candidate.signal.target2 != null && <span>T2 <b className="text-gain n">{inr(candidate.signal.target2)}</b></span>}
-            {candidate.signal.riskReward != null && <span>R:R <b className="n">{candidate.signal.riskReward.toFixed(1)}</b></span>}
-          </div>
-        )}
-      </div>
+      )}
     </div>
   );
 }

@@ -282,13 +282,30 @@ export function rvolScoreFor(rvol) {
   if (rvol == null) return 40;
   if (rvol < 0.75) return 20; if (rvol < 1.0) return 45; if (rvol < 1.5) return 65; if (rvol < 2.0) return 85; return 95;
 }
-export function vwapPositionScore(lastPrice, avgPrice) {
+/**
+ * Direction-aligned, same reasoning as relativeStrengthScoreFor: a LONG
+ * wants price above VWAP, a SHORT wants price below it — that's what
+ * confirms the thesis, not "above VWAP" unconditionally.
+ */
+export function vwapPositionScore(lastPrice, avgPrice, direction) {
   if (!avgPrice) return 50;
-  return Math.round(clamp(50 + ((lastPrice - avgPrice) / avgPrice) * 100 * 15, 0, 100));
+  const score = Math.round(clamp(50 + ((lastPrice - avgPrice) / avgPrice) * 100 * 15, 0, 100));
+  return direction === 'LONG' ? score : 100 - score;
 }
-export function relativeStrengthScoreFor(stockReturnPct, indexReturnPct) {
+/**
+ * Direction-aligned, like regimeAlignmentScore: 100 = this stock's move
+ * vs NIFTY maximally SUPPORTS the given trade direction, 0 = maximally
+ * against it. A LONG wants outperformance (rising more than the index);
+ * a SHORT wants underperformance (falling more than the index, i.e.
+ * relative WEAKNESS, not strength) — flipping here, not at each call
+ * site, means every downstream use (the composite score, the
+ * relativeStrengthStrong checklist gate) is automatically correct for
+ * both directions without a separate direction check of its own.
+ */
+export function relativeStrengthScoreFor(stockReturnPct, indexReturnPct, direction) {
   const rs = clamp(stockReturnPct - indexReturnPct, -10, 10);
-  return clamp(Math.round(50 + rs * 5), 0, 100);
+  const score = clamp(Math.round(50 + rs * 5), 0, 100);
+  return direction === 'LONG' ? score : 100 - score;
 }
 
 const MIN_SECTOR_MEMBERS = 3;
@@ -711,9 +728,9 @@ async function handleScan(supabase, req, res) {
     const ranked = enriched.map((e) => {
       const direction = e.returnPct >= 0 ? 'LONG' : 'SHORT';
       const factors = {
-        relativeStrength: relativeStrengthScoreFor(e.returnPct, regimeInfo.niftyReturnPct),
+        relativeStrength: relativeStrengthScoreFor(e.returnPct, regimeInfo.niftyReturnPct, direction),
         volume: rvolScoreFor(e.rvol),
-        vwapPosition: vwapPositionScore(e.lastPrice, e.averagePrice),
+        vwapPosition: vwapPositionScore(e.lastPrice, e.averagePrice, direction),
         regimeAlignment: regimeAlignmentScore(regimeInfo.regime, direction),
         sectorStrength: sectorScoreFor(e.sector, sectorScoreMap),
       };

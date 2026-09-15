@@ -299,9 +299,9 @@ async function main() {
         const expectedVol = (d.volAvg20 ?? 0) * sessionFractionElapsed(istMinutesOfDay(d.bars[i].t));
         const rvol = expectedVol > 0 ? d.cumVol[i] / expectedVol : null;
         const rankFactors = {
-          relativeStrength: relativeStrengthScoreFor(returnPct, regimeInfo.niftyReturnPct),
+          relativeStrength: relativeStrengthScoreFor(returnPct, regimeInfo.niftyReturnPct, direction),
           volume: rvolScoreFor(rvol),
-          vwapPosition: vwapPositionScore(price, d.vwap[i]),
+          vwapPosition: vwapPositionScore(price, d.vwap[i], direction),
           regimeAlignment: regimeAlignmentScore(regimeInfo.regime, direction),
           sectorStrength: sectorScoreFor(d.sector, sectorScoreMap),
         };

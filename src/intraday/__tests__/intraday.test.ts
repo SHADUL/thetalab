@@ -7,7 +7,7 @@ import { intradayRelativeStrengthScore } from '../relativeStrength.ts';
 import { momentumAccelerationScore } from '../momentum.ts';
 import { estimateRVOL, classifyRVOL, sessionFractionElapsed } from '../rvol.ts';
 import { ema, atr, istMinutesOfDay } from '../indicators.ts';
-import { computeOpeningRange, detectORB, detectVwapPullback, detectEmaTrendContinuation } from '../setups.ts';
+import { computeOpeningRange, detectORB, detectVwapPullback, detectEmaTrendContinuation, detectBreakout, detectBreakoutRetest } from '../setups.ts';
 import { computeExtension } from '../extension.ts';
 import { computeIntradaySectorStrength, sectorScoreFor } from '../sector.ts';
 import { classifyGap, detectPrevDayLevelEvents } from '../levels.ts';
@@ -262,6 +262,67 @@ test('detectEmaTrendContinuation: a broken structure (lower high than prior low)
   const ema9 = bars.map((b) => b.c + 0.2);
   const ema20 = [95, 95, 95, 95, 95];
   const signal = detectEmaTrendContinuation(bars, ema9, ema20, 'LONG');
+  assert.equal(signal.fired, false);
+});
+
+/* ---------------- setups.ts: Breakout ---------------- */
+
+function tightBase(n: number, mid = 100, halfWidth = 0.2, vol = 50_000): IntradayBar[] {
+  return Array.from({ length: n }, (_, i) => bar(9, 30 + i * 5, mid, { h: mid + halfWidth, l: mid - halfWidth, o: mid, v: vol }));
+}
+
+test('detectBreakout: a confirmed close beyond a tight base fires with volume expansion', () => {
+  const base = tightBase(12);
+  const breakoutBar = bar(10, 30, 101, { o: 100.5, h: 101.2, l: 100.4, v: 200_000 });
+  const signal = detectBreakout([...base, breakoutBar], 'LONG');
+  assert.equal(signal.fired, true);
+  assert.ok(signal.quality > 0);
+});
+
+test('detectBreakout: a wide/trending range does not count as a base', () => {
+  const trending = Array.from({ length: 12 }, (_, i) => bar(9, 30 + i * 5, 95 + i, { h: 95 + i + 0.3, l: 95 + i - 0.3, v: 50_000 }));
+  const breakoutBar = bar(10, 30, 108, { o: 107, h: 108.2, l: 106.8, v: 200_000 });
+  const signal = detectBreakout([...trending, breakoutBar], 'LONG');
+  assert.equal(signal.fired, false);
+});
+
+test('detectBreakout: a close still inside the base does not fire', () => {
+  const base = tightBase(12);
+  const insideBar = bar(10, 30, 100.1, { o: 100, h: 100.2, l: 99.9, v: 60_000 });
+  const signal = detectBreakout([...base, insideBar], 'LONG');
+  assert.equal(signal.fired, false);
+});
+
+/* ---------------- setups.ts: Breakout Retest ---------------- */
+
+test('detectBreakoutRetest: breakout, pullback to the level, hold, and resume fires', () => {
+  const filler = bar(9, 15, 100, { h: 100.1, l: 99.9, v: 50_000 });
+  const base = tightBase(12); // base.high = 100.2, base.low = 99.8
+  const retestWindow = [
+    bar(10, 30, 101, { o: 100.3, h: 101.2, l: 100.25, v: 200_000 }),     // breakout bar
+    bar(10, 35, 100.6, { o: 101, h: 101, l: 100.5, v: 80_000 }),          // pulling back
+    bar(10, 40, 100.45, { o: 100.6, h: 100.65, l: 100.35, v: 60_000 }),   // touches the retest zone
+    bar(10, 45, 100.5, { o: 100.45, h: 100.6, l: 100.3, v: 55_000 }),     // holding
+    bar(10, 50, 100.55, { o: 100.5, h: 100.6, l: 100.32, v: 50_000 }),    // still holding
+    bar(10, 55, 101.2, { o: 100.55, h: 101.3, l: 100.5, v: 150_000 }),    // resumes higher
+  ];
+  const signal = detectBreakoutRetest([filler, ...base, ...retestWindow], 'LONG');
+  assert.equal(signal.fired, true);
+  assert.ok(signal.quality >= 75);
+});
+
+test('detectBreakoutRetest: a straight-line breakout with no pullback does not fire', () => {
+  const filler = bar(9, 15, 100, { h: 100.1, l: 99.9, v: 50_000 });
+  const base = tightBase(12);
+  const runAway = [
+    bar(10, 30, 101, { o: 100.3, h: 101.2, l: 100.25, v: 200_000 }),
+    bar(10, 35, 101.5, { o: 101, h: 101.6, l: 101, v: 180_000 }),
+    bar(10, 40, 102, { o: 101.5, h: 102.1, l: 101.4, v: 170_000 }),
+    bar(10, 45, 102.5, { o: 102, h: 102.6, l: 101.9, v: 160_000 }),
+    bar(10, 50, 103, { o: 102.5, h: 103.1, l: 102.4, v: 150_000 }),
+    bar(10, 55, 103.5, { o: 103, h: 103.6, l: 102.9, v: 140_000 }),
+  ];
+  const signal = detectBreakoutRetest([filler, ...base, ...runAway], 'LONG');
   assert.equal(signal.fired, false);
 });
 

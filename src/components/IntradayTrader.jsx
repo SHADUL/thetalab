@@ -15,7 +15,10 @@ const REGIME_LABEL = {
 
 const SIGNAL_TONE = { SIGNAL_CONFIRMED: "gain", FORMING: "muted", WATCH: "muted" };
 const SIGNAL_LABEL = { SIGNAL_CONFIRMED: "Confirmed", FORMING: "Forming", WATCH: "Watch" };
-const SETUP_LABEL = { ORB: "ORB", VWAP_PULLBACK: "VWAP Pullback", EMA_TREND_CONTINUATION: "Trend Continuation" };
+const SETUP_LABEL = {
+  ORB: "ORB", VWAP_PULLBACK: "VWAP Pullback", EMA_TREND_CONTINUATION: "Trend Continuation",
+  BREAKOUT: "Breakout", BREAKOUT_RETEST: "Breakout Retest",
+};
 
 /**
  * Intraday Trader — Market Regime + Stock Ranking + Setup/Signal Engine.

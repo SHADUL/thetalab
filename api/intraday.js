@@ -7,10 +7,11 @@
  *     via Kite's own exchange-computed average_price, RVOL, sector, regime
  *     alignment) — cheap, one quote call for ~150 symbols.
  *  2. For the top-ranked shortlist only, fetch today's 5-min candles
- *     (Kite's historical API) to run real setup detection (ORB, VWAP
- *     Pullback, EMA Trend Continuation), the 12-point entry checklist, and
- *     the Intraday Score — expensive per-symbol, so deliberately only run
- *     on ~12 candidates, not the whole universe (spec §62's own ranking-
+ *     (Kite's historical API) to run real setup detection — all 5 initial
+ *     ensemble setups (ORB, VWAP Pullback, EMA Trend Continuation,
+ *     Breakout, Breakout Retest) — the 12-point entry checklist, and the
+ *     Intraday Score — expensive per-symbol, so deliberately only run on
+ *     ~12 candidates, not the whole universe (spec §62's own ranking-
  *     then-setup-detection order).
  *
  * The logic below is a direct, deliberate port of the tested pure
@@ -137,6 +138,59 @@ function detectEmaTrendContinuation(bars, ema9, ema20, direction) {
   if (!structureOk) return { fired: false, quality: 0 };
   const nearEma = Math.abs((bars[i].c - e9) / e9) * 100 < 0.5;
   return { fired: true, quality: Math.round(60 + (nearEma ? 30 : 0) + 10) };
+}
+const CONSOLIDATION_LOOKBACK = 12;
+const MIN_BASE_BARS = 6;
+const MAX_BASE_WIDTH_PCT = 1.2;
+const RETEST_WINDOW = 6;
+
+function detectConsolidationRange(bars, lookback = CONSOLIDATION_LOOKBACK) {
+  if (bars.length < MIN_BASE_BARS) return null;
+  const baseBars = bars.slice(-lookback);
+  if (baseBars.length < MIN_BASE_BARS) return null;
+  const high = Math.max(...baseBars.map((b) => b.h));
+  const low = Math.min(...baseBars.map((b) => b.l));
+  const mid = (high + low) / 2;
+  const widthPct = mid > 0 ? ((high - low) / mid) * 100 : 0;
+  if (widthPct > MAX_BASE_WIDTH_PCT) return null;
+  return { high, low, width: high - low };
+}
+function detectBreakout(bars, direction, lookback = CONSOLIDATION_LOOKBACK) {
+  if (bars.length < lookback + 1) return { fired: false, quality: 0 };
+  const base = detectConsolidationRange(bars.slice(0, -1), lookback);
+  if (!base) return { fired: false, quality: 0 };
+  const last = bars[bars.length - 1];
+  const level = direction === 'LONG' ? base.high : base.low;
+  const fired = direction === 'LONG' ? last.c > level : last.c < level;
+  if (!fired) return { fired: false, quality: 0 };
+  const baseBars = bars.slice(-lookback - 1, -1);
+  const avgBaseVol = baseBars.reduce((s, b) => s + b.v, 0) / baseBars.length;
+  const volExpansion = avgBaseVol > 0 ? last.v / avgBaseVol : 1;
+  const breakoutDistancePct = Math.abs((last.c - level) / level) * 100;
+  const range = last.h - last.l;
+  const closingStrength = range === 0 ? 0.5 : direction === 'LONG' ? (last.c - last.l) / range : (last.h - last.c) / range;
+  return { fired: true, quality: Math.round(clamp(40 + breakoutDistancePct * 15 + closingStrength * 25 + Math.min(volExpansion, 3) * 10, 0, 100)) };
+}
+function detectBreakoutRetest(bars, direction, lookback = CONSOLIDATION_LOOKBACK) {
+  const n = bars.length;
+  if (n < lookback + RETEST_WINDOW + 1) return { fired: false, quality: 0 };
+  const base = detectConsolidationRange(bars.slice(0, n - RETEST_WINDOW), lookback);
+  if (!base) return { fired: false, quality: 0 };
+  const level = direction === 'LONG' ? base.high : base.low;
+  const retestWindow = bars.slice(n - RETEST_WINDOW);
+  const breakoutBarIdx = retestWindow.findIndex((b) => (direction === 'LONG' ? b.c > level : b.c < level));
+  if (breakoutBarIdx === -1 || breakoutBarIdx >= retestWindow.length - 1) return { fired: false, quality: 0 };
+  const afterBreakout = retestWindow.slice(breakoutBarIdx + 1);
+  const pulledToLevel = afterBreakout.some((b) => (direction === 'LONG' ? b.l <= level * 1.002 : b.h >= level * 0.998));
+  const last = afterBreakout[afterBreakout.length - 1];
+  const heldLevel = direction === 'LONG' ? last.l >= level * 0.997 : last.h <= level * 1.003;
+  const resumed = direction === 'LONG' ? last.c > last.o && last.c > level : last.c < last.o && last.c < level;
+  if (!(pulledToLevel && heldLevel && resumed)) return { fired: false, quality: 0 };
+  const breakoutBarVol = retestWindow[breakoutBarIdx].v;
+  const retestBars = afterBreakout.slice(0, -1);
+  const retestVol = retestBars.length ? retestBars.reduce((s, b) => s + b.v, 0) / retestBars.length : breakoutBarVol;
+  const volDeclinedOnRetest = breakoutBarVol > 0 && retestVol < breakoutBarVol;
+  return { fired: true, quality: Math.round(75 + (volDeclinedOnRetest ? 15 : 0) + 10) };
 }
 function classifyVwapRelationship(price, vwapSeries) {
   const vwap = vwapSeries[vwapSeries.length - 1];
@@ -325,8 +379,11 @@ async function handleScan(supabase, req, res) {
       const orSig = or ? detectORB(bars, or, direction) : { fired: false, quality: 0 };
       const vwapSig = detectVwapPullback(bars, vwapSeries, direction);
       const emaSig = detectEmaTrendContinuation(bars, ema9, ema20, direction);
+      const breakoutSig = detectBreakout(bars, direction);
+      const retestSig = detectBreakoutRetest(bars, direction);
       const setups = [
         { type: 'ORB', ...orSig }, { type: 'VWAP_PULLBACK', ...vwapSig }, { type: 'EMA_TREND_CONTINUATION', ...emaSig },
+        { type: 'BREAKOUT', ...breakoutSig }, { type: 'BREAKOUT_RETEST', ...retestSig },
       ].filter((s) => s.fired).sort((a, b) => b.quality - a.quality);
       const bestSetup = setups[0] ?? null;
 
@@ -338,8 +395,10 @@ async function handleScan(supabase, req, res) {
       const currentAtr = atr14[atr14.length - 1];
       const extension = computeExtension(last.c, vwapSeries[vwapSeries.length - 1], ema9[ema9.length - 1] ?? last.c, currentAtr);
 
+      const baseRange = detectConsolidationRange(bars.slice(0, -1));
       let stop = null;
       if (bestSetup?.type === 'ORB' && or) stop = direction === 'LONG' ? or.low : or.high;
+      else if ((bestSetup?.type === 'BREAKOUT' || bestSetup?.type === 'BREAKOUT_RETEST') && baseRange) stop = direction === 'LONG' ? baseRange.low : baseRange.high;
       else if (currentAtr) stop = direction === 'LONG' ? vwapSeries[vwapSeries.length - 1] - 0.5 * currentAtr : vwapSeries[vwapSeries.length - 1] + 0.5 * currentAtr;
       const entry = last.c;
       const riskPerShare = stop != null ? Math.abs(entry - stop) : null;

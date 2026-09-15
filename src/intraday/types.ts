@@ -2,9 +2,10 @@
  * Intraday Trader — a completely separate module from the Swing Scanner
  * (own data model, own UI section), per the user's own spec. Vertical
  * slice v1: Market Regime -> Ranking -> Setup -> Signal -> Risk, PAPER
- * mode only. Deferred to later passes: the remaining 2 of 5 ensemble
- * setups (Breakout, Breakout Retest), real execution, full backtest
- * engine, and UI polish (top-5 cards, alert-state timeline).
+ * mode only. All 5 initial ensemble setups (ORB, VWAP Pullback, EMA Trend
+ * Continuation, Breakout, Breakout Retest) are implemented. Deferred to
+ * later passes: real execution, full backtest engine, and UI polish
+ * (top-5 cards, alert-state timeline).
  */
 export interface IntradayBar {
   t: number; // epoch ms
@@ -17,7 +18,7 @@ export type VwapRelationship = 'ABOVE_RISING' | 'ABOVE_FALLING' | 'BELOW_RISING'
 
 export type RvolClass = 'WEAK' | 'NORMAL' | 'POSITIVE' | 'STRONG' | 'EXCEPTIONAL' | 'UNKNOWN';
 
-export type SetupType = 'ORB' | 'VWAP_PULLBACK' | 'EMA_TREND_CONTINUATION';
+export type SetupType = 'ORB' | 'VWAP_PULLBACK' | 'EMA_TREND_CONTINUATION' | 'BREAKOUT' | 'BREAKOUT_RETEST';
 
 export type Direction = 'LONG' | 'SHORT';
 

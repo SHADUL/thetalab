@@ -30,8 +30,9 @@ const POSITION_STATUS_TONE = { OPEN: "muted", CLOSED: "muted" };
  * setups) and the 12-point entry checklist. When paper execution is
  * enabled below, a "Confirmed" signal is sized by the Risk Engine and
  * opened as a paper position automatically — no real orders are placed.
- * Position management (trailing stops) and the Exit Engine (target/stop/
- * EOD square-off) aren't built yet, so paper positions stay OPEN.
+ * Every scan tick, open positions are also managed: exited on stop,
+ * target2, EOD square-off, or a momentum-failure check, with the stop
+ * trailed to breakeven once target1 is reached.
  */
 export default function IntradayTrader() {
   const [data, setData] = useState(null);

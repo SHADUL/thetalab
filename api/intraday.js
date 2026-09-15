@@ -33,9 +33,17 @@
  * symbol), sized via computePositionSize, and opened as a paper fill at
  * the signal's entry price — all inside the same scan tick, no separate
  * cron. ALERT/SEMI_AUTO/AUTO execution modes are not implemented; only
- * PAPER auto-opens a position. Position Management (trailing stops) and
- * the Exit Engine (target/stop/EOD square-off) are not built yet — paper
- * positions stay OPEN until that pass exists.
+ * PAPER auto-opens a position.
+ *
+ * Position Management + Exit Engine (see managePositions) — runs every
+ * scan tick against every OPEN position regardless of whether new-entry
+ * execution is currently enabled, in priority order: EOD square-off,
+ * target2 (full exit), stop (initial risk, or a breakeven "TRAIL" once
+ * price has reached target1 and the stop was walked up/down to entry),
+ * momentum failure (VWAP/EMA-based setups only, before target1 has
+ * proven the trade). Closing a position updates intraday_daily_stats
+ * (wins/losses/gross_pnl/consecutive_losses) and re-checks the daily
+ * lock so a bad day actually stops new entries mid-session.
  */
 import { createClient } from '@supabase/supabase-js';
 
@@ -54,6 +62,7 @@ const DEFAULT_SETTINGS = {
   enabled: false, execution_mode: 'PAPER', capital: 0, risk_pct_per_trade: 0.5,
   max_capital_pct_per_trade: 20, max_daily_loss_pct: 2, max_trades_per_day: 5,
   max_consecutive_losses: 3, max_open_positions: 3, max_positions_per_sector: 1,
+  square_off_time: '15:15',
 };
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
@@ -358,6 +367,100 @@ async function tryOpenPaperPosition(supabase, settings, ctx) {
   }
 }
 
+// ---- Position Management + Exit Engine ----
+
+function parseSquareOffMinutes(str) {
+  const [hh, mm] = String(str || '15:15').split(':').map(Number);
+  return hh * 60 + mm;
+}
+
+/**
+ * Runs every scan tick against every OPEN paper position, independent of
+ * whether new-entry execution is currently enabled — a position that was
+ * already opened must still be managed (EOD square-off above all) even
+ * if the user later flips Paper Execution off. Exit priority: EOD square-
+ * off > target2 (full exit) > stop (initial risk, or a breakeven "TRAIL"
+ * once already moved there) > momentum failure (VWAP/EMA-based setups
+ * only, before target1 has proven the trade). Once price reaches
+ * target1, the stop is walked up/down to breakeven exactly once — target1
+ * itself is always exactly 1R from entry by construction (buildTradePlan
+ * never mutates it), so it doubles as the risk-per-share basis for
+ * R-multiple even after the stop has been trailed.
+ */
+async function managePositions(supabase, settings, openPositions, dailyStats, quoteBySymbol, today) {
+  let stats = dailyStats;
+  const stillOpen = [];
+  const nowMin = nowMinutesIST();
+  const squareOffDue = nowMin >= MARKET_CLOSE_MIN || nowMin >= parseSquareOffMinutes(settings.square_off_time);
+
+  for (const original of openPositions) {
+    let p = original;
+    const q = quoteBySymbol[`NSE:${p.symbol}`];
+    if (!q) { stillOpen.push(p); continue; }
+    const price = q.last_price;
+    const riskPerShare = p.target1 != null ? Math.abs(p.target1 - p.entry_price) : null;
+    const target1Hit = riskPerShare != null && (p.direction === 'LONG' ? price >= p.target1 : price <= p.target1);
+    const target2Hit = p.target2 != null && (p.direction === 'LONG' ? price >= p.target2 : price <= p.target2);
+    const stopHit = p.stop != null && (p.direction === 'LONG' ? price <= p.stop : price >= p.stop);
+
+    let exitReason = null, exitPrice = null;
+    if (squareOffDue) { exitReason = 'EOD_SQUAREOFF'; exitPrice = price; }
+    else if (target2Hit) { exitReason = 'TARGET2'; exitPrice = p.target2; }
+    else if (stopHit) {
+      const atBreakeven = Math.abs(p.stop - p.entry_price) < 1e-6 * Math.max(1, p.entry_price);
+      exitReason = atBreakeven ? 'TRAIL' : 'STOP';
+      exitPrice = p.stop;
+    } else if (!target1Hit && q.average_price && (p.setup_type === 'VWAP_PULLBACK' || p.setup_type === 'EMA_TREND_CONTINUATION')) {
+      const wrongSide = p.direction === 'LONG' ? price < q.average_price * 0.9995 : price > q.average_price * 1.0005;
+      if (wrongSide) { exitReason = 'MOMENTUM_FAILURE'; exitPrice = price; }
+    }
+
+    if (exitReason) {
+      const signedMove = p.direction === 'LONG' ? exitPrice - p.entry_price : p.entry_price - exitPrice;
+      const pnl = signedMove * p.shares;
+      const rMultiple = riskPerShare ? signedMove / riskPerShare : null;
+      try {
+        const { error } = await supabase.from('intraday_positions').update({
+          status: 'CLOSED', exit_time: new Date().toISOString(), exit_price: exitPrice,
+          exit_reason: exitReason, r_multiple: rMultiple, pnl,
+        }).eq('id', p.id);
+        if (error) { stillOpen.push(p); continue; }
+
+        const isWin = pnl > 0;
+        stats = {
+          trades_taken: stats?.trades_taken ?? 0,
+          wins: (stats?.wins ?? 0) + (isWin ? 1 : 0),
+          losses: (stats?.losses ?? 0) + (isWin ? 0 : 1),
+          gross_pnl: (stats?.gross_pnl ?? 0) + pnl,
+          consecutive_losses: isWin ? 0 : (stats?.consecutive_losses ?? 0) + 1,
+          locked: false, lock_reason: null,
+        };
+        const limitCheck = checkDailyRiskLimits({
+          dailyPnl: stats.gross_pnl, capital: settings.capital, maxDailyLossPct: settings.max_daily_loss_pct,
+          tradesToday: stats.trades_taken, maxTrades: settings.max_trades_per_day,
+          consecutiveLosses: stats.consecutive_losses, maxConsecutiveLosses: settings.max_consecutive_losses,
+        });
+        stats.locked = limitCheck.locked;
+        stats.lock_reason = limitCheck.reason;
+        await supabase.from('intraday_daily_stats').upsert({ date: today, ...stats });
+      } catch { stillOpen.push(p); }
+      continue;
+    }
+
+    if (target1Hit && p.stop != null) {
+      const shouldTrailToBreakeven = p.direction === 'LONG' ? p.stop < p.entry_price : p.stop > p.entry_price;
+      if (shouldTrailToBreakeven) {
+        try {
+          const { error } = await supabase.from('intraday_positions').update({ stop: p.entry_price }).eq('id', p.id);
+          if (!error) p = { ...p, stop: p.entry_price };
+        } catch { /* trail failed — keep the original stop and try again next tick */ }
+      }
+    }
+    stillOpen.push(p);
+  }
+  return { openPositions: stillOpen, dailyStats: stats };
+}
+
 async function handleScan(supabase, req, res) {
   const apiKey = process.env.KITE_API_KEY;
   const { data: session } = await supabase.from('kite_session').select('access_token').eq('id', 1).maybeSingle();
@@ -405,6 +508,36 @@ async function handleScan(supabase, req, res) {
     const nifty = niftyData['NSE:NIFTY 50'];
     const bankNifty = niftyData['NSE:NIFTY BANK'];
 
+    // ---- Position Management + Exit Engine — runs whenever positions
+    // exist, independent of whether new-entry execution is enabled, so
+    // EOD square-off and stop/target exits still fire even if the user
+    // has since turned Paper Execution off. ----
+    const today = new Date().toISOString().slice(0, 10);
+    let openPositions = [];
+    let dailyStats = null;
+    let executionAvailable = false;
+    try {
+      const [posResult, statsResult] = await Promise.all([
+        supabase.from('intraday_positions').select('*').eq('status', 'OPEN'),
+        supabase.from('intraday_daily_stats').select('*').eq('date', today).maybeSingle(),
+      ]);
+      // supabase-js resolves with { data: null, error } rather than throwing
+      // on a missing table — both must be error-checked explicitly, or a
+      // not-yet-migrated schema would be silently treated as "available
+      // with zero rows" instead of "unavailable".
+      if (!posResult.error && !statsResult.error) {
+        openPositions = posResult.data ?? [];
+        dailyStats = statsResult.data ?? null;
+        executionAvailable = true;
+      }
+    } catch { /* network-level failure — execution stays off, scan itself still works */ }
+
+    if (executionAvailable && openPositions.length > 0) {
+      const managed = await managePositions(supabase, settings, openPositions, dailyStats, quoteBySymbol, today);
+      openPositions = managed.openPositions;
+      dailyStats = managed.dailyStats;
+    }
+
     const nowMin = nowMinutesIST();
     const enriched = capped.map((u) => {
       const q = quoteBySymbol[`NSE:${u.symbol}`];
@@ -448,32 +581,11 @@ async function handleScan(supabase, req, res) {
 
     // ---- Stage 2: setup/signal detection on the shortlist ----
     const shortlist = ranked.slice(0, SETUP_SHORTLIST).filter((c) => c.instrumentToken);
-    const today = new Date().toISOString().slice(0, 10);
     const from = `${today} 09:15:00`;
     const nowIst = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
     const to = `${today} ${String(nowIst.getHours()).padStart(2, '0')}:${String(nowIst.getMinutes()).padStart(2, '0')}:00`;
 
-    const executionOn = settings.enabled && settings.execution_mode === 'PAPER';
-    let openPositions = [];
-    let dailyStats = null;
-    let executionAvailable = false;
-    if (executionOn) {
-      try {
-        // supabase-js resolves with { data: null, error } rather than
-        // throwing on a missing table — both must be error-checked
-        // explicitly, or a not-yet-migrated schema would be silently
-        // treated as "available with zero rows" instead of "unavailable".
-        const [posResult, statsResult] = await Promise.all([
-          supabase.from('intraday_positions').select('symbol,sector').eq('status', 'OPEN'),
-          supabase.from('intraday_daily_stats').select('*').eq('date', today).maybeSingle(),
-        ]);
-        if (!posResult.error && !statsResult.error) {
-          openPositions = posResult.data ?? [];
-          dailyStats = statsResult.data ?? null;
-          executionAvailable = true;
-        }
-      } catch { /* network-level failure — execution stays off, scan itself still works */ }
-    }
+    const executionOn = executionAvailable && settings.enabled && settings.execution_mode === 'PAPER';
 
     const withSignals = [];
     for (const cand of shortlist) {
@@ -566,7 +678,7 @@ async function handleScan(supabase, req, res) {
           signalId = inserted?.id ?? null;
         } catch { /* migration not run yet — signal still returned live, just not journaled */ }
 
-        if (executionAvailable) {
+        if (executionOn) {
           const opened = await tryOpenPaperPosition(supabase, settings, {
             symbol: cand.symbol, sector: cand.sector, direction, signal, signalId, regime: regimeInfo.regime, today,
             openPositions, dailyStats,

@@ -13,7 +13,9 @@
     "quant:test": "node --experimental-strip-types --test src/quant/__tests__/*.test.ts",
     "quant:typecheck": "tsc --project src/quant/tsconfig.json",
     "swing:test": "node --experimental-strip-types --test src/swing/__tests__/*.test.ts",
-    "swing:typecheck": "tsc --project src/swing/tsconfig.json"
+    "swing:typecheck": "tsc --project src/swing/tsconfig.json",
+    "intraday:test": "node --experimental-strip-types --test src/intraday/__tests__/*.test.ts",
+    "intraday:typecheck": "tsc --project src/intraday/tsconfig.json"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.3.0",

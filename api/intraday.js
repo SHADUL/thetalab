@@ -14,6 +14,20 @@
  *     ~12 candidates, not the whole universe (spec §62's own ranking-
  *     then-setup-detection order).
  *
+ * Liquidity Grab (see evaluateLiquidityGrabSignal) — a SEPARATE strategy
+ * from the 5-setup ensemble above, evaluated independently for the same
+ * shortlist on its own (faster, settings-configurable) timeframe — a
+ * second historical-candle fetch per candidate at
+ * intraday_settings.liquidity_grab_interval (default 3-min; 1-min also
+ * supported). This is a fade/reversal play (a stop-run sweep of a recent
+ * swing level that gets rejected), not a continuation or breakout play,
+ * so its direction is derived from the sweep itself rather than the
+ * ensemble's own return-sign-based direction — a candidate can carry an
+ * ensemble signal and a liquidity-grab signal pointing opposite ways at
+ * once. Gated at a minimum 1:2 risk:reward
+ * (intraday_settings.liquidity_grab_min_rr) rather than the ensemble's
+ * 1:1.5, reflecting the tighter stop this setup's own structure allows.
+ *
  * The logic below is a direct, deliberate port of the tested pure
  * functions in src/intraday/*.ts (same formulas/thresholds) — not a
  * second design. It's duplicated rather than imported because no
@@ -76,6 +90,7 @@ export const DEFAULT_SETTINGS = {
   max_capital_pct_per_trade: 20, max_daily_loss_pct: 2, max_trades_per_day: 5,
   max_consecutive_losses: 3, max_open_positions: 3, max_positions_per_sector: 1,
   square_off_time: '15:15',
+  liquidity_grab_enabled: true, liquidity_grab_interval: '3minute', liquidity_grab_lookback: 20, liquidity_grab_min_rr: 2.0,
 };
 
 export function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
@@ -232,6 +247,55 @@ export function detectBreakoutRetest(bars, direction, lookback = CONSOLIDATION_L
   const volDeclinedOnRetest = breakoutBarVol > 0 && retestVol < breakoutBarVol;
   return { fired: true, quality: Math.round(75 + (volDeclinedOnRetest ? 15 : 0) + 10) };
 }
+const LG_LEVEL_LOOKBACK = 20;
+const LG_SWEEP_MIN_PCT = 0.05;
+const LG_VOL_LOOKBACK = 10;
+const LG_STOP_BUFFER_PCT = 0.0005;
+
+/**
+ * Liquidity Grab / stop-run reversal — a genuinely separate strategy
+ * from the 5 continuation/breakout setups above (this is a FADE, not a
+ * momentum or breakout-continuation play). Ported from
+ * src/intraday/liquidityGrab.ts (tested) — see that file's header
+ * comment for the full reasoning on the 2-bar sweep-then-reject
+ * pattern and why direction is derived from the sweep itself rather
+ * than supplied by the caller.
+ */
+export function detectLiquidityGrab(bars, lookback = LG_LEVEL_LOOKBACK) {
+  const n = bars.length;
+  if (n < lookback + 2) return { fired: false, direction: null, quality: 0, sweptLevel: null, wickExtreme: null, detail: 'Not enough bars yet.' };
+
+  const levelBars = bars.slice(n - lookback - 2, n - 2);
+  const swingHigh = Math.max(...levelBars.map((b) => b.h));
+  const swingLow = Math.min(...levelBars.map((b) => b.l));
+  const sweepBar = bars[n - 2];
+  const confirmBar = bars[n - 1];
+  const volBars = levelBars.slice(-LG_VOL_LOOKBACK);
+  const avgVol = volBars.length ? volBars.reduce((s, b) => s + b.v, 0) / volBars.length : 0;
+  const volExpansion = avgVol > 0 ? sweepBar.v / avgVol : 1;
+
+  const sweptAbove = ((sweepBar.h - swingHigh) / swingHigh) * 100 >= LG_SWEEP_MIN_PCT;
+  if (sweptAbove && confirmBar.c < swingHigh && confirmBar.c < confirmBar.o) {
+    const excursion = sweepBar.h - swingHigh;
+    const reversal = sweepBar.h - confirmBar.c;
+    const rejectionRatio = excursion > 0 ? reversal / excursion : 0;
+    const quality = Math.round(clamp(40 + Math.min(rejectionRatio, 2) * 20 + Math.min(volExpansion, 3) * 7, 0, 100));
+    return { fired: true, direction: 'SHORT', quality, sweptLevel: swingHigh, wickExtreme: sweepBar.h, detail: `Swept above ${swingHigh.toFixed(2)} then rejected, closing at ${confirmBar.c.toFixed(2)}.` };
+  }
+  const sweptBelow = ((swingLow - sweepBar.l) / swingLow) * 100 >= LG_SWEEP_MIN_PCT;
+  if (sweptBelow && confirmBar.c > swingLow && confirmBar.c > confirmBar.o) {
+    const excursion = swingLow - sweepBar.l;
+    const reversal = confirmBar.c - sweepBar.l;
+    const rejectionRatio = excursion > 0 ? reversal / excursion : 0;
+    const quality = Math.round(clamp(40 + Math.min(rejectionRatio, 2) * 20 + Math.min(volExpansion, 3) * 7, 0, 100));
+    return { fired: true, direction: 'LONG', quality, sweptLevel: swingLow, wickExtreme: sweepBar.l, detail: `Swept below ${swingLow.toFixed(2)} then rejected, closing at ${confirmBar.c.toFixed(2)}.` };
+  }
+  return { fired: false, direction: null, quality: 0, sweptLevel: null, wickExtreme: null, detail: 'No sweep-and-reject structure at the recent swing level.' };
+}
+export function liquidityGrabStop(direction, wickExtreme) {
+  return direction === 'SHORT' ? wickExtreme * (1 + LG_STOP_BUFFER_PCT) : wickExtreme * (1 - LG_STOP_BUFFER_PCT);
+}
+
 export function classifyVwapRelationship(price, vwapSeries) {
   const vwap = vwapSeries[vwapSeries.length - 1];
   const prior = vwapSeries[Math.max(0, vwapSeries.length - 6)];
@@ -438,6 +502,75 @@ export function evaluateIntradaySignal({ bars, direction, regimeInfo, rankFactor
   };
 }
 
+/**
+ * Evaluates the Liquidity Grab strategy for one candidate, given bars on
+ * its OWN (faster) timeframe — completely independent of
+ * evaluateIntradaySignal above. Direction here comes from the sweep
+ * itself (see detectLiquidityGrab), which can legitimately differ from
+ * the candidate's ensemble direction (a stock up on the day can still
+ * form a bearish liquidity grab at a local high) — so relativeStrength/
+ * regimeAlignment are recomputed for THIS signal's own direction rather
+ * than reusing the ensemble's rankFactors wholesale. sectorStrength and
+ * volume (session RVOL) aren't direction-dependent, so those are reused
+ * as-is. No vwapPosition/momentum factor: momentum in the swept
+ * direction is exactly what this trade fades, so scoring it would be
+ * backwards, not just irrelevant. Returns null when the setup didn't
+ * fire — there's no "FORMING/WATCH" state for this strategy, since
+ * unlike the ensemble's setups (checked every tick against a fixed
+ * direction) a liquidity grab either just happened (a 2-bar pattern) or
+ * it didn't.
+ */
+export function evaluateLiquidityGrabSignal({ bars, returnPct, regimeInfo, sectorStrength, rvol, settings }) {
+  const grab = detectLiquidityGrab(bars, settings.liquidity_grab_lookback ?? 20);
+  if (!grab.fired) return null;
+
+  const direction = grab.direction;
+  const closes = bars.map((b) => b.c);
+  const ema9 = ema(closes, 9);
+  const atr14 = atr(bars, Math.min(14, bars.length - 1 || 1));
+  const vwapSeries = computeSessionVWAP(bars);
+  const last = bars[bars.length - 1];
+  const currentAtr = atr14[atr14.length - 1];
+
+  const entry = last.c;
+  const stop = liquidityGrabStop(direction, grab.wickExtreme);
+  const riskPerShare = Math.abs(entry - stop);
+  const structuralTarget = currentAtr ? (direction === 'LONG' ? entry + 3 * currentAtr : entry - 3 * currentAtr) : null;
+  const riskReward = riskPerShare > 0 && structuralTarget != null ? Math.abs(structuralTarget - entry) / riskPerShare : null;
+  const target1 = direction === 'LONG' ? entry + riskPerShare : entry - riskPerShare;
+  const target2 = direction === 'LONG' ? entry + 2 * riskPerShare : entry - 2 * riskPerShare;
+  const extension = computeExtension(entry, vwapSeries[vwapSeries.length - 1], ema9[ema9.length - 1] ?? entry, currentAtr, settings.max_extension_atr ?? 2.5);
+
+  const checklist = {
+    regimeSupportive: regimeAlignmentScore(regimeInfo.regime, direction) >= 50,
+    sectorSupportive: sectorStrength >= 50,
+    relativeStrengthStrong: relativeStrengthScoreFor(returnPct, regimeInfo.niftyReturnPct, direction) >= 65,
+    validSetup: true,
+    rvolConfirms: rvol != null && rvol >= (settings.min_rvol ?? 1.0),
+    stopLogical: riskPerShare > 0,
+    rrAcceptable: riskReward != null && riskReward >= (settings.liquidity_grab_min_rr ?? 2.0),
+    notExtended: !extension.extended,
+  };
+  const allPass = Object.values(checklist).every(Boolean);
+  const finalScore = Math.round(
+    grab.quality * 0.35
+    + relativeStrengthScoreFor(returnPct, regimeInfo.niftyReturnPct, direction) * 0.20
+    + regimeAlignmentScore(regimeInfo.regime, direction) * 0.15
+    + sectorStrength * 0.15
+    + rvolScoreFor(rvol) * 0.15,
+  );
+  const confidence = finalScore >= 90 ? 'A_PLUS' : finalScore >= 80 ? 'A' : finalScore >= 70 ? 'B' : finalScore >= 60 ? 'WATCH' : 'IGNORE';
+  const status = allPass && finalScore >= (settings.min_score ?? 70) ? 'SIGNAL_CONFIRMED' : 'FORMING';
+  const confirmations = Object.keys(checklist).filter((k) => checklist[k]).map((k) => CHECKLIST_LABEL[k]);
+  const failures = Object.keys(checklist).filter((k) => !checklist[k]).map((k) => CHECKLIST_LABEL[k]);
+
+  return {
+    status, score: finalScore, confidence, setupType: 'LIQUIDITY_GRAB', direction,
+    entry, stop, target1, target2, riskReward, confirmations, failures,
+    sweptLevel: grab.sweptLevel, setupQuality: grab.quality, detail: grab.detail,
+  };
+}
+
 // ---- Execution Engine (paper mode) — ported from src/intraday/risk.ts ----
 
 export function computePositionSize({ capital, riskPct, entry, stop, maxCapitalAllocationPct }) {
@@ -632,6 +765,40 @@ async function managePositions(supabase, settings, openPositions, dailyStats, qu
   return { openPositions: stillOpen, dailyStats: stats };
 }
 
+/**
+ * Journals a SIGNAL_CONFIRMED signal (best-effort — resilient if the
+ * migration hasn't run) and, if execution is on, attempts to open a
+ * paper position for it via tryOpenPaperPosition. Shared by both the
+ * ensemble signal and the Liquidity Grab signal so the two strategies
+ * can never diverge on how a confirmed signal gets journaled/executed
+ * — they only differ in how the signal itself gets detected upstream.
+ */
+async function persistAndMaybeExecuteSignal(supabase, settings, executionOn, ctx) {
+  const { symbol, sector, direction, signal, regime, today, extraComponents, openPositions, dailyStats } = ctx;
+  let signalId = null;
+  try {
+    const { data: inserted } = await supabase.from('intraday_signals').insert({
+      symbol, sector, direction, status: signal.status, score: signal.score, confidence: signal.confidence,
+      setup_type: signal.setupType, entry: signal.entry, stop: signal.stop, target1: signal.target1, target2: signal.target2, risk_reward: signal.riskReward,
+      market_regime: regime, signal_components: { confirmations: signal.confirmations, failures: signal.failures, ...extraComponents },
+    }).select('id').single();
+    signalId = inserted?.id ?? null;
+  } catch { /* migration not run yet — signal still returned live, just not journaled */ }
+
+  if (!executionOn) return { openPositions, dailyStats };
+
+  const opened = await tryOpenPaperPosition(supabase, settings, { symbol, sector, direction, signal, signalId, regime, today, openPositions, dailyStats });
+  if (!opened) return { openPositions, dailyStats };
+  return {
+    openPositions: [...openPositions, { symbol, sector }],
+    dailyStats: {
+      gross_pnl: dailyStats?.gross_pnl ?? 0, wins: dailyStats?.wins ?? 0, losses: dailyStats?.losses ?? 0,
+      consecutive_losses: dailyStats?.consecutive_losses ?? 0, locked: dailyStats?.locked ?? false,
+      lock_reason: dailyStats?.lock_reason ?? null, trades_taken: (dailyStats?.trades_taken ?? 0) + 1,
+    },
+  };
+}
+
 async function handleScan(supabase, req, res) {
   const apiKey = process.env.KITE_API_KEY;
   const { data: session } = await supabase.from('kite_session').select('access_token').eq('id', 1).maybeSingle();
@@ -761,33 +928,43 @@ async function handleScan(supabase, req, res) {
 
       const direction = cand.direction;
       const signal = evaluateIntradaySignal({ bars, direction, regimeInfo, rankFactors: cand.rankFactors, rvol: cand.rvol, settings });
-      withSignals.push({ ...cand, signal });
+
+      // Liquidity Grab — a genuinely independent strategy on its own
+      // (faster) timeframe, evaluated for every shortlisted candidate
+      // regardless of the ensemble's own direction/status, since a
+      // sweep-and-reject can fire in either direction. A failed fetch
+      // here never affects the ensemble signal above.
+      let liquidityGrab = null;
+      if (settings.liquidity_grab_enabled ?? true) {
+        try {
+          const lgBars = await kiteHistorical(cand.instrumentToken, settings.liquidity_grab_interval ?? '3minute', from, to, ctx);
+          await sleep(120);
+          liquidityGrab = evaluateLiquidityGrabSignal({
+            bars: lgBars, returnPct: cand.returnPct, regimeInfo, sectorStrength: cand.rankFactors.sectorStrength, rvol: cand.rvol, settings,
+          });
+        } catch { /* resilient — no LG signal this tick, ensemble signal is unaffected */ }
+      }
+
+      withSignals.push({ ...cand, signal, liquidityGrab });
 
       if (signal.status === 'SIGNAL_CONFIRMED') {
-        let signalId = null;
-        try {
-          const { data: inserted } = await supabase.from('intraday_signals').insert({
-            symbol: cand.symbol, sector: cand.sector, direction, status: signal.status, score: signal.score, confidence: signal.confidence,
-            setup_type: signal.setupType, entry: signal.entry, stop: signal.stop, target1: signal.target1, target2: signal.target2, risk_reward: signal.riskReward,
-            market_regime: regimeInfo.regime, signal_components: { rankFactors: cand.rankFactors, momentumScore: signal.momentumScore, confirmations: signal.confirmations, failures: signal.failures },
-          }).select('id').single();
-          signalId = inserted?.id ?? null;
-        } catch { /* migration not run yet — signal still returned live, just not journaled */ }
+        const result = await persistAndMaybeExecuteSignal(supabase, settings, executionOn, {
+          symbol: cand.symbol, sector: cand.sector, direction, signal, regime: regimeInfo.regime, today,
+          extraComponents: { rankFactors: cand.rankFactors, momentumScore: signal.momentumScore },
+          openPositions, dailyStats,
+        });
+        openPositions = result.openPositions;
+        dailyStats = result.dailyStats;
+      }
 
-        if (executionOn) {
-          const opened = await tryOpenPaperPosition(supabase, settings, {
-            symbol: cand.symbol, sector: cand.sector, direction, signal, signalId, regime: regimeInfo.regime, today,
-            openPositions, dailyStats,
-          });
-          if (opened) {
-            openPositions = [...openPositions, { symbol: cand.symbol, sector: cand.sector }];
-            dailyStats = {
-              gross_pnl: dailyStats?.gross_pnl ?? 0, wins: dailyStats?.wins ?? 0, losses: dailyStats?.losses ?? 0,
-              consecutive_losses: dailyStats?.consecutive_losses ?? 0, locked: dailyStats?.locked ?? false,
-              lock_reason: dailyStats?.lock_reason ?? null, trades_taken: (dailyStats?.trades_taken ?? 0) + 1,
-            };
-          }
-        }
+      if (liquidityGrab?.status === 'SIGNAL_CONFIRMED') {
+        const result = await persistAndMaybeExecuteSignal(supabase, settings, executionOn, {
+          symbol: cand.symbol, sector: cand.sector, direction: liquidityGrab.direction, signal: liquidityGrab, regime: regimeInfo.regime, today,
+          extraComponents: { sweptLevel: liquidityGrab.sweptLevel, setupQuality: liquidityGrab.setupQuality },
+          openPositions, dailyStats,
+        });
+        openPositions = result.openPositions;
+        dailyStats = result.dailyStats;
       }
     }
 
@@ -799,6 +976,7 @@ async function handleScan(supabase, req, res) {
         price: c.lastPrice, returnPct: c.returnPct, aboveVwap: c.aboveVwap, rvol: c.rvol,
         rankScore: c.rankScore, rankFactors: c.rankFactors,
         signal: withSig?.signal ?? null,
+        liquidityGrab: withSig?.liquidityGrab ?? null,
       };
     });
 

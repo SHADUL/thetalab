@@ -8,6 +8,7 @@ import { momentumAccelerationScore } from '../momentum.ts';
 import { estimateRVOL, classifyRVOL, sessionFractionElapsed } from '../rvol.ts';
 import { ema, atr, istMinutesOfDay } from '../indicators.ts';
 import { computeOpeningRange, detectORB, detectVwapPullback, detectEmaTrendContinuation, detectBreakout, detectBreakoutRetest } from '../setups.ts';
+import { detectLiquidityGrab, liquidityGrabStop } from '../liquidityGrab.ts';
 import { computeExtension } from '../extension.ts';
 import { computeIntradaySectorStrength, sectorScoreFor } from '../sector.ts';
 import { classifyGap, detectPrevDayLevelEvents } from '../levels.ts';
@@ -324,6 +325,69 @@ test('detectBreakoutRetest: a straight-line breakout with no pullback does not f
   ];
   const signal = detectBreakoutRetest([filler, ...base, ...runAway], 'LONG');
   assert.equal(signal.fired, false);
+});
+
+/* ---------------- liquidityGrab.ts ---------------- */
+
+function levelBars(n: number, mid = 100, high = 101.5, low = 98.5, vol = 50_000): IntradayBar[] {
+  return Array.from({ length: n }, (_, i) => bar(9, 30 + i, mid, { h: high, l: low, o: mid, v: vol }));
+}
+
+test('detectLiquidityGrab: sweep above a recent swing high then reject fires SHORT', () => {
+  const level = levelBars(20); // swingHigh=101.5, swingLow=98.5
+  const sweepBar = bar(10, 30, 100.5, { o: 100, h: 103, l: 100, v: 200_000 }); // breaks 101.5 by ~1.5%
+  const confirmBar = bar(10, 31, 99, { o: 100.5, h: 100.6, l: 98.8, v: 90_000 }); // closes red, back below 101.5
+  const result = detectLiquidityGrab([...level, sweepBar, confirmBar]);
+  assert.equal(result.fired, true);
+  assert.equal(result.direction, 'SHORT');
+  assert.equal(result.sweptLevel, 101.5);
+  assert.equal(result.wickExtreme, 103);
+  assert.ok(result.quality > 0);
+});
+
+test('detectLiquidityGrab: sweep below a recent swing low then reject fires LONG', () => {
+  const level = levelBars(20);
+  const sweepBar = bar(10, 30, 99.5, { o: 100, h: 100, l: 97, v: 200_000 }); // breaks 98.5 by ~1.5%
+  const confirmBar = bar(10, 31, 100, { o: 99.5, h: 100.2, l: 99.3, v: 90_000 }); // closes green, back above 98.5
+  const result = detectLiquidityGrab([...level, sweepBar, confirmBar]);
+  assert.equal(result.fired, true);
+  assert.equal(result.direction, 'LONG');
+  assert.equal(result.sweptLevel, 98.5);
+  assert.equal(result.wickExtreme, 97);
+});
+
+test('detectLiquidityGrab: a sweep that continues (no rejection) does not fire', () => {
+  const level = levelBars(20);
+  const sweepBar = bar(10, 30, 102, { o: 101, h: 103, l: 101, v: 150_000 });
+  const confirmBar = bar(10, 31, 103.5, { o: 102, h: 104, l: 102, v: 120_000 }); // closes green, ABOVE swingHigh — continuation, not rejection
+  const result = detectLiquidityGrab([...level, sweepBar, confirmBar]);
+  assert.equal(result.fired, false);
+});
+
+test('detectLiquidityGrab: price staying inside the range does not fire', () => {
+  const level = levelBars(20);
+  const bars = [...level, bar(10, 30, 100, { o: 99.8, h: 101, l: 99, v: 60_000 }), bar(10, 31, 100.2, { o: 100, h: 101.2, l: 99.5, v: 55_000 })];
+  const result = detectLiquidityGrab(bars);
+  assert.equal(result.fired, false);
+});
+
+test('detectLiquidityGrab: not enough bars returns fired:false with a clear reason', () => {
+  const result = detectLiquidityGrab(levelBars(5));
+  assert.equal(result.fired, false);
+  assert.match(result.detail, /Not enough bars/);
+});
+
+test('detectLiquidityGrab: higher sweep-bar volume scores a higher quality', () => {
+  const level = levelBars(20);
+  const confirmBar = bar(10, 31, 99, { o: 100.5, h: 100.6, l: 98.8, v: 90_000 });
+  const lowVol = detectLiquidityGrab([...level, bar(10, 30, 100.5, { o: 100, h: 103, l: 100, v: 50_000 }), confirmBar]);
+  const highVol = detectLiquidityGrab([...level, bar(10, 30, 100.5, { o: 100, h: 103, l: 100, v: 300_000 }), confirmBar]);
+  assert.ok(highVol.quality > lowVol.quality);
+});
+
+test('liquidityGrabStop: SHORT stop sits just above the wick, LONG stop just below', () => {
+  assert.ok(liquidityGrabStop('SHORT', 103) > 103);
+  assert.ok(liquidityGrabStop('LONG', 98) < 98);
 });
 
 /* ---------------- extension.ts ---------------- */

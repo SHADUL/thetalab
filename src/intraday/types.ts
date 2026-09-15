@@ -18,7 +18,7 @@ export type VwapRelationship = 'ABOVE_RISING' | 'ABOVE_FALLING' | 'BELOW_RISING'
 
 export type RvolClass = 'WEAK' | 'NORMAL' | 'POSITIVE' | 'STRONG' | 'EXCEPTIONAL' | 'UNKNOWN';
 
-export type SetupType = 'ORB' | 'VWAP_PULLBACK' | 'EMA_TREND_CONTINUATION' | 'BREAKOUT' | 'BREAKOUT_RETEST';
+export type SetupType = 'ORB' | 'VWAP_PULLBACK' | 'EMA_TREND_CONTINUATION' | 'BREAKOUT' | 'BREAKOUT_RETEST' | 'LIQUIDITY_GRAB';
 
 export type Direction = 'LONG' | 'SHORT';
 

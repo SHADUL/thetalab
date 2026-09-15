@@ -24,6 +24,10 @@ create table intraday_settings (
   min_rvol numeric not null default 1.0,
   max_extension_atr numeric not null default 2.5,
   square_off_time text not null default '15:15',
+  liquidity_grab_enabled boolean not null default true,
+  liquidity_grab_interval text not null default '3minute', -- '1minute' | '3minute'
+  liquidity_grab_lookback integer not null default 20,
+  liquidity_grab_min_rr numeric not null default 2.0,
   updated_at timestamptz not null default now(),
   constraint intraday_settings_singleton check (id = 1)
 );

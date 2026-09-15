@@ -26,6 +26,11 @@
  *
  * `?resource=positions` — GET open + recently-closed intraday_positions.
  *
+ * `?resource=kill-switch` — POST: disable the engine and immediately
+ * square off every OPEN position at market, regardless of stop/target
+ * (see handleKillSwitch). A manual override distinct from the Exit
+ * Engine's automatic EOD square-off.
+ *
  * Execution Engine (paper mode) — when intraday_settings.enabled is true
  * and execution_mode is 'PAPER', a SIGNAL_CONFIRMED candidate is checked
  * against the Risk Engine's daily limits and open-position caps
@@ -375,6 +380,52 @@ function parseSquareOffMinutes(str) {
 }
 
 /**
+ * Closes one position and folds its P&L into the day's running stats
+ * (wins/losses/gross_pnl/consecutive_losses), re-checking the daily lock
+ * afterward — the single accounting path shared by the Exit Engine's
+ * automatic exits and the manual kill-switch square-off, so the two can
+ * never drift out of sync on how a closed trade affects the day's risk
+ * state. riskPerShare is derived from target1 (always exactly 1R from
+ * entry by construction) rather than a stored field, since the stop may
+ * have since been trailed to breakeven.
+ */
+async function closePositionAndRecordStats(supabase, settings, position, exitPrice, exitReason, dailyStats, today) {
+  const riskPerShare = position.target1 != null ? Math.abs(position.target1 - position.entry_price) : null;
+  const signedMove = position.direction === 'LONG' ? exitPrice - position.entry_price : position.entry_price - exitPrice;
+  const pnl = signedMove * position.shares;
+  const rMultiple = riskPerShare ? signedMove / riskPerShare : null;
+
+  try {
+    const { error } = await supabase.from('intraday_positions').update({
+      status: 'CLOSED', exit_time: new Date().toISOString(), exit_price: exitPrice,
+      exit_reason: exitReason, r_multiple: rMultiple, pnl,
+    }).eq('id', position.id);
+    if (error) return { closed: false, dailyStats };
+
+    const isWin = pnl > 0;
+    const stats = {
+      trades_taken: dailyStats?.trades_taken ?? 0,
+      wins: (dailyStats?.wins ?? 0) + (isWin ? 1 : 0),
+      losses: (dailyStats?.losses ?? 0) + (isWin ? 0 : 1),
+      gross_pnl: (dailyStats?.gross_pnl ?? 0) + pnl,
+      consecutive_losses: isWin ? 0 : (dailyStats?.consecutive_losses ?? 0) + 1,
+      locked: false, lock_reason: null,
+    };
+    const limitCheck = checkDailyRiskLimits({
+      dailyPnl: stats.gross_pnl, capital: settings.capital, maxDailyLossPct: settings.max_daily_loss_pct,
+      tradesToday: stats.trades_taken, maxTrades: settings.max_trades_per_day,
+      consecutiveLosses: stats.consecutive_losses, maxConsecutiveLosses: settings.max_consecutive_losses,
+    });
+    stats.locked = limitCheck.locked;
+    stats.lock_reason = limitCheck.reason;
+    await supabase.from('intraday_daily_stats').upsert({ date: today, ...stats });
+    return { closed: true, dailyStats: stats, pnl };
+  } catch {
+    return { closed: false, dailyStats };
+  }
+}
+
+/**
  * Runs every scan tick against every OPEN paper position, independent of
  * whether new-entry execution is currently enabled — a position that was
  * already opened must still be managed (EOD square-off above all) even
@@ -416,34 +467,9 @@ async function managePositions(supabase, settings, openPositions, dailyStats, qu
     }
 
     if (exitReason) {
-      const signedMove = p.direction === 'LONG' ? exitPrice - p.entry_price : p.entry_price - exitPrice;
-      const pnl = signedMove * p.shares;
-      const rMultiple = riskPerShare ? signedMove / riskPerShare : null;
-      try {
-        const { error } = await supabase.from('intraday_positions').update({
-          status: 'CLOSED', exit_time: new Date().toISOString(), exit_price: exitPrice,
-          exit_reason: exitReason, r_multiple: rMultiple, pnl,
-        }).eq('id', p.id);
-        if (error) { stillOpen.push(p); continue; }
-
-        const isWin = pnl > 0;
-        stats = {
-          trades_taken: stats?.trades_taken ?? 0,
-          wins: (stats?.wins ?? 0) + (isWin ? 1 : 0),
-          losses: (stats?.losses ?? 0) + (isWin ? 0 : 1),
-          gross_pnl: (stats?.gross_pnl ?? 0) + pnl,
-          consecutive_losses: isWin ? 0 : (stats?.consecutive_losses ?? 0) + 1,
-          locked: false, lock_reason: null,
-        };
-        const limitCheck = checkDailyRiskLimits({
-          dailyPnl: stats.gross_pnl, capital: settings.capital, maxDailyLossPct: settings.max_daily_loss_pct,
-          tradesToday: stats.trades_taken, maxTrades: settings.max_trades_per_day,
-          consecutiveLosses: stats.consecutive_losses, maxConsecutiveLosses: settings.max_consecutive_losses,
-        });
-        stats.locked = limitCheck.locked;
-        stats.lock_reason = limitCheck.reason;
-        await supabase.from('intraday_daily_stats').upsert({ date: today, ...stats });
-      } catch { stillOpen.push(p); }
+      const result = await closePositionAndRecordStats(supabase, settings, p, exitPrice, exitReason, stats, today);
+      if (!result.closed) { stillOpen.push(p); continue; }
+      stats = result.dailyStats;
       continue;
     }
 
@@ -728,6 +754,75 @@ async function handlePositions(supabase, req, res) {
   }
 }
 
+/**
+ * Kill switch + emergency square-off (`?resource=kill-switch`, POST) — a
+ * manual override distinct from the Exit Engine's automatic EOD square-
+ * off. Always disables intraday_settings.enabled first (so no new paper
+ * position can open even if everything after this fails), then fetches
+ * a single fresh quote batch and closes every OPEN position immediately
+ * at the current price with exit_reason 'MANUAL', regardless of where
+ * price sits relative to stop/target. Reuses the same
+ * closePositionAndRecordStats accounting path as the Exit Engine so a
+ * kill-switch close affects the day's risk stats identically to a
+ * normal one.
+ */
+async function handleKillSwitch(supabase, req, res) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+
+  const { error: disableError } = await supabase.from('intraday_settings').update({ enabled: false, updated_at: new Date().toISOString() }).eq('id', 1);
+  const disabled = !disableError;
+
+  const { data: openPositions, error: posError } = await supabase.from('intraday_positions').select('*').eq('status', 'OPEN');
+  if (posError) {
+    res.status(200).json({ ok: true, disabled, closed: [], stillOpen: [], message: 'Engine disabled. Could not read open positions — run the intraday schema migration.' });
+    return;
+  }
+  const positions = openPositions ?? [];
+  if (positions.length === 0) { res.status(200).json({ ok: true, disabled, closed: [], stillOpen: [] }); return; }
+
+  const apiKey = process.env.KITE_API_KEY;
+  const { data: session } = await supabase.from('kite_session').select('access_token').eq('id', 1).maybeSingle();
+  const token = session?.access_token;
+  if (!apiKey || !token) {
+    res.status(200).json({
+      ok: true, disabled, closed: [], stillOpen: positions.map((p) => p.symbol),
+      message: 'Engine disabled, but no Kite session — could not fetch prices to square off open positions. Reconnect Kite and retry, or close them manually.',
+    });
+    return;
+  }
+
+  let settings = DEFAULT_SETTINGS;
+  try {
+    const { data } = await supabase.from('intraday_settings').select('*').eq('id', 1).maybeSingle();
+    if (data) settings = data;
+  } catch { /* use defaults */ }
+
+  const today = new Date().toISOString().slice(0, 10);
+  let dailyStats = null;
+  try {
+    const { data } = await supabase.from('intraday_daily_stats').select('*').eq('date', today).maybeSingle();
+    dailyStats = data ?? null;
+  } catch { /* stats just won't reflect these closes */ }
+
+  let quoteBySymbol = {};
+  try {
+    quoteBySymbol = await kiteQuote(positions.map((p) => `NSE:${p.symbol}`), { token, apiKey });
+  } catch { /* every position falls through to stillOpen below */ }
+
+  const closed = [];
+  const stillOpen = [];
+  for (const p of positions) {
+    const q = quoteBySymbol[`NSE:${p.symbol}`];
+    if (!q) { stillOpen.push(p.symbol); continue; }
+    const result = await closePositionAndRecordStats(supabase, settings, p, q.last_price, 'MANUAL', dailyStats, today);
+    if (!result.closed) { stillOpen.push(p.symbol); continue; }
+    dailyStats = result.dailyStats;
+    closed.push({ symbol: p.symbol, exitPrice: q.last_price, pnl: result.pnl });
+  }
+
+  res.status(200).json({ ok: true, disabled, closed, stillOpen });
+}
+
 async function handleSettings(supabase, req, res) {
   if (req.method === 'GET') {
     const { data, error } = await supabase.from('intraday_settings').select('*').eq('id', 1).maybeSingle();
@@ -755,5 +850,6 @@ export default async function handler(req, res) {
   if (resource === 'scan') { await handleScan(supabase, req, res); return; }
   if (resource === 'settings') { await handleSettings(supabase, req, res); return; }
   if (resource === 'positions') { await handlePositions(supabase, req, res); return; }
+  if (resource === 'kill-switch') { await handleKillSwitch(supabase, req, res); return; }
   res.status(400).json({ error: 'bad_request', message: `Unknown resource "${resource}".` });
 }

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Lightning, Info, Wallet, Gear, CaretDown, CaretUp } from "@phosphor-icons/react";
+import { Lightning, Info, Wallet, Gear, CaretDown, CaretUp, HandPalm } from "@phosphor-icons/react";
 import { inr, pctSigned, toneClass } from "./swingFormat.js";
 import { ScoreBadge } from "./ScoreWidgets.jsx";
 import { kiteLoginUrl, assumedKiteConnected, consumeKiteRedirectResult } from "../lib/kiteClient.js";
@@ -85,6 +85,8 @@ export default function IntradayTrader() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [kiteConnected, setKiteConnected] = useState(() => assumedKiteConnected());
+  const [killSwitchBusy, setKillSwitchBusy] = useState(false);
+  const [killSwitchResult, setKillSwitchResult] = useState(null);
   const timerRef = useRef(null);
 
   useEffect(() => {
@@ -146,6 +148,34 @@ export default function IntradayTrader() {
       .finally(() => setSavingSettings(false));
   };
 
+  const triggerKillSwitch = () => {
+    const openCount = positions.open.length;
+    const confirmed = window.confirm(
+      openCount > 0
+        ? `This disables Paper Execution and immediately closes all ${openCount} open position(s) at the current market price, regardless of stop/target. Continue?`
+        : "This disables Paper Execution. There are no open positions to close right now. Continue?",
+    );
+    if (!confirmed) return;
+    setKillSwitchBusy(true);
+    setKillSwitchResult(null);
+    fetch("/api/intraday?resource=kill-switch", { method: "POST" })
+      .then((r) => r.json())
+      .then((result) => {
+        setKillSwitchResult(result);
+        setSettingsDraft((d) => ({ ...d, enabled: false }));
+        return Promise.all([
+          fetch("/api/intraday?resource=settings").then((r) => r.json()),
+          fetch("/api/intraday?resource=positions").then((r) => r.json()),
+        ]);
+      })
+      .then(([s, posBody]) => {
+        if (s && !s.error) setSettings(s);
+        setPositions({ open: posBody.open ?? [], closed: posBody.closed ?? [] });
+      })
+      .catch((e) => setKillSwitchResult({ ok: false, message: e.message }))
+      .finally(() => setKillSwitchBusy(false));
+  };
+
   const regime = data?.regime;
   const candidates = data?.candidates ?? [];
   const priceBySymbol = new Map(candidates.map((c) => [c.symbol, c.price]));
@@ -158,15 +188,46 @@ export default function IntradayTrader() {
           <h1 className="text-[16px] font-bold">Intraday Trader</h1>
           {data?.asOf && <span className="text-[11px] text-muted">as of {new Date(data.asOf).toLocaleTimeString("en-IN")}</span>}
         </div>
-        {!kiteConnected && (
-          <a href={kiteLoginUrl()} className="topstep">Connect Kite</a>
-        )}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={triggerKillSwitch} disabled={killSwitchBusy}
+            className="flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1.5 rounded-[8px]"
+            style={{ background: "var(--c-loss-soft, #dc262622)", color: "var(--c-loss)", border: "1px solid var(--c-loss)" }}
+            title="Disable Paper Execution and immediately close every open position at market price"
+          >
+            <HandPalm size={13} weight="bold" />
+            {killSwitchBusy ? "Squaring off…" : "Kill Switch"}
+          </button>
+          {!kiteConnected && (
+            <a href={kiteLoginUrl()} className="topstep">Connect Kite</a>
+          )}
+        </div>
       </div>
       <p className="text-[11px] text-muted mb-3 max-w-[75ch]">
         Live market regime + a liquid-universe ranking, refreshed every 20s while this tab is open. The top-ranked candidates
         also get real setup detection (ORB / VWAP Pullback / Trend Continuation / Breakout / Breakout Retest) against today's
         5-min candles — a "Confirmed" signal has passed the full 12-point entry checklist.
       </p>
+
+      {killSwitchResult && (
+        <div className="flex items-start gap-2.5 px-4 py-3 rounded-[12px] mb-4" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+          <HandPalm size={15} weight="bold" className="shrink-0 mt-px text-loss" />
+          <div className="text-[12px] flex-1">
+            {killSwitchResult.ok === false ? (
+              <span>Kill switch failed: {killSwitchResult.message}</span>
+            ) : (
+              <span>
+                Paper Execution disabled.{" "}
+                {killSwitchResult.closed?.length > 0 && `Closed ${killSwitchResult.closed.length} position(s) at market: ${killSwitchResult.closed.map((c) => `${c.symbol} (${c.pnl >= 0 ? "+" : ""}${inr(c.pnl)})`).join(", ")}. `}
+                {killSwitchResult.stillOpen?.length > 0 && `Could not close: ${killSwitchResult.stillOpen.join(", ")} — check Kite connection and retry.`}
+                {(!killSwitchResult.closed || killSwitchResult.closed.length === 0) && (!killSwitchResult.stillOpen || killSwitchResult.stillOpen.length === 0) && "No open positions."}
+                {killSwitchResult.message && ` ${killSwitchResult.message}`}
+              </span>
+            )}
+          </div>
+          <button onClick={() => setKillSwitchResult(null)} className="text-[11px] text-muted shrink-0">Dismiss</button>
+        </div>
+      )}
 
       <div className="rounded-[12px] mb-4" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
         <button

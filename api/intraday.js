@@ -31,6 +31,14 @@
  * (see handleKillSwitch). A manual override distinct from the Exit
  * Engine's automatic EOD square-off.
  *
+ * `?resource=signals` — GET the most recent confirmed signals, for the
+ * dashboard's alert-state timeline.
+ *
+ * `?resource=chart&symbol=XXX` — GET one symbol's today-so-far 5-min
+ * bars + VWAP/EMA9/EMA20 series + opening range, on demand for the
+ * dashboard's per-stock chart view (not part of the regular scan
+ * payload).
+ *
  * Execution Engine (paper mode) — when intraday_settings.enabled is true
  * and execution_mode is 'PAPER', a SIGNAL_CONFIRMED candidate is checked
  * against the Risk Engine's daily limits and open-position caps
@@ -397,7 +405,7 @@ export function evaluateIntradaySignal({ bars, direction, regimeInfo, rankFactor
 
   return {
     status, score: finalScore, confidence, setupType: bestSetup?.type ?? null,
-    entry, stop, target1, target2, riskReward, confirmations, failures,
+    entry, stop, target1, target2, riskReward, confirmations, failures, momentumScore,
   };
 }
 
@@ -732,7 +740,7 @@ async function handleScan(supabase, req, res) {
           const { data: inserted } = await supabase.from('intraday_signals').insert({
             symbol: cand.symbol, sector: cand.sector, direction, status: signal.status, score: signal.score, confidence: signal.confidence,
             setup_type: signal.setupType, entry: signal.entry, stop: signal.stop, target1: signal.target1, target2: signal.target2, risk_reward: signal.riskReward,
-            market_regime: regimeInfo.regime, signal_components: { rankFactors: cand.rankFactors, confirmations: signal.confirmations, failures: signal.failures },
+            market_regime: regimeInfo.regime, signal_components: { rankFactors: cand.rankFactors, momentumScore: signal.momentumScore, confirmations: signal.confirmations, failures: signal.failures },
           }).select('id').single();
           signalId = inserted?.id ?? null;
         } catch { /* migration not run yet — signal still returned live, just not journaled */ }
@@ -768,6 +776,56 @@ async function handleScan(supabase, req, res) {
     res.status(200).json({ asOf: new Date().toISOString(), regime: regimeInfo, universeSize: capped.length, candidates: finalList });
   } catch (err) {
     res.status(502).json({ error: 'kite_error', message: err.message });
+  }
+}
+
+/**
+ * `?resource=chart&symbol=XXX` — GET today's 5-min bars + VWAP/EMA9/EMA20
+ * series + opening range for one symbol, on demand (not part of the
+ * regular scan payload, which stays lean) — the dashboard's per-stock
+ * chart view fetches this only when a candidate row is expanded.
+ */
+async function handleChart(supabase, req, res) {
+  const symbol = String(req.query.symbol || '').toUpperCase();
+  if (!symbol) { res.status(400).json({ error: 'bad_request', message: 'symbol is required.' }); return; }
+
+  const apiKey = process.env.KITE_API_KEY;
+  const { data: session } = await supabase.from('kite_session').select('access_token').eq('id', 1).maybeSingle();
+  const token = session?.access_token;
+  if (!apiKey || !token) { res.status(200).json({ error: 'no_kite_session', message: 'Connect Kite first.' }); return; }
+
+  const { data: stockRow } = await supabase.from('stocks').select('instrument_token').eq('symbol', symbol).maybeSingle();
+  if (!stockRow?.instrument_token) { res.status(200).json({ error: 'not_found', message: `No instrument token for ${symbol}.` }); return; }
+
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const from = `${today} 09:15:00`;
+    const nowIst = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const to = `${today} ${String(nowIst.getHours()).padStart(2, '0')}:${String(nowIst.getMinutes()).padStart(2, '0')}:00`;
+    const bars = await kiteHistorical(stockRow.instrument_token, '5minute', from, to, { token, apiKey });
+    if (bars.length === 0) { res.status(200).json({ error: 'no_data', message: 'No bars for today yet.' }); return; }
+
+    const closes = bars.map((b) => b.c);
+    const ema9 = ema(closes, 9);
+    const ema20 = ema(closes, 20);
+    const vwap = computeSessionVWAP(bars);
+    const or = computeOpeningRange(bars);
+    res.status(200).json({ symbol, bars, ema9, ema20, vwap, openingRange: or });
+  } catch (err) {
+    res.status(502).json({ error: 'kite_error', message: err.message });
+  }
+}
+
+/** `?resource=signals` — GET the most recent SIGNAL_CONFIRMED rows, for
+ *  the dashboard's alert-state timeline (merged client-side with
+ *  position open/close events from `?resource=positions`). */
+async function handleSignals(supabase, req, res) {
+  try {
+    const { data, error } = await supabase.from('intraday_signals').select('*').order('created_at', { ascending: false }).limit(30);
+    if (error) { res.status(200).json({ signals: [], error: 'not_available', message: 'Run the intraday schema migration to enable the signal log.' }); return; }
+    res.status(200).json({ signals: data ?? [] });
+  } catch {
+    res.status(200).json({ signals: [], error: 'not_available', message: 'Run the intraday schema migration to enable the signal log.' });
   }
 }
 
@@ -883,6 +941,8 @@ export default async function handler(req, res) {
   if (resource === 'scan') { await handleScan(supabase, req, res); return; }
   if (resource === 'settings') { await handleSettings(supabase, req, res); return; }
   if (resource === 'positions') { await handlePositions(supabase, req, res); return; }
+  if (resource === 'signals') { await handleSignals(supabase, req, res); return; }
+  if (resource === 'chart') { await handleChart(supabase, req, res); return; }
   if (resource === 'kill-switch') { await handleKillSwitch(supabase, req, res); return; }
   res.status(400).json({ error: 'bad_request', message: `Unknown resource "${resource}".` });
 }

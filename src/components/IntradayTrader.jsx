@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Lightning, Info, Wallet, Gear, CaretDown, CaretUp, HandPalm } from "@phosphor-icons/react";
+import { Lightning, Info, Wallet, Gear, CaretDown, CaretUp, HandPalm, ChartLine, Bell, SignIn, SignOut } from "@phosphor-icons/react";
 import { inr, pctSigned, toneClass } from "./swingFormat.js";
 import { ScoreBadge } from "./ScoreWidgets.jsx";
 import { kiteLoginUrl, assumedKiteConnected, consumeKiteRedirectResult } from "../lib/kiteClient.js";
+import IntradaySignalChart from "./IntradaySignalChart.jsx";
 
 const POLL_MS = 20_000; // browser-driven "continuous" scan — see api/intraday.js's header comment on why
 
@@ -63,6 +64,26 @@ const SETTINGS_GROUPS = [
   },
 ];
 
+const BREAKOUT_SETUP_TYPES = new Set(["BREAKOUT", "BREAKOUT_RETEST"]);
+
+/**
+ * Five "best of" cards from the candidates that got real setup detection
+ * (signal != null — only the top-ranked shortlist, not the full ranking
+ * table). Each returns the winning candidate or null if none qualify.
+ */
+function computeTopCards(candidates) {
+  const withSignal = candidates.filter((c) => c.signal);
+  const best = (list, keyFn) => list.reduce((acc, c) => (keyFn(c) != null && (acc == null || keyFn(c) > keyFn(acc)) ? c : acc), null);
+
+  return {
+    bestLong: best(withSignal.filter((c) => c.direction === "LONG"), (c) => c.signal.score),
+    bestShort: best(withSignal.filter((c) => c.direction === "SHORT"), (c) => c.signal.score),
+    fastestMomentum: best(withSignal, (c) => c.signal.momentumScore),
+    bestRR: best(withSignal.filter((c) => c.signal.riskReward != null), (c) => c.signal.riskReward),
+    earlyBreakout: best(withSignal.filter((c) => BREAKOUT_SETUP_TYPES.has(c.signal.setupType)), (c) => c.signal.score),
+  };
+}
+
 /**
  * Intraday Trader — Market Regime + Stock Ranking + Setup/Signal Engine +
  * Execution Engine (paper mode). Ranking runs on the full liquid universe
@@ -87,6 +108,8 @@ export default function IntradayTrader() {
   const [kiteConnected, setKiteConnected] = useState(() => assumedKiteConnected());
   const [killSwitchBusy, setKillSwitchBusy] = useState(false);
   const [killSwitchResult, setKillSwitchResult] = useState(null);
+  const [signals, setSignals] = useState([]);
+  const [chartSymbol, setChartSymbol] = useState(null);
   const timerRef = useRef(null);
 
   useEffect(() => {
@@ -109,12 +132,14 @@ export default function IntradayTrader() {
     Promise.all([
       fetch("/api/intraday?resource=scan").then((r) => r.json()),
       fetch("/api/intraday?resource=positions").then((r) => r.json()),
+      fetch("/api/intraday?resource=signals").then((r) => r.json()),
     ])
-      .then(([scanBody, posBody]) => {
+      .then(([scanBody, posBody, sigBody]) => {
         if (scanBody.error) { setError(scanBody.message || scanBody.error); setData(null); return; }
         setError(null);
         setData(scanBody);
         setPositions({ open: posBody.open ?? [], closed: posBody.closed ?? [] });
+        setSignals(sigBody.signals ?? []);
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
@@ -179,6 +204,14 @@ export default function IntradayTrader() {
   const regime = data?.regime;
   const candidates = data?.candidates ?? [];
   const priceBySymbol = new Map(candidates.map((c) => [c.symbol, c.price]));
+  const topCards = computeTopCards(candidates);
+  const chartCandidate = chartSymbol ? candidates.find((c) => c.symbol === chartSymbol) : null;
+
+  const timeline = [
+    ...signals.map((s) => ({ time: s.created_at, type: "SIGNAL_CONFIRMED", symbol: s.symbol, detail: `${SETUP_LABEL[s.setup_type] ?? s.setup_type ?? "Signal"} · score ${s.score} · ${s.confidence?.replace("_", "+") ?? ""}` })),
+    ...positions.open.map((p) => ({ time: p.entry_time, type: "POSITION_OPENED", symbol: p.symbol, detail: `${p.direction} ${p.shares} @ ${inr(p.entry_price)}` })),
+    ...positions.closed.map((p) => ({ time: p.exit_time, type: "POSITION_CLOSED", symbol: p.symbol, detail: `${p.exit_reason ?? ""} · ${p.pnl != null ? (p.pnl >= 0 ? "+" : "") + inr(p.pnl) : "—"}` })),
+  ].filter((e) => e.time).sort((a, b) => new Date(b.time) - new Date(a.time)).slice(0, 20);
 
   return (
     <div className="p-4 max-w-[1400px] mx-auto">
@@ -331,6 +364,34 @@ export default function IntradayTrader() {
             </div>
           )}
 
+          {(topCards.bestLong || topCards.bestShort || topCards.fastestMomentum || topCards.bestRR || topCards.earlyBreakout) && (
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5 mb-4">
+              {[
+                { label: "Best Long", cand: topCards.bestLong, metric: (c) => `Score ${c.signal.score}` },
+                { label: "Best Short", cand: topCards.bestShort, metric: (c) => `Score ${c.signal.score}` },
+                { label: "Fastest Momentum", cand: topCards.fastestMomentum, metric: (c) => `Momentum ${c.signal.momentumScore}` },
+                { label: "Best R:R", cand: topCards.bestRR, metric: (c) => `R:R ${c.signal.riskReward.toFixed(1)}` },
+                { label: "Early Breakout", cand: topCards.earlyBreakout, metric: (c) => SETUP_LABEL[c.signal.setupType] ?? c.signal.setupType },
+              ].map(({ label, cand, metric }) => (
+                <button
+                  key={label} disabled={!cand} onClick={() => cand && setChartSymbol(cand.symbol)}
+                  className="p-2.5 rounded-[12px] text-left disabled:opacity-40"
+                  style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}
+                >
+                  <div className="text-[10px] text-muted mb-1">{label}</div>
+                  {cand ? (
+                    <>
+                      <div className="text-[13px] font-bold">{cand.symbol}</div>
+                      <div className={`text-[10.5px] ${cand.direction === "LONG" ? "text-gain" : "text-loss"}`}>{cand.direction} · {metric(cand)}</div>
+                    </>
+                  ) : (
+                    <div className="text-[11px] text-faint">—</div>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+
           <h2 className="text-[13px] font-bold mb-2">Top Intraday Candidates {data?.universeSize ? <span className="font-normal text-muted">({data.universeSize} liquid stocks scanned)</span> : null}</h2>
           {candidates.length === 0 ? (
             <p className="text-[12.5px] text-muted py-10 text-center">No candidates yet.</p>
@@ -355,10 +416,14 @@ export default function IntradayTrader() {
                   {candidates.map((c, i) => {
                     const s = c.signal;
                     return (
-                    <tr key={c.symbol} style={{ borderTop: "1px solid var(--c-line)", background: s?.status === "SIGNAL_CONFIRMED" ? "var(--c-gain-soft, transparent)" : undefined }}>
+                    <tr
+                      key={c.symbol} onClick={() => setChartSymbol(c.symbol)} className="cursor-pointer"
+                      style={{ borderTop: "1px solid var(--c-line)", background: s?.status === "SIGNAL_CONFIRMED" ? "var(--c-gain-soft, transparent)" : undefined }}
+                      title="Click to view chart"
+                    >
                       <td className="py-2 pl-3 pr-2 text-muted n">{i + 1}</td>
                       <td className="py-2 pr-2">
-                        <div className="font-semibold">{c.symbol}</div>
+                        <div className="font-semibold flex items-center gap-1">{c.symbol}<ChartLine size={11} className="text-faint" /></div>
                         <div className="text-[10.5px] text-faint">{c.sector ?? "—"}</div>
                       </td>
                       <td className="py-2 pr-2"><ScoreBadge score={s?.score ?? c.rankScore} /></td>
@@ -442,7 +507,35 @@ export default function IntradayTrader() {
               </table>
             </div>
           )}
+
+          <h2 className="text-[13px] font-bold mt-5 mb-2">Alert Timeline</h2>
+          {timeline.length === 0 ? (
+            <p className="text-[12.5px] text-muted py-6 text-center">No confirmed signals or position events yet.</p>
+          ) : (
+            <div className="rounded-[14px] overflow-hidden" style={{ border: "1px solid var(--c-line)" }}>
+              {timeline.map((e, i) => {
+                const Icon = e.type === "SIGNAL_CONFIRMED" ? Bell : e.type === "POSITION_OPENED" ? SignIn : SignOut;
+                const tone = e.type === "SIGNAL_CONFIRMED" ? "text-gain" : e.type === "POSITION_OPENED" ? "text-accent" : "text-muted";
+                return (
+                  <button
+                    key={`${e.type}-${e.symbol}-${e.time}-${i}`} onClick={() => setChartSymbol(e.symbol)}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 text-left"
+                    style={{ borderTop: i > 0 ? "1px solid var(--c-line)" : "none", background: "var(--c-surface)" }}
+                  >
+                    <Icon size={13} weight="bold" className={`shrink-0 ${tone}`} />
+                    <span className="text-[11px] text-faint n shrink-0 w-[62px]">{new Date(e.time).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</span>
+                    <span className="text-[12px] font-semibold shrink-0">{e.symbol}</span>
+                    <span className="text-[11.5px] text-ink2 truncate">{e.detail}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </>
+      )}
+
+      {chartSymbol && (
+        <IntradaySignalChart symbol={chartSymbol} candidate={chartCandidate} onClose={() => setChartSymbol(null)} />
       )}
     </div>
   );

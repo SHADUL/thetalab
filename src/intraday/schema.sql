@@ -95,7 +95,23 @@ create table intraday_positions (
 );
 create index intraday_positions_status_idx on intraday_positions(status);
 
+-- One row per run of src/intraday/scripts/runBacktest.ts (spec §46) —
+-- optional: the script writes this best-effort and degrades gracefully
+-- if this table doesn't exist yet, so it isn't required to use the
+-- backtest engine itself, only to keep a history of past runs.
+create table intraday_backtest_runs (
+  id bigint generated always as identity primary key,
+  symbols text[] not null,
+  from_date date not null,
+  to_date date not null,
+  capital numeric not null,
+  params jsonb,
+  summary jsonb,
+  created_at timestamptz not null default now()
+);
+
 alter table intraday_settings enable row level security;
 alter table intraday_daily_stats enable row level security;
 alter table intraday_signals enable row level security;
 alter table intraday_positions enable row level security;
+alter table intraday_backtest_runs enable row level security;

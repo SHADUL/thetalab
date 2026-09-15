@@ -1,11 +1,11 @@
 /**
  * Intraday Trader — a completely separate module from the Swing Scanner
- * (own data model, own UI section), per the user's own spec. Vertical
- * slice v1: Market Regime -> Ranking -> Setup -> Signal -> Risk, PAPER
- * mode only. All 5 initial ensemble setups (ORB, VWAP Pullback, EMA Trend
- * Continuation, Breakout, Breakout Retest) are implemented. Deferred to
- * later passes: real execution, full backtest engine, and UI polish
- * (top-5 cards, alert-state timeline).
+ * (own data model, own UI section), per the user's own spec. Market
+ * Regime -> Ranking -> Setup -> Signal -> Risk -> Execution (paper) ->
+ * Position Management/Exit -> Kill Switch -> Settings -> Backtest are
+ * all implemented; PAPER is still the only execution mode. Deferred:
+ * ALERT/SEMI_AUTO/AUTO execution, and dashboard UI polish (top-5 cards,
+ * alert-state timeline, per-stock chart view).
  */
 export interface IntradayBar {
   t: number; // epoch ms

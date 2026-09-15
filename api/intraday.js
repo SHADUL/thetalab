@@ -726,13 +726,13 @@ async function handleScan(supabase, req, res) {
       const signal = evaluateIntradaySignal({ bars, direction, regimeInfo, rankFactors: cand.rankFactors, rvol: cand.rvol, settings });
       withSignals.push({ ...cand, signal });
 
-      if (status === 'SIGNAL_CONFIRMED') {
+      if (signal.status === 'SIGNAL_CONFIRMED') {
         let signalId = null;
         try {
           const { data: inserted } = await supabase.from('intraday_signals').insert({
-            symbol: cand.symbol, sector: cand.sector, direction, status, score: finalScore, confidence,
-            setup_type: bestSetup?.type ?? null, entry, stop, target1, target2, risk_reward: riskReward,
-            market_regime: regimeInfo.regime, signal_components: { rankFactors: cand.rankFactors, checklist, momentumScore },
+            symbol: cand.symbol, sector: cand.sector, direction, status: signal.status, score: signal.score, confidence: signal.confidence,
+            setup_type: signal.setupType, entry: signal.entry, stop: signal.stop, target1: signal.target1, target2: signal.target2, risk_reward: signal.riskReward,
+            market_regime: regimeInfo.regime, signal_components: { rankFactors: cand.rankFactors, confirmations: signal.confirmations, failures: signal.failures },
           }).select('id').single();
           signalId = inserted?.id ?? null;
         } catch { /* migration not run yet — signal still returned live, just not journaled */ }

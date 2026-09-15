@@ -77,6 +77,31 @@ const KITE_DELAY_MS = 250; // stay well under Kite's historical-API rate limit a
 
 function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)); }
 
+/**
+ * PostgREST caps any unpaginated select() at a default row limit (1000)
+ * — silently, no error, no indication which rows survived. The swing
+ * backtest script's own dbPaging.ts documents hitting this for real
+ * once already (a market_regime read silently truncated 1985 rows to
+ * 1000 in undefined order, corrupting every relative-strength value
+ * computed from it) — every multi-row read here goes through this same
+ * page-until-empty pattern so that cap can't quietly bite this script
+ * too.
+ */
+async function fetchAllRows<T>(supabase: any, table: string, select: string, build: (q: any) => any): Promise<T[]> {
+  const PAGE = 1000;
+  const rows: T[] = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await build(supabase.from(table).select(select)).range(from, from + PAGE - 1);
+    if (error) throw error;
+    if (!data || data.length === 0) break;
+    rows.push(...(data as T[]));
+    if (data.length < PAGE) break;
+    from += PAGE;
+  }
+  return rows;
+}
+
 interface DailyRow { symbol: string; date: string; close: number }
 function prevValueBefore(list: DailyRow[] | undefined, date: string): number | null {
   if (!list) return null;
@@ -161,23 +186,30 @@ async function main() {
   if (testableSymbols.length === 0) throw new Error('No testable symbols (none have an instrument_token in `stocks`).');
 
   console.log('Loading trading-day calendar from daily_ohlcv...');
-  const { data: dateRows } = await supabase.from('daily_ohlcv').select('date').gte('date', fromArg).lte('date', toArg).order('date', { ascending: true });
-  const tradingDays = [...new Set((dateRows ?? []).map((r: any) => r.date as string))];
+  // Every trading day has a row for every symbol in the universe, so a
+  // single representative symbol's dates ARE the trading-day calendar —
+  // cheaper and safer than paging through every symbol's rows just to
+  // extract distinct dates.
+  const calendarRows = await fetchAllRows<{ date: string }>(supabase, 'daily_ohlcv', 'date', (q) =>
+    q.eq('symbol', testableSymbols[0]).gte('date', fromArg).lte('date', toArg).order('date', { ascending: true }));
+  const tradingDays = [...new Set(calendarRows.map((r) => r.date))];
   console.log(`  ${tradingDays.length} trading days.`);
   if (tradingDays.length === 0) throw new Error('No trading days found in daily_ohlcv for that range.');
 
   console.log('Loading prior close/volume history for point-in-time universe context...');
   const bufferFrom = new Date(new Date(fromArg).getTime() - 30 * 86_400_000).toISOString().slice(0, 10);
-  const [{ data: ohlcvHist }, { data: indHist }] = await Promise.all([
-    supabase.from('daily_ohlcv').select('symbol,date,close').in('symbol', testableSymbols).gte('date', bufferFrom).lte('date', toArg).order('date', { ascending: true }),
-    supabase.from('indicators').select('symbol,date,vol_avg20').in('symbol', testableSymbols).gte('date', bufferFrom).lte('date', toArg).order('date', { ascending: true }),
+  const [ohlcvHist, indHist] = await Promise.all([
+    fetchAllRows<any>(supabase, 'daily_ohlcv', 'symbol,date,close', (q) =>
+      q.in('symbol', testableSymbols).gte('date', bufferFrom).lte('date', toArg).order('date', { ascending: true })),
+    fetchAllRows<any>(supabase, 'indicators', 'symbol,date,vol_avg20', (q) =>
+      q.in('symbol', testableSymbols).gte('date', bufferFrom).lte('date', toArg).order('date', { ascending: true })),
   ]);
   const closeHistBySymbol = new Map<string, DailyRow[]>();
-  for (const r of (ohlcvHist ?? []) as any[]) {
+  for (const r of ohlcvHist) {
     const list = closeHistBySymbol.get(r.symbol) ?? []; list.push({ symbol: r.symbol, date: r.date, close: r.close }); closeHistBySymbol.set(r.symbol, list);
   }
   const volHistBySymbol = new Map<string, DailyRow[]>();
-  for (const r of (indHist ?? []) as any[]) {
+  for (const r of indHist) {
     const list = volHistBySymbol.get(r.symbol) ?? []; list.push({ symbol: r.symbol, date: r.date, close: r.vol_avg20 }); volHistBySymbol.set(r.symbol, list);
   }
 
@@ -191,6 +223,9 @@ async function main() {
   const bankNiftyCloseHist: DailyRow[] = bankNiftyDaily.map((b: any) => ({ symbol: 'BANKNIFTY', date: new Date(b.t).toISOString().slice(0, 10), close: b.c }));
 
   const allTrades: SimulatedIntradayTrade[] = [];
+  const statusCounts: Record<string, number> = {};
+  const failureCounts = new Map<string, number>();
+  let evaluations = 0;
   let daysProcessed = 0, daysSkipped = 0;
 
   for (const date of tradingDays) {
@@ -273,6 +308,9 @@ async function main() {
 
         const barsSoFar = d.bars.slice(0, i + 1);
         const signal = evaluateIntradaySignal({ bars: barsSoFar, direction, regimeInfo, rankFactors, rvol, settings });
+        evaluations++;
+        statusCounts[signal.status] = (statusCounts[signal.status] ?? 0) + 1;
+        for (const f of signal.failures ?? []) failureCounts.set(f, (failureCounts.get(f) ?? 0) + 1);
         const isConfirmed = signal.status === 'SIGNAL_CONFIRMED';
         const isNewSignal = isConfirmed && !wasConfirmedBySymbol.get(symbol);
         wasConfirmedBySymbol.set(symbol, isConfirmed);
@@ -321,6 +359,16 @@ async function main() {
   }
 
   console.log(`\nDone: ${daysProcessed} days processed, ${daysSkipped} skipped (no data), ${allTrades.length} simulated trades.\n`);
+
+  console.log(`=== Signal evaluations: ${evaluations} bar-checks across all symbol/days ===`);
+  for (const [status, n] of Object.entries(statusCounts)) console.log(`  ${status.padEnd(18)} ${n} (${((n / evaluations) * 100).toFixed(1)}%)`);
+  if (statusCounts.SIGNAL_CONFIRMED === undefined || statusCounts.SIGNAL_CONFIRMED === 0) {
+    console.log('  Most common reasons a signal did NOT confirm:');
+    for (const [reason, n] of [...failureCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5)) {
+      console.log(`    ${reason.padEnd(40)} failed on ${n} checks (${((n / evaluations) * 100).toFixed(1)}%)`);
+    }
+  }
+  console.log('');
 
   const summary = summarize(allTrades);
   console.log('=== Overall ===');

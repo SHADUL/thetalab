@@ -9,6 +9,7 @@ import { estimateRVOL, classifyRVOL, sessionFractionElapsed } from '../rvol.ts';
 import { ema, atr, istMinutesOfDay } from '../indicators.ts';
 import { computeOpeningRange, detectORB, detectVwapPullback, detectEmaTrendContinuation, detectBreakout, detectBreakoutRetest } from '../setups.ts';
 import { detectLiquidityGrab, liquidityGrabStop } from '../liquidityGrab.ts';
+import { detectEma200Pullback, ema200PullbackStop } from '../ema200Pullback.ts';
 import { computeExtension } from '../extension.ts';
 import { computeIntradaySectorStrength, sectorScoreFor } from '../sector.ts';
 import { classifyGap, detectPrevDayLevelEvents } from '../levels.ts';
@@ -388,6 +389,100 @@ test('detectLiquidityGrab: higher sweep-bar volume scores a higher quality', () 
 test('liquidityGrabStop: SHORT stop sits just above the wick, LONG stop just below', () => {
   assert.ok(liquidityGrabStop('SHORT', 103) > 103);
   assert.ok(liquidityGrabStop('LONG', 98) < 98);
+});
+
+/* ---------------- ema200Pullback.ts ---------------- */
+
+function seqBar(i: number, c: number, opts: Partial<IntradayBar> = {}): IntradayBar {
+  return { t: istTime('2026-09-15', 9, 30) + i * 5 * 60_000, o: opts.o ?? c, h: opts.h ?? c, l: opts.l ?? c, c, v: opts.v ?? 50_000 };
+}
+
+/**
+ * Builds a long, steady trend (so the 200-EMA has genuinely converged),
+ * then derives — from the ACTUAL ema20/ema200 values at that point,
+ * using the same ema() this suite already imports from indicators.ts —
+ * a pullback that lands right at the 200-EMA, and a resumption bar that
+ * closes back on the trend side of the 20-EMA. This keeps the fixture
+ * mathematically consistent regardless of the exact drift chosen,
+ * rather than guessing a hardcoded pullback depth by hand.
+ */
+function buildTrendThenPullback(direction: 'LONG' | 'SHORT', includeResumption = true): IntradayBar[] {
+  const drift = direction === 'LONG' ? 0.05 : -0.05;
+  const closes: number[] = [];
+  let price = 100;
+  for (let i = 0; i < 260; i++) { price += drift; closes.push(price); }
+
+  const ema200Series = ema(closes, 200);
+  const ema20Series = ema(closes, 20);
+  const e200 = ema200Series[closes.length - 1]!;
+  const e20 = ema20Series[closes.length - 1]!;
+  const lastPrice = closes[closes.length - 1];
+
+  const pullbackBars = 8;
+  const target = e200 + (direction === 'LONG' ? 1 : -1) * 0.05; // just past the 200-EMA, into "touched" territory
+  for (let k = 1; k <= pullbackBars; k++) {
+    closes.push(lastPrice + (target - lastPrice) * (k / pullbackBars));
+  }
+  if (includeResumption) {
+    closes.push(direction === 'LONG' ? e20 + 0.3 : e20 - 0.3);
+  }
+  return closes.map((c, i) => seqBar(i, c, { h: c + 0.15, l: c - 0.15, o: c }));
+}
+
+test('detectEma200Pullback: LONG fires after a genuine trend + pullback + resumption', () => {
+  const result = detectEma200Pullback(buildTrendThenPullback('LONG'));
+  assert.equal(result.fired, true);
+  assert.equal(result.direction, 'LONG');
+});
+
+test('detectEma200Pullback: SHORT fires symmetrically', () => {
+  const result = detectEma200Pullback(buildTrendThenPullback('SHORT'));
+  assert.equal(result.fired, true);
+  assert.equal(result.direction, 'SHORT');
+});
+
+test('detectEma200Pullback: pulled back but has not resumed past the 20-EMA yet does not fire', () => {
+  const result = detectEma200Pullback(buildTrendThenPullback('LONG', false));
+  assert.equal(result.fired, false);
+});
+
+test('detectEma200Pullback: a straight trend with no pullback does not fire', () => {
+  const closes: number[] = [];
+  let price = 100;
+  for (let i = 0; i < 280; i++) { price += 0.05; closes.push(price); }
+  const bars = closes.map((c, i) => seqBar(i, c, { h: c + 0.15, l: c - 0.15, o: c }));
+  const result = detectEma200Pullback(bars);
+  assert.equal(result.fired, false);
+});
+
+test('detectEma200Pullback: price crosses above the 200-EMA but the 20-EMA has not caught up does not fire (trend not confirmed)', () => {
+  const closes: number[] = [];
+  let price = 150;
+  for (let i = 0; i < 270; i++) { price -= 0.05; closes.push(price); } // sustained downtrend
+  closes.push(closes[closes.length - 1] + 8); // one sharp spike bar, not a real trend change
+  const bars = closes.map((c, i) => seqBar(i, c, { h: c + 0.15, l: c - 0.15, o: c }));
+  const result = detectEma200Pullback(bars);
+  assert.equal(result.fired, false);
+  assert.equal(result.direction, 'LONG'); // price is now above the 200-EMA, but the 20-EMA isn't yet — direction is still reported, just not confirmed
+});
+
+test('detectEma200Pullback: not enough bars returns fired:false with a clear reason', () => {
+  const bars = Array.from({ length: 50 }, (_, i) => seqBar(i, 100 + i * 0.01));
+  const result = detectEma200Pullback(bars);
+  assert.equal(result.fired, false);
+  assert.match(result.detail, /Not enough bars/);
+});
+
+test('ema200PullbackStop: LONG stop sits at/below the pullback low, SHORT stop sits at/above the pullback high', () => {
+  const longBars = buildTrendThenPullback('LONG');
+  const stopLong = ema200PullbackStop(longBars, 'LONG', 1);
+  const recentLows = longBars.slice(-16, -1).map((b) => b.l);
+  assert.ok(stopLong <= Math.min(...recentLows));
+
+  const shortBars = buildTrendThenPullback('SHORT');
+  const stopShort = ema200PullbackStop(shortBars, 'SHORT', 1);
+  const recentHighs = shortBars.slice(-16, -1).map((b) => b.h);
+  assert.ok(stopShort >= Math.max(...recentHighs));
 });
 
 /* ---------------- extension.ts ---------------- */

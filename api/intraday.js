@@ -28,6 +28,18 @@
  * (intraday_settings.liquidity_grab_min_rr) rather than the ensemble's
  * 1:1.5, reflecting the tighter stop this setup's own structure allows.
  *
+ * 200/20 EMA Trend Pullback (see evaluateEma200PullbackSignal) — a THIRD
+ * independent strategy: a trend-following pullback, not a reversal or a
+ * breakout. Direction comes from price vs its own 200-EMA (above =
+ * LONG bias, below = SHORT), confirmed by the 20-EMA sitting on the
+ * same side (an established trend, not a one-bar poke across the
+ * 200-EMA), triggered only once price has pulled back to the 200-EMA
+ * and resumed back past the 20-EMA. The 200-EMA needs real multi-day
+ * history to have converged, so this fetch (intraday_settings.
+ * ema_pullback_interval, default 5-min, spanning
+ * ema_pullback_history_days calendar days back, default 25) is
+ * materially bigger than the other two strategies' today-only fetches.
+ *
  * The logic below is a direct, deliberate port of the tested pure
  * functions in src/intraday/*.ts (same formulas/thresholds) — not a
  * second design. It's duplicated rather than imported because no
@@ -91,6 +103,7 @@ export const DEFAULT_SETTINGS = {
   max_consecutive_losses: 3, max_open_positions: 3, max_positions_per_sector: 1,
   square_off_time: '15:15',
   liquidity_grab_enabled: true, liquidity_grab_interval: '3minute', liquidity_grab_lookback: 20, liquidity_grab_min_rr: 2.0,
+  ema_pullback_enabled: true, ema_pullback_interval: '5minute', ema_pullback_history_days: 25, ema_pullback_min_rr: 1.5,
 };
 
 export function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
@@ -294,6 +307,70 @@ export function detectLiquidityGrab(bars, lookback = LG_LEVEL_LOOKBACK) {
 }
 export function liquidityGrabStop(direction, wickExtreme) {
   return direction === 'SHORT' ? wickExtreme * (1 + LG_STOP_BUFFER_PCT) : wickExtreme * (1 - LG_STOP_BUFFER_PCT);
+}
+
+const EMA200_FAST = 20;
+const EMA200_SLOW = 200;
+const EMA200_PULLBACK_LOOKBACK = 15;
+const EMA200_PULLBACK_TOLERANCE_PCT = 0.15;
+const EMA200_MIN_BARS = EMA200_SLOW + EMA200_PULLBACK_LOOKBACK + 50;
+const EMA200_STOP_BUFFER_ATR_MULT = 0.25;
+
+/**
+ * 200/20 EMA Trend Pullback — a third, independent Intraday strategy
+ * (trend-following pullback, distinct from both the 5-setup ensemble and
+ * the Liquidity Grab reversal). Ported from src/intraday/ema200Pullback.ts
+ * (tested) — see that file's header comment for the full rule statement:
+ * direction comes from price vs the 200-EMA alone, confirmed by the
+ * 20-EMA sitting on the same side, triggered only after a genuine
+ * pullback to the 200-EMA followed by a close back past the 20-EMA. The
+ * 200-EMA needs real multi-day history to have converged — the caller
+ * is expected to supply bars covering several trading days, not just
+ * today's.
+ */
+export function detectEma200Pullback(bars) {
+  const n = bars.length;
+  if (n < EMA200_MIN_BARS) return { fired: false, direction: null, quality: 0, ema20: null, ema200: null, detail: `Not enough bars for a converged 200-EMA yet (need ${EMA200_MIN_BARS}, have ${n}).` };
+
+  const closes = bars.map((b) => b.c);
+  const ema20Series = ema(closes, EMA200_FAST);
+  const ema200Series = ema(closes, EMA200_SLOW);
+  const i = n - 1;
+  const e20 = ema20Series[i];
+  const e200 = ema200Series[i];
+  if (e20 == null || e200 == null) return { fired: false, direction: null, quality: 0, ema20: e20, ema200: e200, detail: 'Not enough bars for a 200-EMA yet.' };
+
+  const last = bars[i];
+  const direction = last.c > e200 ? 'LONG' : 'SHORT';
+
+  const trendConfirmed = direction === 'LONG' ? e20 > e200 : e20 < e200;
+  if (!trendConfirmed) return { fired: false, direction, quality: 0, ema20: e20, ema200: e200, detail: `20-EMA is not ${direction === 'LONG' ? 'above' : 'below'} the 200-EMA — trend not confirmed.` };
+
+  const recentBars = bars.slice(-EMA200_PULLBACK_LOOKBACK - 1, -1);
+  const recentEma200 = ema200Series.slice(-EMA200_PULLBACK_LOOKBACK - 1, -1);
+  const pulledToEma200 = recentBars.some((b, idx) => {
+    const level = recentEma200[idx];
+    if (level == null) return false;
+    const proximityPct = direction === 'LONG' ? ((b.l - level) / level) * 100 : ((level - b.h) / level) * 100;
+    return proximityPct <= EMA200_PULLBACK_TOLERANCE_PCT;
+  });
+  if (!pulledToEma200) return { fired: false, direction, quality: 0, ema20: e20, ema200: e200, detail: 'No recent pullback to the 200-EMA yet.' };
+
+  const resumed = direction === 'LONG' ? last.c > e20 : last.c < e20;
+  if (!resumed) return { fired: false, direction, quality: 0, ema20: e20, ema200: e200, detail: `Pulled back to the 200-EMA but hasn't resumed back ${direction === 'LONG' ? 'above' : 'below'} the 20-EMA yet.` };
+
+  const distFromEma200Pct = Math.abs((last.c - e200) / e200) * 100;
+  const distFromEma20Pct = Math.abs((last.c - e20) / e20) * 100;
+  const quality = Math.round(clamp(55 + Math.min(distFromEma200Pct, 3) * 8 + clamp(3 - distFromEma20Pct, 0, 3) * 5, 0, 100));
+  return {
+    fired: true, direction, quality, ema20: e20, ema200: e200,
+    detail: `Trend confirmed (20-EMA ${direction === 'LONG' ? 'above' : 'below'} 200-EMA), pulled back to the 200-EMA, resumed ${direction === 'LONG' ? 'above' : 'below'} the 20-EMA.`,
+  };
+}
+export function ema200PullbackStop(bars, direction, atr14, lookback = EMA200_PULLBACK_LOOKBACK) {
+  const recent = bars.slice(-lookback - 1, -1);
+  const buffer = (atr14 ?? 0) * EMA200_STOP_BUFFER_ATR_MULT;
+  return direction === 'LONG' ? Math.min(...recent.map((b) => b.l)) - buffer : Math.max(...recent.map((b) => b.h)) + buffer;
 }
 
 export function classifyVwapRelationship(price, vwapSeries) {
@@ -568,6 +645,67 @@ export function evaluateLiquidityGrabSignal({ bars, returnPct, regimeInfo, secto
     status, score: finalScore, confidence, setupType: 'LIQUIDITY_GRAB', direction,
     entry, stop, target1, target2, riskReward, confirmations, failures,
     sweptLevel: grab.sweptLevel, setupQuality: grab.quality, detail: grab.detail,
+  };
+}
+
+/**
+ * Evaluates the 200/20 EMA Trend Pullback strategy for one candidate,
+ * given bars covering several trading days on its OWN (settings-
+ * configurable) timeframe — completely independent of the ensemble and
+ * Liquidity Grab above. Direction comes from detectEma200Pullback
+ * itself (price vs the 200-EMA), which can differ from the ensemble's
+ * own direction, same reasoning as Liquidity Grab. relativeStrength/
+ * regimeAlignment are recomputed for this signal's own direction;
+ * sectorStrength/volume are reused from the caller's rankFactors since
+ * they aren't direction-dependent.
+ */
+export function evaluateEma200PullbackSignal({ bars, returnPct, regimeInfo, sectorStrength, rvol, settings }) {
+  const pullback = detectEma200Pullback(bars);
+  if (!pullback.fired) return null;
+
+  const direction = pullback.direction;
+  const last = bars[bars.length - 1];
+  const atr14 = atr(bars, Math.min(14, bars.length - 1 || 1));
+  const currentAtr = atr14[atr14.length - 1];
+  const vwapSeries = computeSessionVWAP(bars.slice(-75)); // today-ish tail, just for the extension check
+  const ema9Full = ema(bars.map((b) => b.c), 9);
+
+  const entry = last.c;
+  const stop = ema200PullbackStop(bars, direction, currentAtr);
+  const riskPerShare = Math.abs(entry - stop);
+  const structuralTarget = currentAtr ? (direction === 'LONG' ? entry + 3 * currentAtr : entry - 3 * currentAtr) : null;
+  const riskReward = riskPerShare > 0 && structuralTarget != null ? Math.abs(structuralTarget - entry) / riskPerShare : null;
+  const target1 = direction === 'LONG' ? entry + riskPerShare : entry - riskPerShare;
+  const target2 = direction === 'LONG' ? entry + 2 * riskPerShare : entry - 2 * riskPerShare;
+  const extension = computeExtension(entry, vwapSeries[vwapSeries.length - 1] ?? entry, ema9Full[ema9Full.length - 1] ?? entry, currentAtr, settings.max_extension_atr ?? 2.5);
+
+  const checklist = {
+    regimeSupportive: regimeAlignmentScore(regimeInfo.regime, direction) >= 50,
+    sectorSupportive: sectorStrength >= 50,
+    relativeStrengthStrong: relativeStrengthScoreFor(returnPct, regimeInfo.niftyReturnPct, direction) >= 65,
+    validSetup: true,
+    rvolConfirms: rvol != null && rvol >= (settings.min_rvol ?? 1.0),
+    stopLogical: riskPerShare > 0,
+    rrAcceptable: riskReward != null && riskReward >= (settings.ema_pullback_min_rr ?? 1.5),
+    notExtended: !extension.extended,
+  };
+  const allPass = Object.values(checklist).every(Boolean);
+  const finalScore = Math.round(
+    pullback.quality * 0.30
+    + relativeStrengthScoreFor(returnPct, regimeInfo.niftyReturnPct, direction) * 0.20
+    + regimeAlignmentScore(regimeInfo.regime, direction) * 0.20
+    + sectorStrength * 0.15
+    + rvolScoreFor(rvol) * 0.15,
+  );
+  const confidence = finalScore >= 90 ? 'A_PLUS' : finalScore >= 80 ? 'A' : finalScore >= 70 ? 'B' : finalScore >= 60 ? 'WATCH' : 'IGNORE';
+  const status = allPass && finalScore >= (settings.min_score ?? 70) ? 'SIGNAL_CONFIRMED' : 'FORMING';
+  const confirmations = Object.keys(checklist).filter((k) => checklist[k]).map((k) => CHECKLIST_LABEL[k]);
+  const failures = Object.keys(checklist).filter((k) => !checklist[k]).map((k) => CHECKLIST_LABEL[k]);
+
+  return {
+    status, score: finalScore, confidence, setupType: 'EMA_200_PULLBACK', direction,
+    entry, stop, target1, target2, riskReward, confirmations, failures,
+    ema20: pullback.ema20, ema200: pullback.ema200, setupQuality: pullback.quality, detail: pullback.detail,
   };
 }
 
@@ -910,6 +1048,12 @@ async function handleScan(supabase, req, res) {
     const from = `${today} 09:15:00`;
     const nowIst = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
     const to = `${today} ${String(nowIst.getHours()).padStart(2, '0')}:${String(nowIst.getMinutes()).padStart(2, '0')}:00`;
+    // The 200-EMA needs real multi-day history to have converged — a
+    // calendar-day lookback (not a trading-day one) is a deliberate
+    // simplification: it fetches a bit more than strictly needed once
+    // weekends/holidays are accounted for, which is harmless, rather
+    // than requiring a trading-day-calendar lookup at scan time.
+    const emaPullbackFrom = new Date(Date.now() - (settings.ema_pullback_history_days ?? 25) * 86_400_000).toISOString().slice(0, 10) + ' 09:15:00';
 
     const executionOn = executionAvailable && settings.enabled && settings.execution_mode === 'PAPER';
 
@@ -945,7 +1089,23 @@ async function handleScan(supabase, req, res) {
         } catch { /* resilient — no LG signal this tick, ensemble signal is unaffected */ }
       }
 
-      withSignals.push({ ...cand, signal, liquidityGrab });
+      // 200/20 EMA Trend Pullback — the third independent strategy,
+      // needing multi-day history for its 200-EMA to have converged
+      // (not just today's bars), so this is a materially bigger fetch
+      // than the other two. A failed fetch here never affects the
+      // ensemble or Liquidity Grab signals above.
+      let emaPullback = null;
+      if (settings.ema_pullback_enabled ?? true) {
+        try {
+          const emaBars = await kiteHistorical(cand.instrumentToken, settings.ema_pullback_interval ?? '5minute', emaPullbackFrom, to, ctx);
+          await sleep(120);
+          emaPullback = evaluateEma200PullbackSignal({
+            bars: emaBars, returnPct: cand.returnPct, regimeInfo, sectorStrength: cand.rankFactors.sectorStrength, rvol: cand.rvol, settings,
+          });
+        } catch { /* resilient — no EMA pullback signal this tick */ }
+      }
+
+      withSignals.push({ ...cand, signal, liquidityGrab, emaPullback });
 
       if (signal.status === 'SIGNAL_CONFIRMED') {
         const result = await persistAndMaybeExecuteSignal(supabase, settings, executionOn, {
@@ -966,6 +1126,16 @@ async function handleScan(supabase, req, res) {
         openPositions = result.openPositions;
         dailyStats = result.dailyStats;
       }
+
+      if (emaPullback?.status === 'SIGNAL_CONFIRMED') {
+        const result = await persistAndMaybeExecuteSignal(supabase, settings, executionOn, {
+          symbol: cand.symbol, sector: cand.sector, direction: emaPullback.direction, signal: emaPullback, regime: regimeInfo.regime, today,
+          extraComponents: { ema20: emaPullback.ema20, ema200: emaPullback.ema200, setupQuality: emaPullback.setupQuality },
+          openPositions, dailyStats,
+        });
+        openPositions = result.openPositions;
+        dailyStats = result.dailyStats;
+      }
     }
 
     const withSignalsBySymbol = new Map(withSignals.map((c) => [c.symbol, c]));
@@ -977,6 +1147,7 @@ async function handleScan(supabase, req, res) {
         rankScore: c.rankScore, rankFactors: c.rankFactors,
         signal: withSig?.signal ?? null,
         liquidityGrab: withSig?.liquidityGrab ?? null,
+        emaPullback: withSig?.emaPullback ?? null,
       };
     });
 

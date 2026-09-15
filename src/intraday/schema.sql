@@ -28,6 +28,10 @@ create table intraday_settings (
   liquidity_grab_interval text not null default '3minute', -- '1minute' | '3minute'
   liquidity_grab_lookback integer not null default 20,
   liquidity_grab_min_rr numeric not null default 2.0,
+  ema_pullback_enabled boolean not null default true,
+  ema_pullback_interval text not null default '5minute',
+  ema_pullback_history_days integer not null default 25,
+  ema_pullback_min_rr numeric not null default 1.5,
   updated_at timestamptz not null default now(),
   constraint intraday_settings_singleton check (id = 1)
 );

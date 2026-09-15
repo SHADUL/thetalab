@@ -7,6 +7,7 @@ export * from './momentum.ts';
 export * from './rvol.ts';
 export * from './setups.ts';
 export * from './liquidityGrab.ts';
+export * from './ema200Pullback.ts';
 export * from './extension.ts';
 export * from './sector.ts';
 export * from './levels.ts';

@@ -19,6 +19,7 @@ const SIGNAL_LABEL = { SIGNAL_CONFIRMED: "Confirmed", FORMING: "Forming", WATCH:
 const SETUP_LABEL = {
   ORB: "ORB", VWAP_PULLBACK: "VWAP Pullback", EMA_TREND_CONTINUATION: "Trend Continuation",
   BREAKOUT: "Breakout", BREAKOUT_RETEST: "Breakout Retest", LIQUIDITY_GRAB: "Liquidity Grab",
+  EMA_200_PULLBACK: "200-EMA Pullback",
 };
 
 const POSITION_STATUS_TONE = { OPEN: "muted", CLOSED: "muted" };
@@ -29,6 +30,7 @@ const DEFAULT_DRAFT = {
   max_open_positions: 3, max_positions_per_sector: 1, min_score: 70, min_risk_reward: 1.5,
   min_rvol: 1.0, max_extension_atr: 2.5, square_off_time: "15:15",
   liquidity_grab_enabled: true, liquidity_grab_interval: "3minute", liquidity_grab_lookback: 20, liquidity_grab_min_rr: 2.0,
+  ema_pullback_enabled: true, ema_pullback_interval: "5minute", ema_pullback_history_days: 25, ema_pullback_min_rr: 1.5,
 };
 
 // Every field here is wired to real gating logic in api/intraday.js — no
@@ -67,6 +69,12 @@ const SETTINGS_GROUPS = [
     title: "Liquidity Grab", fields: [
       { key: "liquidity_grab_lookback", label: "Swing-level lookback (bars)", step: 1, min: 5 },
       { key: "liquidity_grab_min_rr", label: "Min risk:reward", step: 0.1, min: 1 },
+    ],
+  },
+  {
+    title: "200-EMA Pullback", fields: [
+      { key: "ema_pullback_history_days", label: "History (calendar days)", step: 1, min: 10 },
+      { key: "ema_pullback_min_rr", label: "Min risk:reward", step: 0.1, min: 1 },
     ],
   },
 ];
@@ -165,6 +173,7 @@ export default function IntradayTrader() {
     const body = {
       enabled: !!settingsDraft.enabled, execution_mode: "PAPER", square_off_time: settingsDraft.square_off_time || "15:15",
       liquidity_grab_enabled: !!settingsDraft.liquidity_grab_enabled, liquidity_grab_interval: settingsDraft.liquidity_grab_interval || "3minute",
+      ema_pullback_enabled: !!settingsDraft.ema_pullback_enabled, ema_pullback_interval: settingsDraft.ema_pullback_interval || "5minute",
     };
     for (const key of numericKeys) {
       const n = Number(settingsDraft[key]);
@@ -215,6 +224,7 @@ export default function IntradayTrader() {
   const priceBySymbol = new Map(candidates.map((c) => [c.symbol, c.price]));
   const topCards = computeTopCards(candidates);
   const liquidityGrabHits = candidates.filter((c) => c.liquidityGrab).sort((a, b) => b.liquidityGrab.score - a.liquidityGrab.score);
+  const emaPullbackHits = candidates.filter((c) => c.emaPullback).sort((a, b) => b.emaPullback.score - a.emaPullback.score);
 
   const timeline = [
     ...signals.map((s) => ({
@@ -258,8 +268,9 @@ export default function IntradayTrader() {
       <p className="text-[11px] text-muted mb-3 max-w-[75ch]">
         Live market regime + a liquid-universe ranking, refreshed every 20s while this tab is open. The top-ranked candidates
         also get real setup detection (ORB / VWAP Pullback / Trend Continuation / Breakout / Breakout Retest) against today's
-        5-min candles, plus an independent Liquidity Grab strategy (stop-run sweep + reversal, 1-min or 3-min, min 1:2 R:R) —
-        a "Confirmed" signal has passed its full entry checklist.
+        5-min candles, plus two independent strategies: Liquidity Grab (stop-run sweep + reversal, 1-min or 3-min, min 1:2 R:R)
+        and 200-EMA Pullback (trend + pullback continuation off the 200/20-EMA, needs multi-day history) — a "Confirmed" signal
+        has passed its full entry checklist.
       </p>
 
       {killSwitchResult && (
@@ -337,6 +348,23 @@ export default function IntradayTrader() {
                 >
                   <option value="1minute">1-min</option>
                   <option value="3minute">3-min</option>
+                </select>
+              </label>
+              <span className="w-px self-stretch" style={{ background: "var(--c-line)" }} />
+              <label className="flex items-center gap-1.5 text-[11.5px]">
+                <input type="checkbox" checked={!!settingsDraft.ema_pullback_enabled} onChange={(e) => setField("ema_pullback_enabled", e.target.checked)} />
+                200-EMA Pullback
+              </label>
+              <label className="flex items-center gap-1.5 text-[11.5px]">
+                Timeframe
+                <select
+                  value={settingsDraft.ema_pullback_interval ?? "5minute"}
+                  onChange={(e) => setField("ema_pullback_interval", e.target.value)}
+                  className="px-2 py-1 rounded-[8px] text-[11.5px]"
+                  style={{ border: "1px solid var(--c-line)", background: "var(--c-surface-2)" }}
+                >
+                  <option value="5minute">5-min</option>
+                  <option value="15minute">15-min</option>
                 </select>
               </label>
             </div>
@@ -543,6 +571,62 @@ export default function IntradayTrader() {
                           {lg.status !== "SIGNAL_CONFIRMED" && lg.failures?.length > 0 && (
                             <div className="text-[10px] text-faint" title={lg.failures.join(", ")}>
                               Needs: {lg.failures.slice(0, 2).join(", ")}{lg.failures.length > 2 ? "…" : ""}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <h2 className="text-[13px] font-bold mt-5 mb-2">
+            200-EMA Pullback <span className="font-normal text-muted">(trend + pullback continuation, 5-min)</span>
+          </h2>
+          {emaPullbackHits.length === 0 ? (
+            <p className="text-[12.5px] text-muted py-6 text-center">No 200-EMA pullback set-ups on the current shortlist right now.</p>
+          ) : (
+            <div className="overflow-x-auto rounded-[14px] mb-2" style={{ border: "1px solid var(--c-line)" }}>
+              <table className="w-full text-[12px]">
+                <thead>
+                  <tr className="text-muted text-left" style={{ background: "var(--c-surface-2)" }}>
+                    <th className="font-medium py-2 pl-3 pr-2">Stock</th>
+                    <th className="font-medium py-2 pr-2">Score</th>
+                    <th className="font-medium py-2 pr-2">Direction</th>
+                    <th className="font-medium py-2 pr-2 text-right">20-EMA</th>
+                    <th className="font-medium py-2 pr-2 text-right">200-EMA</th>
+                    <th className="font-medium py-2 pr-2 text-right">Entry</th>
+                    <th className="font-medium py-2 pr-2 text-right">Stop</th>
+                    <th className="font-medium py-2 pr-2 text-right">R:R</th>
+                    <th className="font-medium py-2 pr-3">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {emaPullbackHits.map((c) => {
+                    const ep = c.emaPullback;
+                    return (
+                      <tr key={c.symbol} style={{ borderTop: "1px solid var(--c-line)", background: ep.status === "SIGNAL_CONFIRMED" ? "var(--c-gain-soft, transparent)" : undefined }}>
+                        <td className="py-2 pl-3 pr-2">
+                          <IntradaySignalChart symbol={c.symbol} candidate={{ signal: ep }}>
+                            <div className="font-semibold">{c.symbol}</div>
+                          </IntradaySignalChart>
+                          <div className="text-[10.5px] text-faint">{c.sector ?? "—"}</div>
+                        </td>
+                        <td className="py-2 pr-2"><ScoreBadge score={ep.score} /></td>
+                        <td className={`py-2 pr-2 text-[11px] font-medium ${ep.direction === "LONG" ? "text-gain" : "text-loss"}`}>{ep.direction}</td>
+                        <td className="py-2 pr-2 text-right n text-[11px]">{inr(ep.ema20)}</td>
+                        <td className="py-2 pr-2 text-right n text-[11px]">{inr(ep.ema200)}</td>
+                        <td className="py-2 pr-2 text-right n">{inr(ep.entry)}</td>
+                        <td className="py-2 pr-2 text-right n">{inr(ep.stop)}</td>
+                        <td className="py-2 pr-2 text-right n">{ep.riskReward != null ? ep.riskReward.toFixed(1) : "—"}</td>
+                        <td className="py-2 pr-3 text-[11px]">
+                          <span className={`font-semibold ${toneClass(SIGNAL_TONE[ep.status])}`}>{SIGNAL_LABEL[ep.status] ?? ep.status}</span>
+                          {ep.confidence && <span className="text-faint"> · {ep.confidence.replace("_", "+")}</span>}
+                          {ep.status !== "SIGNAL_CONFIRMED" && ep.failures?.length > 0 && (
+                            <div className="text-[10px] text-faint" title={ep.failures.join(", ")}>
+                              Needs: {ep.failures.slice(0, 2).join(", ")}{ep.failures.length > 2 ? "…" : ""}
                             </div>
                           )}
                         </td>

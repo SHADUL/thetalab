@@ -53,16 +53,16 @@
 import { createClient } from '@supabase/supabase-js';
 
 const KITE_BASE = 'https://api.kite.trade';
-const MIN_PRICE = 50;
-const MIN_AVG_DAILY_VALUE = 20 * 10_000_000; // 20 crore
+export const MIN_PRICE = 50;
+export const MIN_AVG_DAILY_VALUE = 20 * 10_000_000; // 20 crore
 const UNIVERSE_CAP = 150;
 const RESULT_LIMIT = 25;
 const SETUP_SHORTLIST = 12;
-const MARKET_OPEN_MIN = 9 * 60 + 15;
-const MARKET_CLOSE_MIN = 15 * 60 + 30;
-const OR_END_MIN = 9 * 60 + 30;
+export const MARKET_OPEN_MIN = 9 * 60 + 15;
+export const MARKET_CLOSE_MIN = 15 * 60 + 30;
+export const OR_END_MIN = 9 * 60 + 30;
 
-const DEFAULT_SETTINGS = {
+export const DEFAULT_SETTINGS = {
   min_score: 70, min_risk_reward: 1.5, min_rvol: 1.0, max_extension_atr: 2.5,
   enabled: false, execution_mode: 'PAPER', capital: 0, risk_pct_per_trade: 0.5,
   max_capital_pct_per_trade: 20, max_daily_loss_pct: 2, max_trades_per_day: 5,
@@ -70,38 +70,38 @@ const DEFAULT_SETTINGS = {
   square_off_time: '15:15',
 };
 
-function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
-function nowMinutesIST() {
+export function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+export function nowMinutesIST() {
   const ist = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
   return ist.getHours() * 60 + ist.getMinutes();
 }
-function istMinutesOfDay(epochMs) {
+export function istMinutesOfDay(epochMs) {
   const ist = new Date(new Date(epochMs).toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
   return ist.getHours() * 60 + ist.getMinutes();
 }
-function sessionFractionElapsed(nowMin) {
+export function sessionFractionElapsed(nowMin) {
   return clamp((nowMin - MARKET_OPEN_MIN) / (MARKET_CLOSE_MIN - MARKET_OPEN_MIN), 0, 1);
 }
 
-async function kiteFetch(path, { token, apiKey }) {
+export async function kiteFetch(path, { token, apiKey }) {
   const resp = await fetch(`${KITE_BASE}${path}`, { headers: { Authorization: `token ${apiKey}:${token}`, 'X-Kite-Version': '3' } });
   const json = await resp.json().catch(() => null);
   if (!resp.ok || json?.status === 'error') throw new Error(json?.message || `Kite API error (${resp.status}) on ${path}`);
   return json?.data;
 }
-async function kiteQuote(instruments, ctx) {
+export async function kiteQuote(instruments, ctx) {
   const qs = instruments.map((i) => `i=${encodeURIComponent(i)}`).join('&');
   return (await kiteFetch(`/quote?${qs}`, ctx)) ?? {};
 }
-async function kiteHistorical(token, interval, from, to, ctx) {
+export async function kiteHistorical(token, interval, from, to, ctx) {
   const data = await kiteFetch(`/instruments/historical/${token}/${interval}?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, ctx);
   return (data?.candles ?? []).map((c) => ({ t: new Date(c[0]).getTime(), o: c[1], h: c[2], l: c[3], c: c[4], v: c[5] }));
 }
-function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+export function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 // ---- pure math (ported from src/intraday/*.ts — see file header) ----
 
-function ema(values, period) {
+export function ema(values, period) {
   const out = new Array(values.length).fill(null);
   if (values.length < period) return out;
   const k = 2 / (period + 1);
@@ -110,10 +110,10 @@ function ema(values, period) {
   for (let i = period; i < values.length; i++) { prev = values[i] * k + prev * (1 - k); out[i] = prev; }
   return out;
 }
-function trueRange(bars) {
+export function trueRange(bars) {
   return bars.map((b, i) => i === 0 ? b.h - b.l : Math.max(b.h - b.l, Math.abs(b.h - bars[i - 1].c), Math.abs(b.l - bars[i - 1].c)));
 }
-function atr(bars, period) {
+export function atr(bars, period) {
   const tr = trueRange(bars);
   const out = new Array(bars.length).fill(null);
   if (bars.length < period) return out;
@@ -122,16 +122,16 @@ function atr(bars, period) {
   for (let i = period; i < bars.length; i++) { prev = (prev * (period - 1) + tr[i]) / period; out[i] = prev; }
   return out;
 }
-function computeSessionVWAP(bars) {
+export function computeSessionVWAP(bars) {
   let cumPV = 0, cumV = 0;
   return bars.map((b) => { const tp = (b.h + b.l + b.c) / 3; cumPV += tp * b.v; cumV += b.v; return cumV > 0 ? cumPV / cumV : b.c; });
 }
-function computeOpeningRange(bars) {
+export function computeOpeningRange(bars) {
   const orBars = bars.filter((b) => istMinutesOfDay(b.t) >= MARKET_OPEN_MIN && istMinutesOfDay(b.t) < OR_END_MIN);
   if (orBars.length === 0) return null;
   return { high: Math.max(...orBars.map((b) => b.h)), low: Math.min(...orBars.map((b) => b.l)) };
 }
-function detectORB(bars, or, direction) {
+export function detectORB(bars, or, direction) {
   const last = bars[bars.length - 1];
   if (!last || !or) return { fired: false, quality: 0 };
   const level = direction === 'LONG' ? or.high : or.low;
@@ -142,7 +142,7 @@ function detectORB(bars, or, direction) {
   const closingStrength = range === 0 ? 0.5 : direction === 'LONG' ? (last.c - last.l) / range : (last.h - last.c) / range;
   return { fired: true, quality: Math.round(clamp(50 + distPct * 20 + closingStrength * 30, 0, 100)) };
 }
-function detectVwapPullback(bars, vwapSeries, direction) {
+export function detectVwapPullback(bars, vwapSeries, direction) {
   if (bars.length < 8) return { fired: false, quality: 0 };
   const recent = bars.slice(-8), recentVwap = vwapSeries.slice(-8), sign = direction === 'LONG' ? 1 : -1;
   const dist = recent.map((b, i) => ((b.c - recentVwap[i]) / recentVwap[i]) * 100 * sign);
@@ -155,7 +155,7 @@ function detectVwapPullback(bars, vwapSeries, direction) {
   const fired = wasExtended && pulledBack && stillAligned && resumed;
   return { fired, quality: fired ? 80 : 0 };
 }
-function detectEmaTrendContinuation(bars, ema9, ema20, direction) {
+export function detectEmaTrendContinuation(bars, ema9, ema20, direction) {
   const i = bars.length - 1;
   const e9 = ema9[i], e20 = ema20[i];
   if (e9 == null || e20 == null) return { fired: false, quality: 0 };
@@ -176,7 +176,7 @@ const MIN_BASE_BARS = 6;
 const MAX_BASE_WIDTH_PCT = 1.2;
 const RETEST_WINDOW = 6;
 
-function detectConsolidationRange(bars, lookback = CONSOLIDATION_LOOKBACK) {
+export function detectConsolidationRange(bars, lookback = CONSOLIDATION_LOOKBACK) {
   if (bars.length < MIN_BASE_BARS) return null;
   const baseBars = bars.slice(-lookback);
   if (baseBars.length < MIN_BASE_BARS) return null;
@@ -187,7 +187,7 @@ function detectConsolidationRange(bars, lookback = CONSOLIDATION_LOOKBACK) {
   if (widthPct > MAX_BASE_WIDTH_PCT) return null;
   return { high, low, width: high - low };
 }
-function detectBreakout(bars, direction, lookback = CONSOLIDATION_LOOKBACK) {
+export function detectBreakout(bars, direction, lookback = CONSOLIDATION_LOOKBACK) {
   if (bars.length < lookback + 1) return { fired: false, quality: 0 };
   const base = detectConsolidationRange(bars.slice(0, -1), lookback);
   if (!base) return { fired: false, quality: 0 };
@@ -203,7 +203,7 @@ function detectBreakout(bars, direction, lookback = CONSOLIDATION_LOOKBACK) {
   const closingStrength = range === 0 ? 0.5 : direction === 'LONG' ? (last.c - last.l) / range : (last.h - last.c) / range;
   return { fired: true, quality: Math.round(clamp(40 + breakoutDistancePct * 15 + closingStrength * 25 + Math.min(volExpansion, 3) * 10, 0, 100)) };
 }
-function detectBreakoutRetest(bars, direction, lookback = CONSOLIDATION_LOOKBACK) {
+export function detectBreakoutRetest(bars, direction, lookback = CONSOLIDATION_LOOKBACK) {
   const n = bars.length;
   if (n < lookback + RETEST_WINDOW + 1) return { fired: false, quality: 0 };
   const base = detectConsolidationRange(bars.slice(0, n - RETEST_WINDOW), lookback);
@@ -224,7 +224,7 @@ function detectBreakoutRetest(bars, direction, lookback = CONSOLIDATION_LOOKBACK
   const volDeclinedOnRetest = breakoutBarVol > 0 && retestVol < breakoutBarVol;
   return { fired: true, quality: Math.round(75 + (volDeclinedOnRetest ? 15 : 0) + 10) };
 }
-function classifyVwapRelationship(price, vwapSeries) {
+export function classifyVwapRelationship(price, vwapSeries) {
   const vwap = vwapSeries[vwapSeries.length - 1];
   const prior = vwapSeries[Math.max(0, vwapSeries.length - 6)];
   const rising = vwap > prior;
@@ -232,7 +232,7 @@ function classifyVwapRelationship(price, vwapSeries) {
   if (Math.abs(distPct) < 0.05) return 'AT_VWAP';
   return price > vwap ? (rising ? 'ABOVE_RISING' : 'ABOVE_FALLING') : (rising ? 'BELOW_FALLING' : 'BELOW_RISING');
 }
-function momentumAccelerationScore(bars, direction) {
+export function momentumAccelerationScore(bars, direction) {
   const n = bars.length;
   if (n < 7) return 50;
   const recentRoc = ((bars[n - 1].c - bars[n - 4].c) / bars[n - 4].c) * 100;
@@ -242,14 +242,14 @@ function momentumAccelerationScore(bars, direction) {
   const base = clamp(50 + signed * 15, 0, 100);
   return Math.round(clamp(signed > signedPrior ? base + 10 : base - 10, 0, 100));
 }
-function computeExtension(price, vwap, ema9, atr14, maxExtensionAtr = 2.5) {
+export function computeExtension(price, vwap, ema9, atr14, maxExtensionAtr = 2.5) {
   if (!atr14 || atr14 <= 0) return { extended: false };
   const distVwapAtr = Math.abs(price - vwap) / atr14;
   const distEma9Atr = Math.abs(price - ema9) / atr14;
   return { extended: distVwapAtr > maxExtensionAtr || distEma9Atr > maxExtensionAtr };
 }
 
-function regimeFromIndices(nifty, bankNifty, pctStocksAboveVwap) {
+export function regimeFromIndices(nifty, bankNifty, pctStocksAboveVwap) {
   const niftyReturnPct = nifty ? ((nifty.last_price - nifty.ohlc.close) / nifty.ohlc.close) * 100 : 0;
   const bankNiftyReturnPct = bankNifty ? ((bankNifty.last_price - bankNifty.ohlc.close) / bankNifty.ohlc.close) * 100 : 0;
   const niftyAboveVwap = nifty ? nifty.last_price > nifty.average_price : false;
@@ -266,24 +266,55 @@ function regimeFromIndices(nifty, bankNifty, pctStocksAboveVwap) {
   return { regime, score: Math.round(score), niftyReturnPct, bankNiftyReturnPct, niftyAboveVwap, bankNiftyAboveVwap };
 }
 const REGIME_BULLISHNESS = { STRONG_BULLISH: 100, BULLISH: 75, NEUTRAL: 50, BEARISH: 25, STRONG_BEARISH: 0 };
-function regimeAlignmentScore(regime, direction) {
+export function regimeAlignmentScore(regime, direction) {
   const s = REGIME_BULLISHNESS[regime];
   return direction === 'LONG' ? s : 100 - s;
 }
-function rvolScoreFor(rvol) {
+export function rvolScoreFor(rvol) {
   if (rvol == null) return 40;
   if (rvol < 0.75) return 20; if (rvol < 1.0) return 45; if (rvol < 1.5) return 65; if (rvol < 2.0) return 85; return 95;
 }
-function vwapPositionScore(lastPrice, avgPrice) {
+export function vwapPositionScore(lastPrice, avgPrice) {
   if (!avgPrice) return 50;
   return Math.round(clamp(50 + ((lastPrice - avgPrice) / avgPrice) * 100 * 15, 0, 100));
 }
-function relativeStrengthScoreFor(stockReturnPct, indexReturnPct) {
+export function relativeStrengthScoreFor(stockReturnPct, indexReturnPct) {
   const rs = clamp(stockReturnPct - indexReturnPct, -10, 10);
   return clamp(Math.round(50 + rs * 5), 0, 100);
 }
 
-const CHECKLIST_LABEL = {
+const MIN_SECTOR_MEMBERS = 3;
+
+/**
+ * Cross-sectional sector strength — ranked against every other sector
+ * present right now (in the given `entries`), not a fixed bar. `entries`
+ * needs only `{ sector, returnPct, aboveVwap }` per stock; a sector with
+ * fewer than MIN_SECTOR_MEMBERS members isn't ranked (too few members to
+ * mean anything) and its stocks fall back to a neutral 50 score.
+ */
+export function computeSectorScores(entries) {
+  const bySector = new Map();
+  for (const e of entries) { if (!e.sector) continue; const l = bySector.get(e.sector) ?? []; l.push(e); bySector.set(e.sector, l); }
+  const composite = new Map();
+  for (const [sector, members] of bySector) {
+    if (members.length < MIN_SECTOR_MEMBERS) continue;
+    const avgReturn = members.reduce((s, m) => s + m.returnPct, 0) / members.length;
+    const pctAbove = (members.filter((m) => m.aboveVwap).length / members.length) * 100;
+    composite.set(sector, avgReturn * 0.7 + (pctAbove - 50) * 0.3);
+  }
+  const compositeVals = [...composite.values()];
+  const lo = compositeVals.length ? Math.min(...compositeVals) : null;
+  const hi = compositeVals.length ? Math.max(...compositeVals) : null;
+  const scoreMap = new Map();
+  for (const [sector, comp] of composite) scoreMap.set(sector, hi === lo ? 50 : Math.round(((comp - lo) / (hi - lo)) * 100));
+  return scoreMap;
+}
+export function sectorScoreFor(sector, scoreMap) {
+  if (!sector) return 50;
+  return scoreMap.get(sector) ?? 50;
+}
+
+export const CHECKLIST_LABEL = {
   regimeSupportive: 'Market regime supportive', sectorSupportive: 'Sector supportive',
   relativeStrengthStrong: 'Strong relative strength', vwapAligned: 'Price aligned with VWAP',
   trendAligned: 'Intraday trend aligned (EMA9/20)', validSetup: 'Valid setup structure',
@@ -291,11 +322,88 @@ const CHECKLIST_LABEL = {
   rrAcceptable: 'Risk/reward acceptable', notExtended: 'Not excessively extended',
 };
 
-function chunk(arr, size) { const out = []; for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size)); return out; }
+export function chunk(arr, size) { const out = []; for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size)); return out; }
+
+/**
+ * Evaluates one candidate's setup/signal/trade-plan given its point-in-
+ * time bar history — the SINGLE function both the live scan (on today's
+ * bars-so-far) and the backtest engine (on a historical bars[0..i]
+ * slice) call, so the two can never evaluate a signal differently.
+ * `rankFactors`/`rvol` are the ranking-pass outputs the caller already
+ * computed (relativeStrength, volume, vwapPosition, regimeAlignment,
+ * sectorStrength); this function only adds the setup-detection/
+ * checklist/trade-plan layer on top.
+ */
+export function evaluateIntradaySignal({ bars, direction, regimeInfo, rankFactors, rvol, settings }) {
+  const closes = bars.map((b) => b.c);
+  const ema9 = ema(closes, 9), ema20 = ema(closes, 20), atr14 = atr(bars, Math.min(14, bars.length - 1 || 1));
+  const vwapSeries = computeSessionVWAP(bars);
+  const or = computeOpeningRange(bars);
+  const last = bars[bars.length - 1];
+
+  const orSig = or ? detectORB(bars, or, direction) : { fired: false, quality: 0 };
+  const vwapSig = detectVwapPullback(bars, vwapSeries, direction);
+  const emaSig = detectEmaTrendContinuation(bars, ema9, ema20, direction);
+  const breakoutSig = detectBreakout(bars, direction);
+  const retestSig = detectBreakoutRetest(bars, direction);
+  const setups = [
+    { type: 'ORB', ...orSig }, { type: 'VWAP_PULLBACK', ...vwapSig }, { type: 'EMA_TREND_CONTINUATION', ...emaSig },
+    { type: 'BREAKOUT', ...breakoutSig }, { type: 'BREAKOUT_RETEST', ...retestSig },
+  ].filter((s) => s.fired).sort((a, b) => b.quality - a.quality);
+  const bestSetup = setups[0] ?? null;
+
+  const momentumScore = momentumAccelerationScore(bars, direction);
+  const vwapRel = classifyVwapRelationship(last.c, vwapSeries);
+  const vwapAligned = direction === 'LONG' ? (vwapRel === 'ABOVE_RISING' || vwapRel === 'ABOVE_FALLING') : (vwapRel === 'BELOW_RISING' || vwapRel === 'BELOW_FALLING');
+  const trendAligned = ema9[ema9.length - 1] != null && ema20[ema20.length - 1] != null
+    && (direction === 'LONG' ? ema9[ema9.length - 1] > ema20[ema20.length - 1] : ema9[ema9.length - 1] < ema20[ema20.length - 1]);
+  const currentAtr = atr14[atr14.length - 1];
+  const extension = computeExtension(last.c, vwapSeries[vwapSeries.length - 1], ema9[ema9.length - 1] ?? last.c, currentAtr, settings.max_extension_atr ?? 2.5);
+
+  const baseRange = detectConsolidationRange(bars.slice(0, -1));
+  let stop = null;
+  if (bestSetup?.type === 'ORB' && or) stop = direction === 'LONG' ? or.low : or.high;
+  else if ((bestSetup?.type === 'BREAKOUT' || bestSetup?.type === 'BREAKOUT_RETEST') && baseRange) stop = direction === 'LONG' ? baseRange.low : baseRange.high;
+  else if (currentAtr) stop = direction === 'LONG' ? vwapSeries[vwapSeries.length - 1] - 0.5 * currentAtr : vwapSeries[vwapSeries.length - 1] + 0.5 * currentAtr;
+  const entry = last.c;
+  const riskPerShare = stop != null ? Math.abs(entry - stop) : null;
+  const structuralTarget = currentAtr ? (direction === 'LONG' ? entry + 2 * currentAtr : entry - 2 * currentAtr) : null;
+  const riskReward = riskPerShare && structuralTarget ? Math.abs(structuralTarget - entry) / riskPerShare : null;
+  const target1 = riskPerShare != null ? (direction === 'LONG' ? entry + riskPerShare : entry - riskPerShare) : null;
+  const target2 = riskPerShare != null ? (direction === 'LONG' ? entry + 2 * riskPerShare : entry - 2 * riskPerShare) : null;
+
+  const checklist = {
+    regimeSupportive: regimeAlignmentScore(regimeInfo.regime, direction) >= 50,
+    sectorSupportive: rankFactors.sectorStrength >= 50,
+    relativeStrengthStrong: rankFactors.relativeStrength >= 65,
+    vwapAligned,
+    trendAligned,
+    validSetup: !!bestSetup,
+    rvolConfirms: rvol != null && rvol >= (settings.min_rvol ?? 1.0),
+    stopLogical: riskPerShare != null && riskPerShare > 0,
+    rrAcceptable: riskReward != null && riskReward >= (settings.min_risk_reward ?? 1.5),
+    notExtended: !extension.extended,
+  };
+  const allPass = Object.values(checklist).every(Boolean);
+  const finalScore = Math.round(
+    rankFactors.relativeStrength * 0.20 + momentumScore * 0.15 + rankFactors.volume * 0.15
+    + (bestSetup?.quality ?? 0) * 0.15 + rankFactors.vwapPosition * 0.10
+    + rankFactors.regimeAlignment * 0.10 + rankFactors.sectorStrength * 0.10 + 100 * 0.05,
+  );
+  const confidence = finalScore >= 90 ? 'A_PLUS' : finalScore >= 80 ? 'A' : finalScore >= 70 ? 'B' : finalScore >= 60 ? 'WATCH' : 'IGNORE';
+  const status = allPass && finalScore >= (settings.min_score ?? 70) ? 'SIGNAL_CONFIRMED' : bestSetup ? 'FORMING' : 'WATCH';
+  const confirmations = Object.keys(checklist).filter((k) => checklist[k]).map((k) => CHECKLIST_LABEL[k]);
+  const failures = Object.keys(checklist).filter((k) => !checklist[k]).map((k) => CHECKLIST_LABEL[k]);
+
+  return {
+    status, score: finalScore, confidence, setupType: bestSetup?.type ?? null,
+    entry, stop, target1, target2, riskReward, confirmations, failures,
+  };
+}
 
 // ---- Execution Engine (paper mode) — ported from src/intraday/risk.ts ----
 
-function computePositionSize({ capital, riskPct, entry, stop, maxCapitalAllocationPct }) {
+export function computePositionSize({ capital, riskPct, entry, stop, maxCapitalAllocationPct }) {
   const riskAmount = capital * (riskPct / 100);
   const riskPerShare = Math.abs(entry - stop);
   if (riskPerShare <= 0 || entry <= 0) return { shares: 0, riskAmount, capitalUsed: 0, limitedBy: 'NEITHER' };
@@ -306,7 +414,7 @@ function computePositionSize({ capital, riskPct, entry, stop, maxCapitalAllocati
   const limitedBy = sharesByRisk === sharesByCapital ? 'NEITHER' : shares === sharesByRisk ? 'RISK' : 'CAPITAL';
   return { shares, riskAmount, capitalUsed: shares * entry, limitedBy };
 }
-function checkDailyRiskLimits({ dailyPnl, capital, maxDailyLossPct, tradesToday, maxTrades, consecutiveLosses, maxConsecutiveLosses }) {
+export function checkDailyRiskLimits({ dailyPnl, capital, maxDailyLossPct, tradesToday, maxTrades, consecutiveLosses, maxConsecutiveLosses }) {
   const maxLossAmount = capital * (maxDailyLossPct / 100);
   if (dailyPnl <= -maxLossAmount) return { locked: true, reason: 'MAX_DAILY_LOSS' };
   if (tradesToday >= maxTrades) return { locked: true, reason: 'MAX_TRADES' };
@@ -374,7 +482,7 @@ async function tryOpenPaperPosition(supabase, settings, ctx) {
 
 // ---- Position Management + Exit Engine ----
 
-function parseSquareOffMinutes(str) {
+export function parseSquareOffMinutes(str) {
   const [hh, mm] = String(str || '15:15').split(':').map(Number);
   return hh * 60 + mm;
 }
@@ -578,19 +686,7 @@ async function handleScan(supabase, req, res) {
     const pctStocksAboveVwap = enriched.length ? (enriched.filter((e) => e.aboveVwap).length / enriched.length) * 100 : null;
     const regimeInfo = regimeFromIndices(nifty, bankNifty, pctStocksAboveVwap);
 
-    const bySector = new Map();
-    for (const e of enriched) { if (!e.sector) continue; const l = bySector.get(e.sector) ?? []; l.push(e); bySector.set(e.sector, l); }
-    const sectorComposite = new Map();
-    for (const [sector, members] of bySector) {
-      if (members.length < 3) continue;
-      const avgReturn = members.reduce((s, m) => s + m.returnPct, 0) / members.length;
-      const pctAbove = (members.filter((m) => m.aboveVwap).length / members.length) * 100;
-      sectorComposite.set(sector, avgReturn * 0.7 + (pctAbove - 50) * 0.3);
-    }
-    const compositeVals = [...sectorComposite.values()];
-    const lo = compositeVals.length ? Math.min(...compositeVals) : null, hi = compositeVals.length ? Math.max(...compositeVals) : null;
-    const sectorScoreMap = new Map();
-    for (const [sector, comp] of sectorComposite) sectorScoreMap.set(sector, hi === lo ? 50 : Math.round(((comp - lo) / (hi - lo)) * 100));
+    const sectorScoreMap = computeSectorScores(enriched);
 
     const ranked = enriched.map((e) => {
       const direction = e.returnPct >= 0 ? 'LONG' : 'SHORT';
@@ -599,7 +695,7 @@ async function handleScan(supabase, req, res) {
         volume: rvolScoreFor(e.rvol),
         vwapPosition: vwapPositionScore(e.lastPrice, e.averagePrice),
         regimeAlignment: regimeAlignmentScore(regimeInfo.regime, direction),
-        sectorStrength: e.sector ? (sectorScoreMap.get(e.sector) ?? 50) : 50,
+        sectorStrength: sectorScoreFor(e.sector, sectorScoreMap),
       };
       const rankScore = Math.round(factors.relativeStrength * 0.30 + factors.volume * 0.25 + factors.vwapPosition * 0.20 + factors.regimeAlignment * 0.15 + factors.sectorStrength * 0.10);
       return { ...e, direction, rankFactors: factors, rankScore };
@@ -626,71 +722,8 @@ async function handleScan(supabase, req, res) {
 
       if (bars.length < 4) { withSignals.push({ ...cand, signal: { status: 'WATCH', note: 'Not enough of today\'s bars yet.' } }); continue; }
 
-      const closes = bars.map((b) => b.c);
-      const ema9 = ema(closes, 9), ema20 = ema(closes, 20), atr14 = atr(bars, Math.min(14, bars.length - 1 || 1));
-      const vwapSeries = computeSessionVWAP(bars);
-      const or = computeOpeningRange(bars);
-      const last = bars[bars.length - 1];
       const direction = cand.direction;
-
-      const orSig = or ? detectORB(bars, or, direction) : { fired: false, quality: 0 };
-      const vwapSig = detectVwapPullback(bars, vwapSeries, direction);
-      const emaSig = detectEmaTrendContinuation(bars, ema9, ema20, direction);
-      const breakoutSig = detectBreakout(bars, direction);
-      const retestSig = detectBreakoutRetest(bars, direction);
-      const setups = [
-        { type: 'ORB', ...orSig }, { type: 'VWAP_PULLBACK', ...vwapSig }, { type: 'EMA_TREND_CONTINUATION', ...emaSig },
-        { type: 'BREAKOUT', ...breakoutSig }, { type: 'BREAKOUT_RETEST', ...retestSig },
-      ].filter((s) => s.fired).sort((a, b) => b.quality - a.quality);
-      const bestSetup = setups[0] ?? null;
-
-      const momentumScore = momentumAccelerationScore(bars, direction);
-      const vwapRel = classifyVwapRelationship(last.c, vwapSeries);
-      const vwapAligned = direction === 'LONG' ? (vwapRel === 'ABOVE_RISING' || vwapRel === 'ABOVE_FALLING') : (vwapRel === 'BELOW_RISING' || vwapRel === 'BELOW_FALLING');
-      const trendAligned = ema9[ema9.length - 1] != null && ema20[ema20.length - 1] != null
-        && (direction === 'LONG' ? ema9[ema9.length - 1] > ema20[ema20.length - 1] : ema9[ema9.length - 1] < ema20[ema20.length - 1]);
-      const currentAtr = atr14[atr14.length - 1];
-      const extension = computeExtension(last.c, vwapSeries[vwapSeries.length - 1], ema9[ema9.length - 1] ?? last.c, currentAtr, settings.max_extension_atr ?? 2.5);
-
-      const baseRange = detectConsolidationRange(bars.slice(0, -1));
-      let stop = null;
-      if (bestSetup?.type === 'ORB' && or) stop = direction === 'LONG' ? or.low : or.high;
-      else if ((bestSetup?.type === 'BREAKOUT' || bestSetup?.type === 'BREAKOUT_RETEST') && baseRange) stop = direction === 'LONG' ? baseRange.low : baseRange.high;
-      else if (currentAtr) stop = direction === 'LONG' ? vwapSeries[vwapSeries.length - 1] - 0.5 * currentAtr : vwapSeries[vwapSeries.length - 1] + 0.5 * currentAtr;
-      const entry = last.c;
-      const riskPerShare = stop != null ? Math.abs(entry - stop) : null;
-      const structuralTarget = currentAtr ? (direction === 'LONG' ? entry + 2 * currentAtr : entry - 2 * currentAtr) : null;
-      const riskReward = riskPerShare && structuralTarget ? Math.abs(structuralTarget - entry) / riskPerShare : null;
-      const target1 = riskPerShare != null ? (direction === 'LONG' ? entry + riskPerShare : entry - riskPerShare) : null;
-      const target2 = riskPerShare != null ? (direction === 'LONG' ? entry + 2 * riskPerShare : entry - 2 * riskPerShare) : null;
-
-      const checklist = {
-        regimeSupportive: regimeAlignmentScore(regimeInfo.regime, direction) >= 50,
-        sectorSupportive: cand.rankFactors.sectorStrength >= 50,
-        relativeStrengthStrong: cand.rankFactors.relativeStrength >= 65,
-        vwapAligned,
-        trendAligned,
-        validSetup: !!bestSetup,
-        rvolConfirms: cand.rvol != null && cand.rvol >= (settings.min_rvol ?? 1.0),
-        stopLogical: riskPerShare != null && riskPerShare > 0,
-        rrAcceptable: riskReward != null && riskReward >= (settings.min_risk_reward ?? 1.5),
-        notExtended: !extension.extended,
-      };
-      const allPass = Object.values(checklist).every(Boolean);
-      const finalScore = Math.round(
-        cand.rankFactors.relativeStrength * 0.20 + momentumScore * 0.15 + cand.rankFactors.volume * 0.15
-        + (bestSetup?.quality ?? 0) * 0.15 + cand.rankFactors.vwapPosition * 0.10
-        + cand.rankFactors.regimeAlignment * 0.10 + cand.rankFactors.sectorStrength * 0.10 + 100 * 0.05,
-      );
-      const confidence = finalScore >= 90 ? 'A_PLUS' : finalScore >= 80 ? 'A' : finalScore >= 70 ? 'B' : finalScore >= 60 ? 'WATCH' : 'IGNORE';
-      const status = allPass && finalScore >= (settings.min_score ?? 70) ? 'SIGNAL_CONFIRMED' : bestSetup ? 'FORMING' : 'WATCH';
-      const confirmations = Object.keys(checklist).filter((k) => checklist[k]).map((k) => CHECKLIST_LABEL[k]);
-      const failures = Object.keys(checklist).filter((k) => !checklist[k]).map((k) => CHECKLIST_LABEL[k]);
-
-      const signal = {
-        status, score: finalScore, confidence, setupType: bestSetup?.type ?? null,
-        entry, stop, target1, target2, riskReward, confirmations, failures,
-      };
+      const signal = evaluateIntradaySignal({ bars, direction, regimeInfo, rankFactors: cand.rankFactors, rvol: cand.rvol, settings });
       withSignals.push({ ...cand, signal });
 
       if (status === 'SIGNAL_CONFIRMED') {

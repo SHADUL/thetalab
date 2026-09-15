@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { computeSessionVWAP, classifyVwapRelationship } from '../vwap.ts';
 import { classifyMarketRegime, regimeAlignmentScore } from '../regime.ts';
 import { intradayRelativeStrengthScore } from '../relativeStrength.ts';
+import { momentumAccelerationScore } from '../momentum.ts';
 import { estimateRVOL, classifyRVOL, sessionFractionElapsed } from '../rvol.ts';
 import { ema, atr, istMinutesOfDay } from '../indicators.ts';
 import { computeOpeningRange, detectORB, detectVwapPullback, detectEmaTrendContinuation } from '../setups.ts';
@@ -126,6 +127,20 @@ test('intradayRelativeStrengthScore: modest outperformance scores above neutral 
 
 test('intradayRelativeStrengthScore: no windows returns neutral 50, not a guess', () => {
   assert.equal(intradayRelativeStrengthScore([]), 50);
+});
+
+/* ---------------- momentum.ts ---------------- */
+
+test('momentumAccelerationScore: an accelerating uptrend outscores a decelerating one at the same level', () => {
+  const flatThenAccel = [bar(10, 0, 100), bar(10, 5, 100.2), bar(10, 10, 100.4), bar(10, 15, 100.7), bar(10, 20, 101.2), bar(10, 25, 102), bar(10, 30, 103.2)];
+  const strongThenFade = [bar(10, 0, 100), bar(10, 5, 101), bar(10, 10, 102), bar(10, 15, 102.7), bar(10, 20, 103.2), bar(10, 25, 103.4), bar(10, 30, 103.5)];
+  const accelScore = momentumAccelerationScore(flatThenAccel, 'LONG');
+  const fadeScore = momentumAccelerationScore(strongThenFade, 'LONG');
+  assert.ok(accelScore > fadeScore, `expected accelerating (${accelScore}) > fading (${fadeScore})`);
+});
+
+test('momentumAccelerationScore: not enough bars returns neutral 50', () => {
+  assert.equal(momentumAccelerationScore([bar(10, 0, 100), bar(10, 5, 101)], 'LONG'), 50);
 });
 
 /* ---------------- rvol.ts ---------------- */

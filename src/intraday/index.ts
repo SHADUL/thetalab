@@ -3,6 +3,7 @@ export * from './indicators.ts';
 export * from './vwap.ts';
 export * from './regime.ts';
 export * from './relativeStrength.ts';
+export * from './momentum.ts';
 export * from './rvol.ts';
 export * from './setups.ts';
 export * from './extension.ts';

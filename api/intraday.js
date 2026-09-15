@@ -334,21 +334,27 @@ async function tryOpenPaperPosition(supabase, settings, ctx) {
   if (!sizing.shares || sizing.shares <= 0) return false;
 
   try {
-    await supabase.from('intraday_positions').insert({
+    // supabase-js does NOT throw on a query/write error (missing table, RLS
+    // denial, constraint violation) — it resolves with { data: null, error }.
+    // Both the insert and the upsert's `error` must be checked explicitly;
+    // relying on try/catch alone would silently report success on a no-op.
+    const { error: insertError } = await supabase.from('intraday_positions').insert({
       signal_id: signalId, symbol, sector, direction, status: 'OPEN', mode: 'PAPER',
       entry_price: signal.entry, shares: sizing.shares, stop: signal.stop, target1: signal.target1, target2: signal.target2,
       score_at_entry: signal.score, setup_type: signal.setupType, market_regime_at_entry: regime,
     });
-    await supabase.from('intraday_daily_stats').upsert({
+    if (insertError) return false;
+    const { error: statsError } = await supabase.from('intraday_daily_stats').upsert({
       date: today,
       trades_taken: (dailyStats?.trades_taken ?? 0) + 1,
       wins: dailyStats?.wins ?? 0, losses: dailyStats?.losses ?? 0,
       gross_pnl: dailyStats?.gross_pnl ?? 0, consecutive_losses: dailyStats?.consecutive_losses ?? 0,
       locked: dailyStats?.locked ?? false, lock_reason: dailyStats?.lock_reason ?? null,
     });
+    if (statsError) return true; // the position itself was opened; the daily counter just didn't bump — still surfaced honestly via `open`
     return true;
   } catch {
-    return false; // resilient — a failed paper-open just skips this candidate, the scan itself still succeeds
+    return false; // network-level failure — the position was not opened
   }
 }
 
@@ -453,14 +459,20 @@ async function handleScan(supabase, req, res) {
     let executionAvailable = false;
     if (executionOn) {
       try {
-        const [{ data: posRows }, { data: statsRow }] = await Promise.all([
+        // supabase-js resolves with { data: null, error } rather than
+        // throwing on a missing table — both must be error-checked
+        // explicitly, or a not-yet-migrated schema would be silently
+        // treated as "available with zero rows" instead of "unavailable".
+        const [posResult, statsResult] = await Promise.all([
           supabase.from('intraday_positions').select('symbol,sector').eq('status', 'OPEN'),
           supabase.from('intraday_daily_stats').select('*').eq('date', today).maybeSingle(),
         ]);
-        openPositions = posRows ?? [];
-        dailyStats = statsRow ?? null;
-        executionAvailable = true;
-      } catch { /* migration not run yet — execution stays off, scan itself still works */ }
+        if (!posResult.error && !statsResult.error) {
+          openPositions = posResult.data ?? [];
+          dailyStats = statsResult.data ?? null;
+          executionAvailable = true;
+        }
+      } catch { /* network-level failure — execution stays off, scan itself still works */ }
     }
 
     const withSignals = [];
@@ -590,11 +602,15 @@ async function handleScan(supabase, req, res) {
 
 async function handlePositions(supabase, req, res) {
   try {
-    const [{ data: open }, { data: closed }] = await Promise.all([
+    const [openResult, closedResult] = await Promise.all([
       supabase.from('intraday_positions').select('*').eq('status', 'OPEN').order('entry_time', { ascending: false }),
       supabase.from('intraday_positions').select('*').eq('status', 'CLOSED').order('exit_time', { ascending: false }).limit(20),
     ]);
-    res.status(200).json({ open: open ?? [], closed: closed ?? [] });
+    if (openResult.error || closedResult.error) {
+      res.status(200).json({ open: [], closed: [], error: 'not_available', message: 'Run the intraday schema migration to enable paper positions.' });
+      return;
+    }
+    res.status(200).json({ open: openResult.data ?? [], closed: closedResult.data ?? [] });
   } catch {
     res.status(200).json({ open: [], closed: [], error: 'not_available', message: 'Run the intraday schema migration to enable paper positions.' });
   }

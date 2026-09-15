@@ -23,6 +23,19 @@
  * this mirrors it.
  *
  * `?resource=settings` — GET/PUT the singleton intraday_settings row.
+ *
+ * `?resource=positions` — GET open + recently-closed intraday_positions.
+ *
+ * Execution Engine (paper mode) — when intraday_settings.enabled is true
+ * and execution_mode is 'PAPER', a SIGNAL_CONFIRMED candidate is checked
+ * against the Risk Engine's daily limits and open-position caps
+ * (max_open_positions, max_positions_per_sector, one position per
+ * symbol), sized via computePositionSize, and opened as a paper fill at
+ * the signal's entry price — all inside the same scan tick, no separate
+ * cron. ALERT/SEMI_AUTO/AUTO execution modes are not implemented; only
+ * PAPER auto-opens a position. Position Management (trailing stops) and
+ * the Exit Engine (target/stop/EOD square-off) are not built yet — paper
+ * positions stay OPEN until that pass exists.
  */
 import { createClient } from '@supabase/supabase-js';
 
@@ -36,7 +49,12 @@ const MARKET_OPEN_MIN = 9 * 60 + 15;
 const MARKET_CLOSE_MIN = 15 * 60 + 30;
 const OR_END_MIN = 9 * 60 + 30;
 
-const DEFAULT_SETTINGS = { min_score: 70, min_risk_reward: 1.5, min_rvol: 1.0, max_extension_atr: 2.5 };
+const DEFAULT_SETTINGS = {
+  min_score: 70, min_risk_reward: 1.5, min_rvol: 1.0, max_extension_atr: 2.5,
+  enabled: false, execution_mode: 'PAPER', capital: 0, risk_pct_per_trade: 0.5,
+  max_capital_pct_per_trade: 20, max_daily_loss_pct: 2, max_trades_per_day: 5,
+  max_consecutive_losses: 3, max_open_positions: 3, max_positions_per_sector: 1,
+};
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 function nowMinutesIST() {
@@ -261,6 +279,79 @@ const CHECKLIST_LABEL = {
 
 function chunk(arr, size) { const out = []; for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size)); return out; }
 
+// ---- Execution Engine (paper mode) — ported from src/intraday/risk.ts ----
+
+function computePositionSize({ capital, riskPct, entry, stop, maxCapitalAllocationPct }) {
+  const riskAmount = capital * (riskPct / 100);
+  const riskPerShare = Math.abs(entry - stop);
+  if (riskPerShare <= 0 || entry <= 0) return { shares: 0, riskAmount, capitalUsed: 0, limitedBy: 'NEITHER' };
+  const sharesByRisk = Math.floor(riskAmount / riskPerShare);
+  const maxCapital = capital * (maxCapitalAllocationPct / 100);
+  const sharesByCapital = Math.floor(maxCapital / entry);
+  const shares = Math.max(0, Math.min(sharesByRisk, sharesByCapital));
+  const limitedBy = sharesByRisk === sharesByCapital ? 'NEITHER' : shares === sharesByRisk ? 'RISK' : 'CAPITAL';
+  return { shares, riskAmount, capitalUsed: shares * entry, limitedBy };
+}
+function checkDailyRiskLimits({ dailyPnl, capital, maxDailyLossPct, tradesToday, maxTrades, consecutiveLosses, maxConsecutiveLosses }) {
+  const maxLossAmount = capital * (maxDailyLossPct / 100);
+  if (dailyPnl <= -maxLossAmount) return { locked: true, reason: 'MAX_DAILY_LOSS' };
+  if (tradesToday >= maxTrades) return { locked: true, reason: 'MAX_TRADES' };
+  if (consecutiveLosses >= maxConsecutiveLosses) return { locked: true, reason: 'MAX_CONSECUTIVE_LOSSES' };
+  return { locked: false, reason: null };
+}
+
+/**
+ * Opens a paper position for a SIGNAL_CONFIRMED candidate, gated by the
+ * Risk Engine's daily limits and open-position caps. Mutates nothing —
+ * returns whether it opened one so the caller can update its in-memory
+ * openPositions/dailyStats view for the rest of this scan pass (so a
+ * second confirmed signal in the same tick sees the first one's effect
+ * without a redundant DB round-trip).
+ */
+async function tryOpenPaperPosition(supabase, settings, ctx) {
+  const { symbol, sector, direction, signal, signalId, regime, today, openPositions, dailyStats } = ctx;
+
+  const limits = checkDailyRiskLimits({
+    dailyPnl: dailyStats?.gross_pnl ?? 0,
+    capital: settings.capital,
+    maxDailyLossPct: settings.max_daily_loss_pct,
+    tradesToday: dailyStats?.trades_taken ?? 0,
+    maxTrades: settings.max_trades_per_day,
+    consecutiveLosses: dailyStats?.consecutive_losses ?? 0,
+    maxConsecutiveLosses: settings.max_consecutive_losses,
+  });
+  if (limits.locked || dailyStats?.locked) return false;
+
+  if (openPositions.length >= settings.max_open_positions) return false;
+  if (openPositions.some((p) => p.symbol === symbol)) return false;
+  if (sector && openPositions.filter((p) => p.sector === sector).length >= settings.max_positions_per_sector) return false;
+
+  if (signal.entry == null || signal.stop == null) return false;
+  const sizing = computePositionSize({
+    capital: settings.capital, riskPct: settings.risk_pct_per_trade,
+    entry: signal.entry, stop: signal.stop, maxCapitalAllocationPct: settings.max_capital_pct_per_trade,
+  });
+  if (!sizing.shares || sizing.shares <= 0) return false;
+
+  try {
+    await supabase.from('intraday_positions').insert({
+      signal_id: signalId, symbol, sector, direction, status: 'OPEN', mode: 'PAPER',
+      entry_price: signal.entry, shares: sizing.shares, stop: signal.stop, target1: signal.target1, target2: signal.target2,
+      score_at_entry: signal.score, setup_type: signal.setupType, market_regime_at_entry: regime,
+    });
+    await supabase.from('intraday_daily_stats').upsert({
+      date: today,
+      trades_taken: (dailyStats?.trades_taken ?? 0) + 1,
+      wins: dailyStats?.wins ?? 0, losses: dailyStats?.losses ?? 0,
+      gross_pnl: dailyStats?.gross_pnl ?? 0, consecutive_losses: dailyStats?.consecutive_losses ?? 0,
+      locked: dailyStats?.locked ?? false, lock_reason: dailyStats?.lock_reason ?? null,
+    });
+    return true;
+  } catch {
+    return false; // resilient — a failed paper-open just skips this candidate, the scan itself still succeeds
+  }
+}
+
 async function handleScan(supabase, req, res) {
   const apiKey = process.env.KITE_API_KEY;
   const { data: session } = await supabase.from('kite_session').select('access_token').eq('id', 1).maybeSingle();
@@ -356,6 +447,22 @@ async function handleScan(supabase, req, res) {
     const nowIst = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
     const to = `${today} ${String(nowIst.getHours()).padStart(2, '0')}:${String(nowIst.getMinutes()).padStart(2, '0')}:00`;
 
+    const executionOn = settings.enabled && settings.execution_mode === 'PAPER';
+    let openPositions = [];
+    let dailyStats = null;
+    let executionAvailable = false;
+    if (executionOn) {
+      try {
+        const [{ data: posRows }, { data: statsRow }] = await Promise.all([
+          supabase.from('intraday_positions').select('symbol,sector').eq('status', 'OPEN'),
+          supabase.from('intraday_daily_stats').select('*').eq('date', today).maybeSingle(),
+        ]);
+        openPositions = posRows ?? [];
+        dailyStats = statsRow ?? null;
+        executionAvailable = true;
+      } catch { /* migration not run yet — execution stays off, scan itself still works */ }
+    }
+
     const withSignals = [];
     for (const cand of shortlist) {
       let bars = [];
@@ -437,13 +544,30 @@ async function handleScan(supabase, req, res) {
       withSignals.push({ ...cand, signal });
 
       if (status === 'SIGNAL_CONFIRMED') {
+        let signalId = null;
         try {
-          await supabase.from('intraday_signals').insert({
+          const { data: inserted } = await supabase.from('intraday_signals').insert({
             symbol: cand.symbol, sector: cand.sector, direction, status, score: finalScore, confidence,
             setup_type: bestSetup?.type ?? null, entry, stop, target1, target2, risk_reward: riskReward,
             market_regime: regimeInfo.regime, signal_components: { rankFactors: cand.rankFactors, checklist, momentumScore },
-          });
+          }).select('id').single();
+          signalId = inserted?.id ?? null;
         } catch { /* migration not run yet — signal still returned live, just not journaled */ }
+
+        if (executionAvailable) {
+          const opened = await tryOpenPaperPosition(supabase, settings, {
+            symbol: cand.symbol, sector: cand.sector, direction, signal, signalId, regime: regimeInfo.regime, today,
+            openPositions, dailyStats,
+          });
+          if (opened) {
+            openPositions = [...openPositions, { symbol: cand.symbol, sector: cand.sector }];
+            dailyStats = {
+              gross_pnl: dailyStats?.gross_pnl ?? 0, wins: dailyStats?.wins ?? 0, losses: dailyStats?.losses ?? 0,
+              consecutive_losses: dailyStats?.consecutive_losses ?? 0, locked: dailyStats?.locked ?? false,
+              lock_reason: dailyStats?.lock_reason ?? null, trades_taken: (dailyStats?.trades_taken ?? 0) + 1,
+            };
+          }
+        }
       }
     }
 
@@ -461,6 +585,18 @@ async function handleScan(supabase, req, res) {
     res.status(200).json({ asOf: new Date().toISOString(), regime: regimeInfo, universeSize: capped.length, candidates: finalList });
   } catch (err) {
     res.status(502).json({ error: 'kite_error', message: err.message });
+  }
+}
+
+async function handlePositions(supabase, req, res) {
+  try {
+    const [{ data: open }, { data: closed }] = await Promise.all([
+      supabase.from('intraday_positions').select('*').eq('status', 'OPEN').order('entry_time', { ascending: false }),
+      supabase.from('intraday_positions').select('*').eq('status', 'CLOSED').order('exit_time', { ascending: false }).limit(20),
+    ]);
+    res.status(200).json({ open: open ?? [], closed: closed ?? [] });
+  } catch {
+    res.status(200).json({ open: [], closed: [], error: 'not_available', message: 'Run the intraday schema migration to enable paper positions.' });
   }
 }
 
@@ -490,5 +626,6 @@ export default async function handler(req, res) {
   const resource = String(req.query.resource || 'scan').toLowerCase();
   if (resource === 'scan') { await handleScan(supabase, req, res); return; }
   if (resource === 'settings') { await handleSettings(supabase, req, res); return; }
+  if (resource === 'positions') { await handlePositions(supabase, req, res); return; }
   res.status(400).json({ error: 'bad_request', message: `Unknown resource "${resource}".` });
 }

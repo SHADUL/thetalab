@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Lightning, Info } from "@phosphor-icons/react";
+import { Lightning, Info, Wallet } from "@phosphor-icons/react";
 import { inr, pctSigned, toneClass } from "./swingFormat.js";
 import { ScoreBadge } from "./ScoreWidgets.jsx";
 import { kiteLoginUrl, assumedKiteConnected, consumeKiteRedirectResult } from "../lib/kiteClient.js";
@@ -20,16 +20,25 @@ const SETUP_LABEL = {
   BREAKOUT: "Breakout", BREAKOUT_RETEST: "Breakout Retest",
 };
 
+const POSITION_STATUS_TONE = { OPEN: "muted", CLOSED: "muted" };
+
 /**
- * Intraday Trader — Market Regime + Stock Ranking + Setup/Signal Engine.
- * Ranking runs on the full liquid universe from quote snapshots; the top
- * ~12 ranked candidates then get today's 5-min candle history fetched for
- * real setup detection (ORB/VWAP Pullback/EMA Trend Continuation) and the
- * 12-point entry checklist. Risk sizing and paper execution are built
- * (src/intraday/*.ts, tested) but not yet wired into this live endpoint.
+ * Intraday Trader — Market Regime + Stock Ranking + Setup/Signal Engine +
+ * Execution Engine (paper mode). Ranking runs on the full liquid universe
+ * from quote snapshots; the top ~12 ranked candidates then get today's
+ * 5-min candle history fetched for real setup detection (all 5 ensemble
+ * setups) and the 12-point entry checklist. When paper execution is
+ * enabled below, a "Confirmed" signal is sized by the Risk Engine and
+ * opened as a paper position automatically — no real orders are placed.
+ * Position management (trailing stops) and the Exit Engine (target/stop/
+ * EOD square-off) aren't built yet, so paper positions stay OPEN.
  */
 export default function IntradayTrader() {
   const [data, setData] = useState(null);
+  const [positions, setPositions] = useState({ open: [], closed: [] });
+  const [settings, setSettings] = useState(null);
+  const [settingsDraft, setSettingsDraft] = useState({ enabled: false, capital: 0 });
+  const [savingSettings, setSavingSettings] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [kiteConnected, setKiteConnected] = useState(() => assumedKiteConnected());
@@ -40,13 +49,27 @@ export default function IntradayTrader() {
     if (r) setKiteConnected(r.connected);
   }, []);
 
-  const load = useCallback(() => {
-    fetch("/api/intraday?resource=scan")
+  useEffect(() => {
+    fetch("/api/intraday?resource=settings")
       .then((r) => r.json())
-      .then((body) => {
-        if (body.error) { setError(body.message || body.error); setData(null); return; }
+      .then((s) => {
+        if (!s) return;
+        setSettings(s);
+        setSettingsDraft({ enabled: !!s.enabled, capital: s.capital ?? 0 });
+      })
+      .catch(() => {});
+  }, []);
+
+  const load = useCallback(() => {
+    Promise.all([
+      fetch("/api/intraday?resource=scan").then((r) => r.json()),
+      fetch("/api/intraday?resource=positions").then((r) => r.json()),
+    ])
+      .then(([scanBody, posBody]) => {
+        if (scanBody.error) { setError(scanBody.message || scanBody.error); setData(null); return; }
         setError(null);
-        setData(body);
+        setData(scanBody);
+        setPositions({ open: posBody.open ?? [], closed: posBody.closed ?? [] });
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
@@ -58,8 +81,23 @@ export default function IntradayTrader() {
     return () => clearInterval(timerRef.current);
   }, [load]);
 
+  const saveSettings = () => {
+    setSavingSettings(true);
+    fetch("/api/intraday?resource=settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: settingsDraft.enabled, capital: Number(settingsDraft.capital) || 0, execution_mode: "PAPER" }),
+    })
+      .then((r) => r.json())
+      .then(() => fetch("/api/intraday?resource=settings").then((r) => r.json()))
+      .then((s) => setSettings(s))
+      .catch(() => {})
+      .finally(() => setSavingSettings(false));
+  };
+
   const regime = data?.regime;
   const candidates = data?.candidates ?? [];
+  const priceBySymbol = new Map(candidates.map((c) => [c.symbol, c.price]));
 
   return (
     <div className="p-4 max-w-[1400px] mx-auto">
@@ -73,11 +111,38 @@ export default function IntradayTrader() {
           <a href={kiteLoginUrl()} className="topstep">Connect Kite</a>
         )}
       </div>
-      <p className="text-[11px] text-muted mb-4 max-w-[75ch]">
+      <p className="text-[11px] text-muted mb-3 max-w-[75ch]">
         Live market regime + a liquid-universe ranking, refreshed every 20s while this tab is open. The top-ranked candidates
-        also get real setup detection (ORB / VWAP Pullback / Trend Continuation) against today's 5-min candles — a
-        "Confirmed" signal has passed the full 12-point entry checklist; paper/live execution is not yet wired up.
+        also get real setup detection (ORB / VWAP Pullback / Trend Continuation / Breakout / Breakout Retest) against today's
+        5-min candles — a "Confirmed" signal has passed the full 12-point entry checklist.
       </p>
+
+      <div className="flex items-center gap-4 flex-wrap p-3 rounded-[12px] mb-4" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+        <div className="flex items-center gap-2">
+          <Wallet size={15} weight="bold" className="text-muted" />
+          <span className="text-[11.5px] font-semibold">Paper Execution</span>
+        </div>
+        <label className="flex items-center gap-1.5 text-[11.5px]">
+          <input type="checkbox" checked={settingsDraft.enabled} onChange={(e) => setSettingsDraft((d) => ({ ...d, enabled: e.target.checked }))} />
+          Enabled
+        </label>
+        <label className="flex items-center gap-1.5 text-[11.5px]">
+          Capital
+          <input
+            type="number" min="0" value={settingsDraft.capital}
+            onChange={(e) => setSettingsDraft((d) => ({ ...d, capital: e.target.value }))}
+            className="w-[110px] px-2 py-1 rounded-[8px] n text-[11.5px]"
+            style={{ border: "1px solid var(--c-line)", background: "var(--c-surface-2)" }}
+          />
+        </label>
+        <span className="text-[10.5px] text-faint px-2 py-1 rounded-[6px]" style={{ background: "var(--c-surface-2)" }}>Mode: PAPER only</span>
+        <button onClick={saveSettings} disabled={savingSettings} className="topstep text-[11.5px]">{savingSettings ? "Saving…" : "Save"}</button>
+        {settings && (
+          <span className="text-[10.5px] text-faint">
+            {settings.enabled ? "Live-scanning for confirmed signals to auto-open paper positions." : "Off — signals are shown but no paper positions are opened."}
+          </span>
+        )}
+      </div>
 
       {loading ? (
         <p className="text-[12.5px] text-muted py-10 text-center">Loading…</p>
@@ -165,6 +230,55 @@ export default function IntradayTrader() {
                       </td>
                     </tr>
                   );})}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <h2 className="text-[13px] font-bold mt-5 mb-2">Paper Positions {positions.open.length > 0 ? <span className="font-normal text-muted">({positions.open.length} open)</span> : null}</h2>
+          {positions.open.length === 0 && positions.closed.length === 0 ? (
+            <p className="text-[12.5px] text-muted py-6 text-center">No paper positions yet — enable Paper Execution above to auto-open one when a signal confirms.</p>
+          ) : (
+            <div className="overflow-x-auto rounded-[14px]" style={{ border: "1px solid var(--c-line)" }}>
+              <table className="w-full text-[12px]">
+                <thead>
+                  <tr className="text-muted text-left" style={{ background: "var(--c-surface-2)" }}>
+                    <th className="font-medium py-2 pl-3 pr-2">Stock</th>
+                    <th className="font-medium py-2 pr-2">Setup</th>
+                    <th className="font-medium py-2 pr-2">Direction</th>
+                    <th className="font-medium py-2 pr-2 text-right">Entry</th>
+                    <th className="font-medium py-2 pr-2 text-right">Stop</th>
+                    <th className="font-medium py-2 pr-2 text-right">Target 1</th>
+                    <th className="font-medium py-2 pr-2 text-right">Shares</th>
+                    <th className="font-medium py-2 pr-2">Status</th>
+                    <th className="font-medium py-2 pr-3 text-right">Unrealized P&L</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...positions.open, ...positions.closed].map((p) => {
+                    const livePrice = p.status === "OPEN" ? priceBySymbol.get(p.symbol) : null;
+                    const unrealized = livePrice != null
+                      ? (p.direction === "LONG" ? livePrice - p.entry_price : p.entry_price - livePrice) * p.shares
+                      : p.pnl;
+                    return (
+                      <tr key={p.id} style={{ borderTop: "1px solid var(--c-line)" }}>
+                        <td className="py-2 pl-3 pr-2">
+                          <div className="font-semibold">{p.symbol}</div>
+                          <div className="text-[10.5px] text-faint">{p.sector ?? "—"}</div>
+                        </td>
+                        <td className="py-2 pr-2 text-[11px]">{SETUP_LABEL[p.setup_type] ?? p.setup_type ?? "—"}</td>
+                        <td className={`py-2 pr-2 text-[11px] font-medium ${p.direction === "LONG" ? "text-gain" : "text-loss"}`}>{p.direction}</td>
+                        <td className="py-2 pr-2 text-right n">{inr(p.entry_price)}</td>
+                        <td className="py-2 pr-2 text-right n">{p.stop != null ? inr(p.stop) : "—"}</td>
+                        <td className="py-2 pr-2 text-right n">{p.target1 != null ? inr(p.target1) : "—"}</td>
+                        <td className="py-2 pr-2 text-right n">{p.shares}</td>
+                        <td className={`py-2 pr-2 text-[11px] ${toneClass(POSITION_STATUS_TONE[p.status])}`}>{p.status}{p.exit_reason ? ` · ${p.exit_reason}` : ""}</td>
+                        <td className={`py-2 pr-3 text-right n ${unrealized == null ? "" : unrealized >= 0 ? "text-gain" : "text-loss"}`}>
+                          {unrealized != null ? inr(unrealized) : "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

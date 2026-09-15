@@ -237,11 +237,11 @@ function momentumAccelerationScore(bars, direction) {
   const base = clamp(50 + signed * 15, 0, 100);
   return Math.round(clamp(signed > signedPrior ? base + 10 : base - 10, 0, 100));
 }
-function computeExtension(price, vwap, ema9, atr14) {
+function computeExtension(price, vwap, ema9, atr14, maxExtensionAtr = 2.5) {
   if (!atr14 || atr14 <= 0) return { extended: false };
   const distVwapAtr = Math.abs(price - vwap) / atr14;
   const distEma9Atr = Math.abs(price - ema9) / atr14;
-  return { extended: distVwapAtr > 2.5 || distEma9Atr > 2.5 };
+  return { extended: distVwapAtr > maxExtensionAtr || distEma9Atr > maxExtensionAtr };
 }
 
 function regimeFromIndices(nifty, bankNifty, pctStocksAboveVwap) {
@@ -624,7 +624,7 @@ async function handleScan(supabase, req, res) {
       const trendAligned = ema9[ema9.length - 1] != null && ema20[ema20.length - 1] != null
         && (direction === 'LONG' ? ema9[ema9.length - 1] > ema20[ema20.length - 1] : ema9[ema9.length - 1] < ema20[ema20.length - 1]);
       const currentAtr = atr14[atr14.length - 1];
-      const extension = computeExtension(last.c, vwapSeries[vwapSeries.length - 1], ema9[ema9.length - 1] ?? last.c, currentAtr);
+      const extension = computeExtension(last.c, vwapSeries[vwapSeries.length - 1], ema9[ema9.length - 1] ?? last.c, currentAtr, settings.max_extension_atr ?? 2.5);
 
       const baseRange = detectConsolidationRange(bars.slice(0, -1));
       let stop = null;
@@ -657,7 +657,7 @@ async function handleScan(supabase, req, res) {
         + cand.rankFactors.regimeAlignment * 0.10 + cand.rankFactors.sectorStrength * 0.10 + 100 * 0.05,
       );
       const confidence = finalScore >= 90 ? 'A_PLUS' : finalScore >= 80 ? 'A' : finalScore >= 70 ? 'B' : finalScore >= 60 ? 'WATCH' : 'IGNORE';
-      const status = allPass ? 'SIGNAL_CONFIRMED' : bestSetup ? 'FORMING' : 'WATCH';
+      const status = allPass && finalScore >= (settings.min_score ?? 70) ? 'SIGNAL_CONFIRMED' : bestSetup ? 'FORMING' : 'WATCH';
       const confirmations = Object.keys(checklist).filter((k) => checklist[k]).map((k) => CHECKLIST_LABEL[k]);
       const failures = Object.keys(checklist).filter((k) => !checklist[k]).map((k) => CHECKLIST_LABEL[k]);
 

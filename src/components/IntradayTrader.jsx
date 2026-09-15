@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Lightning, Info, Wallet } from "@phosphor-icons/react";
+import { Lightning, Info, Wallet, Gear, CaretDown, CaretUp } from "@phosphor-icons/react";
 import { inr, pctSigned, toneClass } from "./swingFormat.js";
 import { ScoreBadge } from "./ScoreWidgets.jsx";
 import { kiteLoginUrl, assumedKiteConnected, consumeKiteRedirectResult } from "../lib/kiteClient.js";
@@ -22,6 +22,47 @@ const SETUP_LABEL = {
 
 const POSITION_STATUS_TONE = { OPEN: "muted", CLOSED: "muted" };
 
+const DEFAULT_DRAFT = {
+  enabled: false, capital: 0, risk_pct_per_trade: 0.5, max_capital_pct_per_trade: 20,
+  max_daily_loss_pct: 2, max_trades_per_day: 5, max_consecutive_losses: 3,
+  max_open_positions: 3, max_positions_per_sector: 1, min_score: 70, min_risk_reward: 1.5,
+  min_rvol: 1.0, max_extension_atr: 2.5, square_off_time: "15:15",
+};
+
+// Every field here is wired to real gating logic in api/intraday.js — no
+// dead knobs. auto_execute_min_score exists in the schema for a future
+// AUTO execution mode but isn't exposed here since nothing reads it yet.
+const SETTINGS_GROUPS = [
+  {
+    title: "Position Sizing", fields: [
+      { key: "capital", label: "Capital (₹)", step: 1000, min: 0 },
+      { key: "risk_pct_per_trade", label: "Risk % per trade", step: 0.1, min: 0 },
+      { key: "max_capital_pct_per_trade", label: "Max capital % per trade", step: 1, min: 0 },
+    ],
+  },
+  {
+    title: "Daily Risk Limits", fields: [
+      { key: "max_daily_loss_pct", label: "Max daily loss %", step: 0.1, min: 0 },
+      { key: "max_trades_per_day", label: "Max trades / day", step: 1, min: 1 },
+      { key: "max_consecutive_losses", label: "Max consecutive losses", step: 1, min: 1 },
+    ],
+  },
+  {
+    title: "Position Limits", fields: [
+      { key: "max_open_positions", label: "Max open positions", step: 1, min: 1 },
+      { key: "max_positions_per_sector", label: "Max positions / sector", step: 1, min: 1 },
+    ],
+  },
+  {
+    title: "Signal Quality Gates", fields: [
+      { key: "min_score", label: "Min score to confirm", step: 1, min: 0, max: 100 },
+      { key: "min_risk_reward", label: "Min risk:reward", step: 0.1, min: 0 },
+      { key: "min_rvol", label: "Min RVOL", step: 0.1, min: 0 },
+      { key: "max_extension_atr", label: "Max extension (× ATR)", step: 0.1, min: 0 },
+    ],
+  },
+];
+
 /**
  * Intraday Trader — Market Regime + Stock Ranking + Setup/Signal Engine +
  * Execution Engine (paper mode). Ranking runs on the full liquid universe
@@ -38,7 +79,8 @@ export default function IntradayTrader() {
   const [data, setData] = useState(null);
   const [positions, setPositions] = useState({ open: [], closed: [] });
   const [settings, setSettings] = useState(null);
-  const [settingsDraft, setSettingsDraft] = useState({ enabled: false, capital: 0 });
+  const [settingsDraft, setSettingsDraft] = useState(DEFAULT_DRAFT);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -54,9 +96,9 @@ export default function IntradayTrader() {
     fetch("/api/intraday?resource=settings")
       .then((r) => r.json())
       .then((s) => {
-        if (!s) return;
+        if (!s || s.error) return;
         setSettings(s);
-        setSettingsDraft({ enabled: !!s.enabled, capital: s.capital ?? 0 });
+        setSettingsDraft((d) => ({ ...d, ...s, enabled: !!s.enabled }));
       })
       .catch(() => {});
   }, []);
@@ -82,16 +124,24 @@ export default function IntradayTrader() {
     return () => clearInterval(timerRef.current);
   }, [load]);
 
+  const setField = (key, value) => setSettingsDraft((d) => ({ ...d, [key]: value }));
+
   const saveSettings = () => {
     setSavingSettings(true);
+    const numericKeys = SETTINGS_GROUPS.flatMap((g) => g.fields.map((f) => f.key));
+    const body = { enabled: !!settingsDraft.enabled, execution_mode: "PAPER", square_off_time: settingsDraft.square_off_time || "15:15" };
+    for (const key of numericKeys) {
+      const n = Number(settingsDraft[key]);
+      body[key] = Number.isFinite(n) ? n : DEFAULT_DRAFT[key];
+    }
     fetch("/api/intraday?resource=settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled: settingsDraft.enabled, capital: Number(settingsDraft.capital) || 0, execution_mode: "PAPER" }),
+      body: JSON.stringify(body),
     })
       .then((r) => r.json())
       .then(() => fetch("/api/intraday?resource=settings").then((r) => r.json()))
-      .then((s) => setSettings(s))
+      .then((s) => { setSettings(s); setSettingsDraft((d) => ({ ...d, ...s, enabled: !!s.enabled })); })
       .catch(() => {})
       .finally(() => setSavingSettings(false));
   };
@@ -118,30 +168,77 @@ export default function IntradayTrader() {
         5-min candles — a "Confirmed" signal has passed the full 12-point entry checklist.
       </p>
 
-      <div className="flex items-center gap-4 flex-wrap p-3 rounded-[12px] mb-4" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
-        <div className="flex items-center gap-2">
-          <Wallet size={15} weight="bold" className="text-muted" />
+      <div className="rounded-[12px] mb-4" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+        <button
+          onClick={() => setSettingsOpen((v) => !v)}
+          className="w-full flex items-center gap-3 flex-wrap p-3 text-left"
+        >
+          <Wallet size={15} weight="bold" className="text-muted shrink-0" />
           <span className="text-[11.5px] font-semibold">Paper Execution</span>
-        </div>
-        <label className="flex items-center gap-1.5 text-[11.5px]">
-          <input type="checkbox" checked={settingsDraft.enabled} onChange={(e) => setSettingsDraft((d) => ({ ...d, enabled: e.target.checked }))} />
-          Enabled
-        </label>
-        <label className="flex items-center gap-1.5 text-[11.5px]">
-          Capital
-          <input
-            type="number" min="0" value={settingsDraft.capital}
-            onChange={(e) => setSettingsDraft((d) => ({ ...d, capital: e.target.value }))}
-            className="w-[110px] px-2 py-1 rounded-[8px] n text-[11.5px]"
-            style={{ border: "1px solid var(--c-line)", background: "var(--c-surface-2)" }}
-          />
-        </label>
-        <span className="text-[10.5px] text-faint px-2 py-1 rounded-[6px]" style={{ background: "var(--c-surface-2)" }}>Mode: PAPER only</span>
-        <button onClick={saveSettings} disabled={savingSettings} className="topstep text-[11.5px]">{savingSettings ? "Saving…" : "Save"}</button>
-        {settings && (
-          <span className="text-[10.5px] text-faint">
-            {settings.enabled ? "Live-scanning for confirmed signals to auto-open paper positions." : "Off — signals are shown but no paper positions are opened."}
+          <span
+            className="text-[10px] font-semibold px-1.5 py-0.5 rounded-[5px]"
+            style={{ background: settings?.enabled ? "var(--c-gain-soft, #16a34a22)" : "var(--c-surface-2)", color: settings?.enabled ? "var(--c-gain)" : "var(--c-faint)" }}
+          >
+            {settings?.enabled ? "ON" : "OFF"}
           </span>
+          <span className="text-[10.5px] text-faint">Capital {inr(settings?.capital ?? 0)}</span>
+          <span className="text-[10.5px] text-faint flex-1">
+            {settings?.enabled ? "Confirmed signals auto-open paper positions." : "Signals are shown but no paper positions are opened."}
+          </span>
+          {settingsOpen ? <CaretUp size={14} className="text-muted shrink-0" /> : <CaretDown size={14} className="text-muted shrink-0" />}
+          <Gear size={14} weight="bold" className="text-muted shrink-0" />
+        </button>
+
+        {settingsOpen && (
+          <div className="px-3 pb-3 pt-1" style={{ borderTop: "1px solid var(--c-line)" }}>
+            <div className="flex items-center gap-4 flex-wrap py-2.5">
+              <label className="flex items-center gap-1.5 text-[11.5px]">
+                <input type="checkbox" checked={!!settingsDraft.enabled} onChange={(e) => setField("enabled", e.target.checked)} />
+                Enabled
+              </label>
+              <label className="flex items-center gap-1.5 text-[11.5px]">
+                Square-off (IST)
+                <input
+                  type="time" value={settingsDraft.square_off_time ?? "15:15"}
+                  onChange={(e) => setField("square_off_time", e.target.value)}
+                  className="px-2 py-1 rounded-[8px] n text-[11.5px]"
+                  style={{ border: "1px solid var(--c-line)", background: "var(--c-surface-2)" }}
+                />
+              </label>
+              <span className="text-[10.5px] text-faint px-2 py-1 rounded-[6px]" style={{ background: "var(--c-surface-2)" }}>
+                Mode: PAPER only — ALERT/SEMI_AUTO/AUTO aren't built yet
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              {SETTINGS_GROUPS.map((group) => (
+                <div key={group.title} className="p-2.5 rounded-[10px]" style={{ background: "var(--c-surface-2)" }}>
+                  <div className="text-[10.5px] font-semibold text-muted mb-1.5">{group.title}</div>
+                  <div className="flex flex-col gap-1.5">
+                    {group.fields.map((f) => (
+                      <label key={f.key} className="flex items-center justify-between gap-2 text-[11px]">
+                        <span className="text-ink2">{f.label}</span>
+                        <input
+                          type="number" step={f.step} min={f.min} max={f.max}
+                          value={settingsDraft[f.key] ?? ""}
+                          onChange={(e) => setField(f.key, e.target.value)}
+                          className="w-[72px] px-1.5 py-0.5 rounded-[6px] n text-[11px] text-right"
+                          style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}
+                        />
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex items-center gap-2.5 mt-3">
+              <button onClick={saveSettings} disabled={savingSettings} className="topstep text-[11.5px]">{savingSettings ? "Saving…" : "Save Settings"}</button>
+              {settings && (
+                <span className="text-[10.5px] text-faint">Last saved values are pre-filled above — unsaved edits are only local until you click Save.</span>
+              )}
+            </div>
+          </div>
         )}
       </div>
 

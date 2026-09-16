@@ -188,7 +188,7 @@ export default function SwingScanner() {
       ) : view === "autotrade" ? (
         <SwingAutoTrade />
       ) : view === "structure" ? (
-        <StructureScanner />
+        <StructureScanner onAddClick={setSizingStock} />
       ) : (
       <>
       <p className="text-[11px] text-muted mb-4 max-w-[70ch]">

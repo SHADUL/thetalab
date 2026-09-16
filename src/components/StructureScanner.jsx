@@ -26,7 +26,7 @@ function GateRow({ label, pass }) {
   );
 }
 
-function DetailPanel({ stock, onClose }) {
+function DetailPanel({ stock, onClose, onAddClick }) {
   return (
     <div className="p-4 rounded-[14px]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
       <div className="flex items-start justify-between mb-3">
@@ -41,6 +41,7 @@ function DetailPanel({ stock, onClose }) {
           <a href={tradingViewUrl(stock.symbol)} target="_blank" rel="noopener noreferrer" className="topstep flex items-center gap-1.5">
             <ChartLineUp size={12} weight="bold" /> TradingView
           </a>
+          <button onClick={() => onAddClick(stock)} className="topstep">Add to Portfolio</button>
           <button onClick={onClose} className="topstep">Close</button>
         </div>
       </div>
@@ -76,7 +77,7 @@ function DetailPanel({ stock, onClose }) {
   );
 }
 
-export default function StructureScanner() {
+export default function StructureScanner({ onAddClick }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -161,7 +162,7 @@ export default function StructureScanner() {
               </tbody>
             </table>
           </div>
-          {selected && <DetailPanel stock={selected} onClose={() => setSelected(null)} />}
+          {selected && <DetailPanel stock={selected} onClose={() => setSelected(null)} onAddClick={onAddClick} />}
         </div>
       )}
     </div>

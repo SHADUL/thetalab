@@ -52,6 +52,10 @@ import { normalise, type RawChainPayload } from '../src/quant/data/adapter.ts';
 import { enrichChain } from '../src/quant/enrich.ts';
 import { evaluateExpiries } from '../src/quant/strategies/expirySelector.ts';
 import type { HistoricalClose } from '../src/quant/analytics/realizedVolatility.ts';
+import { ivRankAndPercentile, type IvHistoryPoint, type IvRankResult } from '../src/quant/analytics/ivRank.ts';
+import { atmIvOf } from '../src/quant/analytics/atmIv.ts';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { decideTrade, type DecisionThresholds } from '../src/quant/strategies/decisionGate.ts';
 import { computePositionSize, type PortfolioState, type OpenPositionSummary } from '../src/quant/strategies/positionSizing.ts';
 import { runPreTradeValidation } from '../src/quant/execution/preTradeValidation.ts';
@@ -70,6 +74,25 @@ const INDEX_QUOTE_KEY: Record<string, string> = {
   BANKNIFTY: 'NSE:NIFTY BANK',
   SENSEX: 'BSE:SENSEX',
 };
+
+// Only these two symbols have a built ATM-IV history store (buildIvHistory.ts,
+// from real bhavcopy archives — see src/quant/data/history/). BANKNIFTY has
+// none yet: ivRank stays genuinely UNAVAILABLE for it rather than borrowing
+// NIFTY's or fabricating a number.
+const IV_HISTORY_FILE: Record<string, string> = {
+  NIFTY: 'atm_iv_nifty.json',
+  SENSEX: 'atm_iv_sensex.json',
+};
+const IV_RANK_LOOKBACKS = [30, 60, 90, 180, 252];
+
+/** Loads the real per-session ATM-IV archive for a symbol, or [] when none exists/fails to parse — never fabricated, see loadIvRankByLookback's caller. */
+function loadIvHistory(symbol: string): IvHistoryPoint[] {
+  const filename = IV_HISTORY_FILE[symbol];
+  if (!filename) return [];
+  const filePath = path.join(process.cwd(), 'src/quant/data/history', filename);
+  const raw = JSON.parse(readFileSync(filePath, 'utf8'));
+  return (raw?.points ?? []).map((p: any) => ({ date: p.date, atmIv: p.atmIv }));
+}
 
 async function kiteFetch(path: string, opts: { method?: string; token: string; apiKey: string; jsonBody?: unknown } ): Promise<any> {
   const { method = 'GET', token, apiKey, jsonBody } = opts;
@@ -335,6 +358,31 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     return;
   }
 
+  // 1b. The instrument master is the ONLY source of truth for which
+  // expiries/strikes are actually tradable (see this endpoint's own
+  // header discipline) — but that's only true if the sync itself is
+  // recent. A silently-stale master (e.g. the daily instruments-sync cron
+  // stopped running) wouldn't cause a wrong trade — the DTE band below
+  // still filters out anything already expired — but it COULD silently
+  // miss a newly-listed contract or misreport "no eligible expiries" for
+  // a reason that has nothing to do with market conditions. Surfaced in
+  // diagnostics on every scan (never assumed fresh), and hard-blocked
+  // past 96h (a full long-weekend-plus-holiday gap) so a genuinely broken
+  // sync can't run silently for days.
+  const instrumentMasterLastSyncedAt = instrumentRows.reduce(
+    (latest: string, r: any) => (r.last_synced_at > latest ? r.last_synced_at : latest),
+    instrumentRows[0].last_synced_at,
+  );
+  const instrumentMasterAgeHours = (Date.now() - Date.parse(instrumentMasterLastSyncedAt)) / 3_600_000;
+  if (instrumentMasterAgeHours > 96) {
+    res.status(200).json({
+      ok: true, skipped: 'stale_instrument_master',
+      message: `Instrument master last synced ${instrumentMasterAgeHours.toFixed(1)}h ago (> 96h) — run instruments-sync before trusting expiries/strikes from it.`,
+      instrumentMasterLastSyncedAt,
+    });
+    return;
+  }
+
   const allExpiries = [...new Set(instrumentRows.map((r: any) => r.expiry as string))].sort();
   const eligibleExpiries = allExpiries.filter((expiry) => {
     const dte = Math.round((Date.parse(`${expiry}T00:00:00Z`) - Date.parse(`${todayIST}T00:00:00Z`)) / 86_400_000);
@@ -429,11 +477,35 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   const { chain: normalised, rejected } = normalise(payload);
   const enriched = enrichChain(normalised);
 
+  // 3b. IV rank/percentile against the REAL per-session ATM-IV archive
+  // (src/quant/data/history/) — one reading per session, the same
+  // near-term convention the archive itself was built with (see
+  // ExpirySelectorParams.ivRank's own doc comment). Ranked at several
+  // configurable lookbacks; genuinely UNAVAILABLE (not fabricated) when a
+  // symbol has no archive yet (BANKNIFTY) or there isn't enough history
+  // for a given window.
+  let ivRankByLookback: Record<number, IvRankResult | null> = {};
+  let currentAtmIvForRank: number | null = null;
+  try {
+    const ivHistory = loadIvHistory(symbol);
+    currentAtmIvForRank = enriched.slices[0] ? atmIvOf(enriched.slices[0]) : null;
+    if (ivHistory.length > 0 && currentAtmIvForRank !== null) {
+      for (const lookback of IV_RANK_LOOKBACKS) {
+        ivRankByLookback[lookback] = ivRankAndPercentile(ivHistory, currentAtmIvForRank, lookback);
+      }
+    }
+  } catch (err: any) {
+    await log('error', `IV history load/rank failed for ${symbol} — ivRank will be excluded, not fabricated`, { message: err.message });
+  }
+  // The 252-session (≈1Y trading) lookback is this endpoint's primary
+  // reading, fed into the quality score — matches ivRankAndPercentile's own
+  // default and tradeQualityScore's existing single-ivRank-input shape.
+  const primaryIvRank = ivRankByLookback[252]?.rank ?? null;
+
   // 4. Run the decision pipeline (skew -> strategy -> optimizer -> expiry
-  // selection -> quality score). No live IV-rank history is wired into
-  // this endpoint yet (see decisionGate.ts's own handling of a null
-  // ivRank — it's excluded and renormalized, not fabricated). premiumEdge
-  // IS wired, from the real historicalCloses fetched above.
+  // selection -> quality score). Both ivRank and premiumEdge are wired
+  // from real data now — ivRank from the archive above, premiumEdge from
+  // the real historicalCloses fetched earlier.
   const step = enriched.slices[0]?.forward ? inferStrikeStep(enriched.slices[0].quotes.map((q) => q.quote.strike)) : 50;
   const wingWidths = [2, 4, 6].map((m) => m * step);
   const evaluations = evaluateExpiries(enriched, {
@@ -441,7 +513,7 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     wingWidths,
     minDte: settings.min_dte,
     maxDte: settings.max_dte,
-    ivRank: null,
+    ivRank: primaryIvRank,
     historicalCloses,
   });
   const thresholds: DecisionThresholds = {
@@ -453,7 +525,10 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   const diagnostics = {
     spot, symbol, scannedAt: new Date(now).toISOString(),
     eligibleExpiries, rejectedRows: rejected.length,
+    instrumentMasterLastSyncedAt, instrumentMasterAgeHours: Number(instrumentMasterAgeHours.toFixed(1)),
     historicalClosesFetched: historicalCloses.length,
+    currentAtmIvForRank,
+    ivRankByLookback,
     evaluations: evaluations.map(serializeExpiryEvaluation),
   };
 

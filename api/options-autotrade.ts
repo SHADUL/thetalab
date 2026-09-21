@@ -195,6 +195,50 @@ async function handleMargin(req: any, res: any, supabase: SupabaseClient) {
 }
 
 /**
+ * Serializes every evaluated expiry's FULL decision data — not just the
+ * winning one's formatted text explanation. Nothing here is a new
+ * calculation; every field is read straight off what evaluateExpiries()/
+ * scoreTradeQuality() already computed and this endpoint was previously
+ * discarding on a NO_TRADE response. Missing inputs (ivRank, margin
+ * efficiency) stay `null` all the way through — never coerced to 0 or a
+ * fabricated number.
+ */
+function serializeExpiryEvaluation(e: ReturnType<typeof evaluateExpiries>[number]) {
+  const best = e.best;
+  return {
+    expiry: new Date(e.expiry).toISOString().slice(0, 10),
+    dte: e.dte,
+    bias: e.bias,
+    biasReason: e.biasReason,
+    strategyLabel: e.strategyLabel,
+    candidateCount: e.candidateCount,
+    failureCount: e.failureCount,
+    skipReason: e.skipReason,
+    best: best ? {
+      targetShortDelta: best.targetShortDelta,
+      wingWidth: best.wingWidth,
+      expectedValue: best.expectedValue,
+      evPerUnitRisk: best.evPerUnitRisk,
+      legs: best.result.legs.map((l) => ({ side: l.side, right: l.right, strike: l.strike, price: l.price, iv: l.iv, delta: l.delta })),
+      netCredit: best.result.netCredit,
+      maxProfit: best.result.maxProfit,
+      maxLoss: best.result.maxLoss,
+      breakevens: 'breakevens' in best.result ? best.result.breakevens : [best.result.breakeven],
+      pop: best.result.pop,
+      forward: best.result.forward,
+      forwardSource: best.result.forwardSource,
+      atmIv: best.result.atmIv,
+      qualityScore: {
+        score: best.qualityScore.score,
+        components: best.qualityScore.components,
+        raw: best.qualityScore.raw,
+        missingComponents: best.qualityScore.missingComponents,
+      },
+    } : null,
+  };
+}
+
+/**
  * The paper-execution orchestrator: builds a live chain for one symbol,
  * runs the full decision pipeline (skew -> strategy -> optimizer -> expiry
  * selection -> quality score -> NO_TRADE/WATCH/CANDIDATE/HIGH_CONVICTION),
@@ -358,11 +402,16 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     highConvictionAtOrAbove: settings.high_conviction_at_or_above,
   };
   const decision = decideTrade(evaluations, thresholds);
+  const diagnostics = {
+    spot, symbol, scannedAt: new Date(now).toISOString(),
+    eligibleExpiries, rejectedRows: rejected.length,
+    evaluations: evaluations.map(serializeExpiryEvaluation),
+  };
 
   await log('info', `Paper-scan decision for ${symbol}: ${decision.action}`, { rejectedRows: rejected.length, decision: decision.explanation });
 
   if (decision.action === 'NO_TRADE' || !decision.expiryEvaluation?.best) {
-    res.status(200).json({ ok: true, action: decision.action, explanation: decision.explanation });
+    res.status(200).json({ ok: true, action: decision.action, explanation: decision.explanation, diagnostics });
     return;
   }
 
@@ -453,7 +502,7 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
 
   if (paperResult.state !== 'ACTIVE') {
     await log('info', `Paper position not opened for ${symbol}`, { reason: paperResult.log });
-    res.status(200).json({ ok: true, action: decision.action, opened: false, validation, sizing, log: paperResult.log });
+    res.status(200).json({ ok: true, action: decision.action, opened: false, validation, sizing, log: paperResult.log, diagnostics });
     return;
   }
 
@@ -478,7 +527,7 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   await supabase.from('options_autotrade_legs').insert(legRows);
   await log('info', `Opened PAPER position #${inserted.id}: ${decision.expiryEvaluation.strategyLabel} on ${symbol}, ${sizing.lots} lot(s).`);
 
-  res.status(200).json({ ok: true, action: decision.action, opened: true, positionId: inserted.id, sizing, explanation: decision.explanation });
+  res.status(200).json({ ok: true, action: decision.action, opened: true, positionId: inserted.id, sizing, explanation: decision.explanation, diagnostics });
 }
 
 /**

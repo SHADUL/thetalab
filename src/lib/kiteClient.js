@@ -1,6 +1,6 @@
 /**
- * Thin client for the two Kite serverless routes (api/kite-login.js,
- * api/kite-quote.js). No credentials live here or anywhere else in the
+ * Thin client for the Kite serverless routes (api/kite-login.js,
+ * api/kite-market-data.js). No credentials live here or anywhere else in the
  * frontend — the access token is an HttpOnly cookie this code can trigger
  * being set (by navigating to /api/kite-login) but can never read.
  *
@@ -66,7 +66,7 @@ export async function resolveIndexToken(symbol) {
  */
 export async function fetchLiveQuotes(instruments) {
   const qs = instruments.map((i) => `i=${encodeURIComponent(i)}`).join('&');
-  const resp = await fetch(`/api/kite-quote?${qs}`);
+  const resp = await fetch(`/api/kite-market-data?resource=quote&${qs}`);
   const body = await resp.json();
   if (!resp.ok) {
     if (body?.error === 'not_connected' || body?.error === 'token_expired') forgetKiteConnection();
@@ -124,8 +124,8 @@ export async function fetchLiveCandles(token, interval, range) {
     ? new Date(range.from)
     : new Date(to.getTime() - (DEFAULT_LOOKBACK_DAYS[interval] ?? 30) * 86_400_000);
   const fmt = (d) => d.toISOString().slice(0, 10);
-  const qs = new URLSearchParams({ token: String(token), interval, from: fmt(from), to: fmt(to) });
-  const resp = await fetch(`/api/kite-candles?${qs}`);
+  const qs = new URLSearchParams({ resource: 'candles', token: String(token), interval, from: fmt(from), to: fmt(to) });
+  const resp = await fetch(`/api/kite-market-data?${qs}`);
   const body = await resp.json();
   if (!resp.ok) {
     if (body?.error === 'not_connected' || body?.error === 'token_expired') forgetKiteConnection();

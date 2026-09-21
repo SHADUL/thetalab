@@ -2,6 +2,7 @@ import { useState } from "react";
 import App from "./App.jsx";
 import SwingScanner from "./components/SwingScanner.jsx";
 import IntradayTrader from "./components/IntradayTrader.jsx";
+import OptionsAutoTrader from "./components/OptionsAutoTrader.jsx";
 
 /**
  * Options Desk and Swing Scanner are two genuinely separate products that
@@ -38,10 +39,15 @@ export default function Root() {
             onClick={() => setSection("swing")} className="seg">Swing Scanner</button>
           <button role="tab" aria-selected={section === "intraday"} data-on={section === "intraday"}
             onClick={() => setSection("intraday")} className="seg">Intraday Trader</button>
+          <button role="tab" aria-selected={section === "options-auto"} data-on={section === "options-auto"}
+            onClick={() => setSection("options-auto")} className="seg">Options Auto-Trader</button>
         </div>
       </div>
       <div className="flex-1 min-h-0">
-        {section === "options" ? <App /> : section === "swing" ? <SwingScanner /> : <IntradayTrader />}
+        {section === "options" ? <App />
+          : section === "swing" ? <SwingScanner />
+          : section === "intraday" ? <IntradayTrader />
+          : <OptionsAutoTrader />}
       </div>
     </div>
   );

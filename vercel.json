@@ -1,6 +1,7 @@
 {
   "rewrites": [{ "source": "/((?!api/).*)", "destination": "/index.html" }],
   "functions": {
-    "api/intraday.js": { "maxDuration": 60 }
+    "api/intraday.js": { "maxDuration": 60 },
+    "api/options-autotrade.ts": { "maxDuration": 60 }
   }
 }

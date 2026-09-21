@@ -1,0 +1,27 @@
+name: Options Auto-Trader Paper Scan
+
+# Runs every 30 minutes across a window comfortably wider than NSE market
+# hours (9:15-15:30 IST = 3:45-10:00 UTC) — the endpoint itself checks the
+# real IST clock, execution_mode, and market hours, and no-ops outside
+# them. Option-selling entries are an inherently infrequent decision (not
+# a tick-driven strategy), so this is far coarser than swing's 5-minute
+# equity tick — 30 minutes is a starting cadence, not a validated one.
+on:
+  schedule:
+    - cron: '*/30 3-10 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      symbol:
+        description: 'Underlying to scan (NIFTY | BANKNIFTY | SENSEX)'
+        required: false
+        default: 'NIFTY'
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call paper-scan endpoint
+        run: |
+          curl -sf -X POST "https://thetalab-beta.vercel.app/api/options-autotrade?resource=paper-scan&symbol=${{ inputs.symbol || 'NIFTY' }}" \
+            -H "Authorization: Bearer ${{ secrets.OPTIONS_AUTOTRADE_CRON_SECRET }}" \
+            -w "\nHTTP %{http_code}\n"

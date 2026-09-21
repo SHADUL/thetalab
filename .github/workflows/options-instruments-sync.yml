@@ -1,0 +1,21 @@
+name: Options Instrument Master Sync
+
+# Runs once daily, before market open (8:30 IST = 3:00 UTC), so option
+# expiries added or rolled off overnight are reflected before the options
+# auto-trader could ever need to resolve a tradingsymbol for an entry.
+# GitHub Actions rather than Vercel's own cron, matching
+# swing-autotrade-tick.yml's reasoning (not gated by Vercel plan limits).
+on:
+  schedule:
+    - cron: '0 3 * * 1-5'
+  workflow_dispatch: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call options instrument sync endpoint
+        run: |
+          curl -sf -X POST "https://thetalab-beta.vercel.app/api/options-autotrade?resource=instruments-sync" \
+            -H "Authorization: Bearer ${{ secrets.OPTIONS_AUTOTRADE_CRON_SECRET }}" \
+            -w "\nHTTP %{http_code}\n"

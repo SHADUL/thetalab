@@ -35,11 +35,14 @@
  *   log               — browser-facing read of the most recent log entries.
  *   kill-switch       — browser-facing: sets execution_mode to OFF (its
  *                       only real capability right now — see handleKillSwitch).
+ *   daily-stats       — browser-facing read of today's risk-lock state.
+ *   clear-daily-lock  — browser-facing manual override for the daily lock
+ *                       (the spec's own "require manual re-enable").
  *
- * instruments-sync/margin/paper-scan are cron/server-triggered
- * (kite_session, shared-secret protected); settings/positions/log/
- * kill-switch are browser-facing and need no secret, matching
- * api/intraday.js's own settings/positions convention.
+ * instruments-sync/margin/paper-scan/position-monitor are cron/server-
+ * triggered (kite_session, shared-secret protected); settings/positions/log/
+ * kill-switch/daily-stats/clear-daily-lock are browser-facing and need no
+ * secret, matching api/intraday.js's own settings/positions convention.
  */
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { parseKiteOptionsCSV, filterActiveInstruments, OPTIONS_SYMBOLS } from '../src/lib/optionsInstrumentMaster.js';
@@ -53,6 +56,7 @@ import { computePositionSize, type PortfolioState, type OpenPositionSummary } fr
 import { runPreTradeValidation } from '../src/quant/execution/preTradeValidation.ts';
 import { runPaperExecution, type PlannedLeg } from '../src/quant/execution/paperFill.ts';
 import { evaluateExit, type ShortStrike } from '../src/quant/execution/exitEngine.ts';
+import { checkDailyRiskLock } from '../src/quant/execution/dailyRiskLock.ts';
 
 const KITE_BASE = 'https://api.kite.trade';
 
@@ -224,6 +228,26 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
 
   if (!isMarketOpenIST()) { res.status(200).json({ ok: true, skipped: 'outside_market_hours' }); return; }
 
+  // Daily risk lock — checked before any live Kite call, so a locked day
+  // costs nothing beyond this one DB read. Stricter than positionSizing.ts's
+  // own implicit maxDailyLoss constraint (which only zeroes out lots for
+  // whichever specific candidate is being sized, and knows nothing about
+  // consecutive losses) — this is the blanket refusal Phase 20 asks for.
+  const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const { data: dailyRowPreCheck } = await supabase.from('options_autotrade_daily_stats').select('*').eq('trade_date', todayIST).maybeSingle();
+  const lock = checkDailyRiskLock(
+    { realizedPnlToday: Number(dailyRowPreCheck?.realized_pnl) || 0, consecutiveLosses: Number(dailyRowPreCheck?.consecutive_losses) || 0 },
+    { equity: Number(settings.reserved_fund) || 0, maxDailyLossPct: settings.max_daily_loss_pct, maxConsecutiveLosses: settings.max_consecutive_losses },
+  );
+  if (lock.locked) {
+    if (!dailyRowPreCheck?.locked) {
+      await supabase.from('options_autotrade_daily_stats').upsert({ trade_date: todayIST, locked: true, lock_reason: lock.reason });
+      await log('info', `Daily risk lock engaged for ${symbol}: ${lock.reason} — ${lock.detail}`);
+    }
+    res.status(200).json({ ok: true, skipped: 'daily_risk_locked', reason: lock.reason, detail: lock.detail });
+    return;
+  }
+
   const { data: session } = await supabase.from('kite_session').select('access_token').eq('id', 1).maybeSingle();
   const token = session?.access_token;
   if (!token) { res.status(200).json({ ok: true, skipped: 'no_kite_session' }); return; }
@@ -237,7 +261,6 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     return;
   }
 
-  const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
   const allExpiries = [...new Set(instrumentRows.map((r: any) => r.expiry as string))].sort();
   const eligibleExpiries = allExpiries.filter((expiry) => {
     const dte = Math.round((Date.parse(`${expiry}T00:00:00Z`) - Date.parse(`${todayIST}T00:00:00Z`)) / 86_400_000);
@@ -576,6 +599,7 @@ const EDITABLE_SETTINGS_FIELDS = [
   'max_gamma', 'max_vega', 'max_correlated_group_risk_pct', 'no_trade_below', 'watch_below',
   'high_conviction_at_or_above', 'min_dte', 'max_dte',
   'profit_target_pct', 'stop_loss_credit_multiple', 'time_exit_dte', 'strike_breach_buffer_pct',
+  'max_consecutive_losses',
 ] as const;
 
 /**
@@ -644,12 +668,12 @@ async function handleLog(req: any, res: any, supabase: SupabaseClient) {
 
 /**
  * Browser-facing kill switch. Its ENTIRE real capability right now is
- * flipping execution_mode to OFF — there is no live broker order to
- * cancel (paper mode never places one) and no exit-price/close logic
- * exists yet to square off an open paper position, so this deliberately
- * does not claim to do either. The response says exactly this rather than
- * a generic "positions closed" message a real kill switch would give once
- * an exit engine exists.
+ * flipping execution_mode to OFF, immediately, from the browser — it does
+ * NOT itself force-close any open position. Position-monitor's exit
+ * engine (profit target / stop loss / strike breach / time exit) keeps
+ * running independently on its own 5-minute cron regardless of
+ * execution_mode, and will still act on open positions — this button
+ * only stops NEW entries; it isn't an emergency square-off.
  */
 async function handleKillSwitch(req: any, res: any, supabase: SupabaseClient) {
   if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
@@ -659,8 +683,32 @@ async function handleKillSwitch(req: any, res: any, supabase: SupabaseClient) {
   const { count } = await supabase.from('options_autotrade_positions').select('id', { count: 'exact', head: true }).eq('status', 'ACTIVE');
   res.status(200).json({
     ok: true,
-    message: `New entries stopped (execution_mode set to OFF).${count ? ` ${count} paper position(s) remain open — there is no exit engine yet to square them off automatically.` : ' No open positions.'}`,
+    message: `New entries stopped (execution_mode set to OFF).${count ? ` ${count} paper position(s) remain open — position-monitor's exit engine keeps evaluating them independently on its own 5-min cron.` : ' No open positions.'}`,
   });
+}
+
+/** Browser-facing: today's risk-lock state — read by the dashboard to show a banner when locked. No shared-secret gate, same reasoning as handleSettings. */
+async function handleDailyStats(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const { data, error } = await supabase.from('options_autotrade_daily_stats').select('*').eq('trade_date', todayIST).maybeSingle();
+  if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
+  res.status(200).json(data ?? { trade_date: todayIST, trades_taken: 0, realized_pnl: 0, consecutive_losses: 0, locked: false, lock_reason: null });
+}
+
+/**
+ * Browser-facing manual override — the spec's own "require manual
+ * re-enable" instruction: a daily lock is never cleared automatically
+ * within the same day, only by this explicit action (or naturally, by a
+ * new day's daily_stats row starting unlocked).
+ */
+async function handleClearDailyLock(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const { error } = await supabase.from('options_autotrade_daily_stats').upsert({ trade_date: todayIST, locked: false, lock_reason: null });
+  if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
+  await supabase.from('options_autotrade_log').insert({ level: 'info', message: 'Daily risk lock manually cleared from the dashboard — new entries can resume today.' });
+  res.status(200).json({ ok: true, message: 'Daily risk lock cleared. New entries can resume on the next scan.' });
 }
 
 export default async function handler(req: any, res: any) {
@@ -677,6 +725,8 @@ export default async function handler(req: any, res: any) {
   if (resource === 'positions') return handlePositions(req, res, supabase);
   if (resource === 'log') return handleLog(req, res, supabase);
   if (resource === 'kill-switch') return handleKillSwitch(req, res, supabase);
+  if (resource === 'daily-stats') return handleDailyStats(req, res, supabase);
+  if (resource === 'clear-daily-lock') return handleClearDailyLock(req, res, supabase);
 
   // Cron/server-triggered resources — shared-secret gate, since these do
   // real work (live Kite calls, writing a paper position) on a schedule

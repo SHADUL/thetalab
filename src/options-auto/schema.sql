@@ -61,6 +61,7 @@ create table options_autotrade_settings (
   stop_loss_credit_multiple numeric not null default 2,
   time_exit_dte integer not null default 2,
   strike_breach_buffer_pct numeric not null default 0,
+  max_consecutive_losses integer not null default 3,
   updated_at timestamptz not null default now(),
   constraint options_autotrade_settings_singleton check (id = 1)
 );

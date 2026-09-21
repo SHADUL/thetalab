@@ -760,6 +760,17 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
     }
     if (missingQuote) { await log('error', `Position #${p.id}: could not re-quote every leg — skipped this cycle.`); continue; }
 
+    // Live mark-to-market P&L — persisted for EVERY position re-quoted this
+    // cycle, independent of whether it also triggers an exit below. Same
+    // formula the exit engine itself uses (maxProfit - currentCostToClose);
+    // this just records it rather than discarding it once the exit
+    // decision is made.
+    const unrealizedPnl = (Number(p.max_profit) || 0) - currentCostToClose;
+    const { error: markErr } = await supabase.from('options_autotrade_positions').update({
+      unrealized_pnl: unrealizedPnl, unrealized_pnl_updated_at: new Date().toISOString(),
+    }).eq('id', p.id);
+    if (markErr) await log('error', `Position #${p.id}: failed to persist unrealized_pnl`, { message: markErr.message });
+
     const underlyingPrice = quoteMap.get(indexKeys[p.symbol])?.last_price;
     if (!(underlyingPrice > 0)) { await log('error', `Position #${p.id}: no live spot price for ${p.symbol} — skipped this cycle.`); continue; }
 

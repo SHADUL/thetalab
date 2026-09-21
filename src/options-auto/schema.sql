@@ -90,6 +90,11 @@ create table options_autotrade_positions (
   exit_date date,
   exit_reason text,
   realized_pnl numeric,
+  -- Live mark-to-market P&L while still ACTIVE, refreshed every position-monitor
+  -- cron run (5 min) — see migration 005. Null until the first monitor cycle
+  -- runs against this position; never backfilled/estimated.
+  unrealized_pnl numeric,
+  unrealized_pnl_updated_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );

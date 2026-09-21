@@ -64,6 +64,15 @@ const DEFAULT_DRAFT = {
   max_consecutive_losses: 3,
 };
 
+/** How stale a mark-to-market figure is — position-monitor only refreshes it every 5 minutes, so this is never presented as live-live. */
+function agoLabel(iso) {
+  if (!iso) return null;
+  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60_000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  return `${Math.round(mins / 60)}h ago`;
+}
+
 function PositionRow({ p }) {
   const [expanded, setExpanded] = useState(false);
   const legs = p.options_autotrade_legs ?? [];
@@ -84,13 +93,23 @@ function PositionRow({ p }) {
         <td className="py-2 pr-2 text-right n">{p.margin_required != null ? inr(p.margin_required) : "—"}</td>
         <td className="py-2 pr-2"><ScoreBadge score={Math.round(p.quality_score ?? 0)} /></td>
         <td className={`py-2 pr-2 text-[11px] ${toneClass(STATUS_TONE[p.status] ?? "muted")}`}>{p.status}{p.exit_reason ? ` · ${p.exit_reason}` : ""}</td>
+        <td className={`py-2 pr-2 text-right n ${p.status !== "ACTIVE" || p.unrealized_pnl == null ? "" : p.unrealized_pnl >= 0 ? "text-gain" : "text-loss"}`}>
+          {p.status === "ACTIVE" && p.unrealized_pnl != null ? (
+            <>
+              {inr(p.unrealized_pnl)}
+              <div className="text-[10px] text-faint font-normal">{agoLabel(p.unrealized_pnl_updated_at)}</div>
+            </>
+          ) : (
+            "—"
+          )}
+        </td>
         <td className={`py-2 pr-3 text-right n ${p.realized_pnl == null ? "" : p.realized_pnl >= 0 ? "text-gain" : "text-loss"}`}>
           {p.realized_pnl != null ? inr(p.realized_pnl) : "—"}
         </td>
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={10} className="px-3 pb-3" style={{ background: "var(--c-surface-2)" }}>
+          <td colSpan={11} className="px-3 pb-3" style={{ background: "var(--c-surface-2)" }}>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
               <div>
                 <div className="text-[10.5px] font-semibold text-muted mb-1">Legs</div>
@@ -378,6 +397,7 @@ export default function OptionsAutoTrader() {
                     <th className="font-medium py-2 pr-2 text-right">Margin</th>
                     <th className="font-medium py-2 pr-2">Score</th>
                     <th className="font-medium py-2 pr-2">Status</th>
+                    <th className="font-medium py-2 pr-2 text-right">Unrealized P&L</th>
                     <th className="font-medium py-2 pr-3 text-right">Realized P&L</th>
                   </tr>
                 </thead>

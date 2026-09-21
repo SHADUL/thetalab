@@ -1,22 +1,36 @@
 /**
  * A single 0-100 quality score per priced candidate, composed from
  * components that can honestly be computed TODAY from this engine's own
- * data — risk/reward, POP, IV rank, strike safety (in expected-move
- * sigmas), DTE suitability, liquidity, and margin efficiency.
+ * data — premium edge (IV vs realized volatility), risk/reward, POP, IV
+ * rank, strike safety (in expected-move sigmas), DTE suitability,
+ * liquidity, and margin efficiency.
  *
- * Deliberately excludes market regime, realized-vol/IV-RV spread, event
- * risk, and historical setup performance: no regime engine, RV
- * computation, event calendar, or backtest engine exists in this codebase
- * yet (see the architecture plan). Fabricating those components with
+ * premiumEdge is the primary signal, weighted accordingly (see
+ * DEFAULT_TRADE_QUALITY_WEIGHTS) — "is the premium adequate for the
+ * expected risk," not "can I collect premium." Before this component
+ * existed, POP was doing double duty as a stand-in for edge, but POP and
+ * a credit structure's payoff are BOTH derived from the same Black-76
+ * implied volatility that priced the legs — comparing a structure against
+ * its own pricing model is close to a zero-edge tautology, not a genuine
+ * statistical edge read. A real edge can only come from comparing implied
+ * volatility against what has ACTUALLY realized historically (see
+ * analytics/realizedVolatility.ts) — POP's weight was reduced accordingly
+ * once premiumEdge existed to do the real work.
+ *
+ * Deliberately still excludes market regime (beyond skew), event risk,
+ * and historical setup performance: no regime engine or event calendar
+ * exists in this codebase yet. Fabricating those components with
  * invented numbers would look precise while meaning nothing — this scores
  * only what it can actually see, and the weights below are provisional
  * starting points, NOT validated. "Backtest and optimize them using
  * out-of-sample data" (the spec's own instruction) applies directly here —
- * these should be revisited once a backtest engine exists for this module.
+ * these should be revisited using the backtest engine that now exists for
+ * this module (src/options-auto/backtest/).
  *
- * A missing component (e.g. no IV-rank history yet, or margin not fetched
- * for this candidate) is excluded and the remaining weights renormalize
- * around what's actually available — never treated as zero or worst-case.
+ * A missing component (e.g. no IV-rank/realized-vol history yet, or
+ * margin not fetched for this candidate) is excluded and the remaining
+ * weights renormalize around what's actually available — never treated
+ * as zero or worst-case.
  */
 import { expectedMove } from '../analytics/expectedMove.ts';
 import { DEFAULT_CONFIG } from '../config.ts';
@@ -27,6 +41,7 @@ import type { CreditSpreadResult } from './creditSpread.ts';
 export type PricedCandidate = IronCondorResult | CreditSpreadResult;
 
 export interface TradeQualityWeights {
+  premiumEdge: number;
   riskReward: number;
   pop: number;
   ivRank: number;
@@ -36,18 +51,29 @@ export interface TradeQualityWeights {
   marginEfficiency: number;
 }
 
-/** Provisional — see this file's header. Sums to 100 when every component is present. */
+/**
+ * Provisional — see this file's header. Sums to 100 when every component
+ * is present. premiumEdge carries the largest single weight: "is the
+ * premium adequate for the expected risk" is the primary question this
+ * engine exists to answer. pop's weight was cut from 20 to 10 once
+ * premiumEdge existed, since POP alone was a near-tautological stand-in
+ * for edge (see header) — it's kept as a secondary signal, not removed,
+ * because a structure can have real IV/RV edge yet still carry an
+ * unacceptably low probability of profit.
+ */
 export const DEFAULT_TRADE_QUALITY_WEIGHTS: TradeQualityWeights = {
-  riskReward: 15,
-  pop: 20,
+  premiumEdge: 25,
+  riskReward: 10,
+  pop: 10,
   ivRank: 15,
-  strikeSafety: 20,
+  strikeSafety: 15,
   dte: 10,
-  liquidity: 15,
+  liquidity: 10,
   marginEfficiency: 5,
 };
 
 export interface TradeQualityComponents {
+  premiumEdge: number | null;
   riskReward: number | null;
   pop: number | null;
   ivRank: number | null;
@@ -66,6 +92,8 @@ export interface TradeQualityComponents {
  * worked out internally.
  */
 export interface TradeQualityRaw {
+  /** IV/RV edge, in percent — see IvRvEdge.edgePct in analytics/realizedVolatility.ts. */
+  premiumEdgePct: number | null;
   riskReward: number | null;
   pop: number | null;
   ivRank: number | null;
@@ -95,6 +123,20 @@ function lerp(x: number, xLo: number, xHi: number, yLo = 0, yHi = 100): number {
   if (xHi === xLo) return clamp(yLo);
   const t = (x - xLo) / (xHi - xLo);
   return clamp(yLo + t * (yHi - yLo));
+}
+
+/**
+ * The primary signal (see this file's header): is the market pricing more
+ * movement than has historically realized over a comparable horizon.
+ * edgePct <= -10 (implied move meaningfully UNDER what typically realizes
+ * — a bad setup for a premium seller) -> 0; edgePct >= 20 (IV rich versus
+ * history by 20%+) -> 100; edgePct = 0 (fair-priced, no edge either way)
+ * lands at 33/100 — deliberately below the midpoint, since "no edge" is a
+ * mediocre setup, not a neutral-good one, for a strategy whose entire
+ * thesis is selling overpriced premium.
+ */
+function scorePremiumEdge(edgePct: number | null): number | null {
+  return edgePct === null ? null : lerp(edgePct, -10, 20);
 }
 
 /** 0 -> 0, 0.5+ -> 100. Most defined-risk credit structures run 0.15-0.4; RR>=1 is rare by construction. */
@@ -176,11 +218,19 @@ function scoreMarginEfficiency(totalCredit: number, marginRequired: number | nul
  *   if the caller already fetched one for this exact candidate. Optional —
  *   fetching margin for every generated candidate would be far too many
  *   live calls; callers should fetch it only for finalists.
+ * @param extras.premiumEdgePct  IV/RV edge in percent (IvRvEdge.edgePct from
+ *   analytics/realizedVolatility.ts), computed by the caller from real
+ *   historical closes for this expiry's horizon. This module doesn't fetch
+ *   or compute realized volatility itself — same "caller supplies it"
+ *   pattern as ivRank. Null/omitted when historical closes aren't
+ *   available yet, in which case premiumEdge is excluded and the other
+ *   weights renormalize (see this file's header) — never defaulted to 0
+ *   or to a fabricated "neutral" edge.
  */
 export function scoreTradeQuality(
   candidate: PricedCandidate,
   slice: EnrichedSlice,
-  extras: { ivRank: number | null; marginRequired?: number | null },
+  extras: { ivRank: number | null; marginRequired?: number | null; premiumEdgePct?: number | null },
   weights: TradeQualityWeights = DEFAULT_TRADE_QUALITY_WEIGHTS,
 ): TradeQualityScore {
   const riskRewardRaw = candidate.maxLoss > 0 ? candidate.maxProfit / candidate.maxLoss : null;
@@ -204,7 +254,10 @@ export function scoreTradeQuality(
     strikeSafetySigma = Math.min(...shortLegs.map((l) => Math.abs(l.strike - candidate.forward) / move.points));
   }
 
+  const premiumEdgePct = extras.premiumEdgePct ?? null;
+
   const components: TradeQualityComponents = {
+    premiumEdge: scorePremiumEdge(premiumEdgePct),
     riskReward: scoreRiskReward(riskRewardRaw),
     pop: scorePop(candidate.pop),
     ivRank: scoreIvRank(extras.ivRank),
@@ -229,6 +282,7 @@ export function scoreTradeQuality(
   }
 
   const raw: TradeQualityRaw = {
+    premiumEdgePct,
     riskReward: riskRewardRaw,
     pop: candidate.pop,
     ivRank: extras.ivRank,

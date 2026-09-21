@@ -114,5 +114,5 @@ test('missing IV rank is stated plainly in the explanation rather than a fabrica
   const evaluations = evaluateExpiries(enrichChain(chain), BASE_PARAMS); // no ivRank supplied
   const decision = decideTrade(evaluations);
   assert.match(decision.explanation, /IV Rank: n\/a — no history supplied/);
-  assert.match(decision.explanation, /excluded, not penalized: ivRank/);
+  assert.match(decision.explanation, /excluded, not penalized:.*\bivRank\b/);
 });

@@ -5,6 +5,7 @@ import { normalise, type RawChainPayload } from '../data/adapter.ts';
 import { enrichChain, yearFraction } from '../enrich.ts';
 import { black76 } from '../pricing/black76.ts';
 import { evaluateExpiries, selectBestExpiry } from '../strategies/expirySelector.ts';
+import type { HistoricalClose } from '../analytics/realizedVolatility.ts';
 import type { ContractSpec } from '../types.ts';
 
 const NIFTY: ContractSpec = {
@@ -40,6 +41,17 @@ function multiExpiryChain(entries: Array<{ dte: number; vol: number }>): RawChai
 }
 
 const BASE_PARAMS = { lotSize: 75, wingWidths: [200, 400, 600] };
+
+/** A synthetic close series with a known, reproducible daily-move magnitude (matches analytics/realizedVolatility.test.ts's fixture style). */
+function syntheticCloses(days: number, startPrice: number, dailyMoveFrac: number): HistoricalClose[] {
+  const closes: HistoricalClose[] = [];
+  let price = startPrice;
+  for (let i = 0; i < days; i++) {
+    price *= 1 + (i % 2 === 0 ? dailyMoveFrac : -dailyMoveFrac);
+    closes.push({ date: new Date(2025, 0, 1 + i).toISOString().slice(0, 10), close: price });
+  }
+  return closes;
+}
 
 test('excludes near-zero DTE and far-dated expiries by default, evaluating only the in-band ones', () => {
   const { chain } = normalise(multiExpiryChain([
@@ -110,6 +122,38 @@ test('a sparse expiry (nothing priceable) is skipped with a specific reason, not
 
   assert.equal(evaluation.best, null);
   assert.match(evaluation.skipReason!, /no candidate priced/i);
+});
+
+test('without historicalCloses, premiumEdge is excluded rather than fabricated', () => {
+  const { chain } = normalise(multiExpiryChain([{ dte: 30, vol: 0.13 }]));
+  const [evaluation] = evaluateExpiries(enrichChain(chain), BASE_PARAMS);
+
+  assert.equal(evaluation.premiumEdge, null);
+  assert.equal(evaluation.best!.qualityScore.raw.premiumEdgePct, null);
+  assert.equal(evaluation.best!.qualityScore.components.premiumEdge, null);
+  assert.ok(evaluation.best!.qualityScore.missingComponents.includes('premiumEdge'));
+});
+
+test('with historicalCloses supplied, premiumEdge is computed for that expiry\'s own horizon and flows into the quality score', () => {
+  const { chain } = normalise(multiExpiryChain([{ dte: 30, vol: 0.13 }]));
+  const historicalCloses = syntheticCloses(120, FORWARD, 0.004);
+  const [evaluation] = evaluateExpiries(enrichChain(chain), { ...BASE_PARAMS, historicalCloses });
+
+  assert.notEqual(evaluation.premiumEdge, null);
+  assert.equal(typeof evaluation.premiumEdge!.edgePct, 'number');
+  assert.notEqual(evaluation.best!.qualityScore.raw.premiumEdgePct, null);
+  assert.equal(evaluation.best!.qualityScore.raw.premiumEdgePct, evaluation.premiumEdge!.edgePct);
+  assert.notEqual(evaluation.best!.qualityScore.components.premiumEdge, null);
+  assert.ok(!evaluation.best!.qualityScore.missingComponents.includes('premiumEdge'));
+});
+
+test('too little historicalCloses (below MIN_RETURNS_FOR_RV) leaves premiumEdge excluded, not a zero/neutral fabrication', () => {
+  const { chain } = normalise(multiExpiryChain([{ dte: 30, vol: 0.13 }]));
+  const tooFew = syntheticCloses(10, FORWARD, 0.004);
+  const [evaluation] = evaluateExpiries(enrichChain(chain), { ...BASE_PARAMS, historicalCloses: tooFew });
+
+  assert.equal(evaluation.premiumEdge, null);
+  assert.equal(evaluation.best!.qualityScore.raw.premiumEdgePct, null);
 });
 
 test('custom minDte/maxDte widen or narrow the eligible band', () => {

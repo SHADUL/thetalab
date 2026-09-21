@@ -25,6 +25,14 @@
  */
 import { atmIvOf } from '../analytics/atmIv.ts';
 import { computeSkew } from '../analytics/skew.ts';
+import { expectedMove } from '../analytics/expectedMove.ts';
+import {
+  computeRealizedVolatility,
+  computeExpectedRealizedMove,
+  computeIvRvEdge,
+  type HistoricalClose,
+  type IvRvEdge,
+} from '../analytics/realizedVolatility.ts';
 import { classifyBias, type Bias } from './regimeSelect.ts';
 import {
   generateCandidates,
@@ -54,6 +62,17 @@ export interface ExpirySelectorParams {
    * intentional, not a simplification of something that actually exists.
    */
   ivRank?: number | null;
+  /**
+   * Real daily closes for the underlying index, oldest-first-or-not (this
+   * module sorts), used to compute realized volatility and the IV/RV
+   * premium edge (see analytics/realizedVolatility.ts) per expiry, matched
+   * to that expiry's own DTE horizon. This module does NOT fetch history
+   * itself — same "caller supplies it" pattern as ivRank above. Omitted or
+   * too short a history (< MIN_RETURNS_FOR_RV usable returns) simply
+   * excludes premiumEdge from the score; it is never fabricated or
+   * defaulted to a "neutral" edge.
+   */
+  historicalCloses?: HistoricalClose[];
   /** Excludes expiries with fewer days to expiry than this. Default 2 — skips 0/1 DTE (expiry day and the day before) by default; see header. */
   minDte?: number;
   /** Excludes expiries with more days to expiry than this. Default 60. */
@@ -73,6 +92,14 @@ export interface ExpiryEvaluation {
   best: (OptimizerCandidate & { qualityScore: TradeQualityScore }) | null;
   /** Set when this expiry was excluded before candidate generation (DTE band) or had nothing priceable. */
   skipReason: string | null;
+  /**
+   * The full IV/RV edge read for THIS expiry's horizon, when historicalCloses
+   * was supplied and there was enough history to compute it — null
+   * otherwise (never fabricated). Same number that feeds
+   * qualityScore.raw.premiumEdgePct on `best`, exposed here directly too
+   * since it's computed per-expiry regardless of whether a candidate priced.
+   */
+  premiumEdge: IvRvEdge | null;
 }
 
 const DEFAULT_MIN_DTE = 2;
@@ -86,14 +113,14 @@ function evaluateOne(slice: EnrichedSlice, params: ExpirySelectorParams): Expiry
   if (dte < minDte) {
     return {
       expiry: slice.expiry, dte, bias: 'neutral', biasReason: '', strategyLabel: 'Iron Condor',
-      candidateCount: 0, failureCount: 0, best: null,
+      candidateCount: 0, failureCount: 0, best: null, premiumEdge: null,
       skipReason: `${dte} DTE is inside the near-expiry gamma-risk window (< ${minDte}) — excluded by default, not validated by any backtest yet.`,
     };
   }
   if (dte > maxDte) {
     return {
       expiry: slice.expiry, dte, bias: 'neutral', biasReason: '', strategyLabel: 'Iron Condor',
-      candidateCount: 0, failureCount: 0, best: null,
+      candidateCount: 0, failureCount: 0, best: null, premiumEdge: null,
       skipReason: `${dte} DTE is beyond the configured max (> ${maxDte}) — too much capital tied up for the theta efficiency this far out.`,
     };
   }
@@ -104,6 +131,8 @@ function evaluateOne(slice: EnrichedSlice, params: ExpirySelectorParams): Expiry
   const strategyLabel: StrikeOptimizerParams['strategyLabel'] =
     bias === 'bullish' ? 'Bull Put Spread' : bias === 'bearish' ? 'Bear Call Spread' : 'Iron Condor';
 
+  const premiumEdge = computePremiumEdgeForExpiry(slice, atmIv, dte, params.historicalCloses);
+
   const { candidates, failures } = generateCandidates(slice, {
     strategyLabel, lotSize: params.lotSize, entryPriceOverride: params.entryPriceOverride,
     deltaTargets: params.deltaTargets, wingWidths: params.wingWidths,
@@ -113,19 +142,43 @@ function evaluateOne(slice: EnrichedSlice, params: ExpirySelectorParams): Expiry
     const reasons = [...new Set(failures.map((f) => f.reason))].slice(0, 3).join('; ');
     return {
       expiry: slice.expiry, dte, bias, biasReason, strategyLabel,
-      candidateCount: 0, failureCount: failures.length, best: null,
+      candidateCount: 0, failureCount: failures.length, best: null, premiumEdge,
       skipReason: `No candidate priced for this expiry${reasons ? ` (${reasons})` : ''}.`,
     };
   }
 
   const top = candidates[0];
-  const qualityScore = scoreTradeQuality(top.result, slice, { ivRank: params.ivRank ?? null }, params.weights ?? DEFAULT_TRADE_QUALITY_WEIGHTS);
+  const qualityScore = scoreTradeQuality(
+    top.result, slice,
+    { ivRank: params.ivRank ?? null, premiumEdgePct: premiumEdge?.edgePct ?? null },
+    params.weights ?? DEFAULT_TRADE_QUALITY_WEIGHTS,
+  );
 
   return {
     expiry: slice.expiry, dte, bias, biasReason, strategyLabel,
     candidateCount: candidates.length, failureCount: failures.length,
-    best: { ...top, qualityScore }, skipReason: null,
+    best: { ...top, qualityScore }, premiumEdge, skipReason: null,
   };
+}
+
+/**
+ * Computes the IV/RV edge for this specific expiry's horizon (dte), or
+ * null when historical closes weren't supplied or there wasn't enough
+ * usable history — never fabricated (see ExpirySelectorParams.historicalCloses).
+ */
+function computePremiumEdgeForExpiry(
+  slice: EnrichedSlice,
+  atmIv: number | null,
+  dte: number,
+  historicalCloses: HistoricalClose[] | undefined,
+): IvRvEdge | null {
+  if (!historicalCloses || historicalCloses.length === 0 || atmIv === null) return null;
+  const impliedMove = expectedMove(slice.forward, atmIv, dte / 365);
+  if (!impliedMove) return null;
+  const realizedVol = computeRealizedVolatility(historicalCloses);
+  const expectedRealizedMove = computeExpectedRealizedMove(historicalCloses, dte, slice.forward);
+  if (!realizedVol || !expectedRealizedMove) return null;
+  return computeIvRvEdge(atmIv, realizedVol, impliedMove.pct * 100, expectedRealizedMove);
 }
 
 /** Evaluates every expiry slice in the chain independently. Does not pick a winner — see selectBestExpiry. */

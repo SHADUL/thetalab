@@ -49,10 +49,11 @@ function condor(s: EnrichedSlice): IronCondorResult {
 test('scores a well-formed candidate with every component present and a sensible weighted score', () => {
   const s = slice();
   const c = condor(s);
-  const { score, components, missingComponents } = scoreTradeQuality(c, s, { ivRank: 72, marginRequired: c.maxProfit / 0.1 });
+  const { score, components, missingComponents } = scoreTradeQuality(c, s, { ivRank: 72, marginRequired: c.maxProfit / 0.1, premiumEdgePct: 12 });
 
   assert.deepEqual(missingComponents, []);
   assert.ok(score >= 0 && score <= 100);
+  assert.ok(components.premiumEdge !== null && components.premiumEdge >= 0 && components.premiumEdge <= 100);
   assert.ok(components.riskReward !== null && components.riskReward >= 0 && components.riskReward <= 100);
   assert.ok(components.pop !== null);
   assert.equal(components.ivRank, 72);
@@ -67,8 +68,9 @@ test('a missing IV rank and no margin figure are excluded, not treated as zero â
   const c = condor(s);
   const { score, components, missingComponents } = scoreTradeQuality(c, s, { ivRank: null });
 
-  assert.deepEqual(missingComponents.sort(), ['ivRank', 'marginEfficiency'].sort());
+  assert.deepEqual(missingComponents.sort(), ['ivRank', 'marginEfficiency', 'premiumEdge'].sort());
   assert.equal(components.ivRank, null);
+  assert.equal(components.premiumEdge, null);
   assert.equal(components.marginEfficiency, null);
   // Score must still come purely from the present components, not get
   // dragged toward zero just because two components are unavailable.

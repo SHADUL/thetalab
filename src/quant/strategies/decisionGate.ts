@@ -75,6 +75,7 @@ function describeCandidate(evaluation: ExpiryEvaluation): string {
     `${evaluation.strategyLabel.toUpperCase()} — expiry in ${evaluation.dte}d`,
     `Legs: ${legs}`,
     `Bias: ${evaluation.bias} — ${evaluation.biasReason}`,
+    `Premium Edge (IV vs realized vol): ${raw.premiumEdgePct === null ? 'n/a — no historical closes supplied' : `${raw.premiumEdgePct >= 0 ? '+' : ''}${raw.premiumEdgePct.toFixed(1)}% ${raw.premiumEdgePct >= 0 ? '(implied move richer than history)' : '(implied move below what typically realizes — weak setup)'}`}`,
     `IV Rank: ${raw.ivRank === null ? 'n/a — no history supplied' : raw.ivRank.toFixed(0)}`,
     `Probability of profit (model-implied): ${fmtPct(raw.pop)}`,
     `Strike safety: ${raw.strikeSafetySigma === null ? 'n/a' : `${raw.strikeSafetySigma.toFixed(2)}σ from forward`}`,

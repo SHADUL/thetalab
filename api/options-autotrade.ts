@@ -51,6 +51,7 @@ import { selectStrikesNearSpot, chunk, kiteQuoteToOptionRow, buildInstrumentKeys
 import { normalise, type RawChainPayload } from '../src/quant/data/adapter.ts';
 import { enrichChain } from '../src/quant/enrich.ts';
 import { evaluateExpiries } from '../src/quant/strategies/expirySelector.ts';
+import type { HistoricalClose } from '../src/quant/analytics/realizedVolatility.ts';
 import { decideTrade, type DecisionThresholds } from '../src/quant/strategies/decisionGate.ts';
 import { computePositionSize, type PortfolioState, type OpenPositionSummary } from '../src/quant/strategies/positionSizing.ts';
 import { runPreTradeValidation } from '../src/quant/execution/preTradeValidation.ts';
@@ -86,6 +87,34 @@ async function kiteFetch(path: string, opts: { method?: string; token: string; a
     throw new Error(json?.message || `Kite API error (${resp.status}) on ${path}`);
   }
   return json?.data;
+}
+
+/**
+ * Real daily closes for the underlying index, via Kite's own historical
+ * candle API on the INDEX's instrument_token (indices don't expire like
+ * option contracts, so — unlike the option chain itself, see this file's
+ * header — this endpoint reliably has a real multi-year history). The
+ * instrument_token is read straight off the same live /quote response
+ * already fetched for the spot price, rather than a second lookup.
+ *
+ * Feeds evaluateExpiries()'s historicalCloses param (see
+ * expirySelector.ts) for the IV/RV premium-edge calculation. Returns []
+ * on any failure — the caller treats an empty/short series as "exclude
+ * premiumEdge from the score", never as a fabricated/neutral edge.
+ */
+async function fetchHistoricalCloses(
+  instrumentToken: number,
+  opts: { token: string; apiKey: string },
+  lookbackCalendarDays = 400,
+): Promise<HistoricalClose[]> {
+  const to = new Date().toISOString().slice(0, 10);
+  const from = new Date(Date.now() - lookbackCalendarDays * 86_400_000).toISOString().slice(0, 10);
+  const data = await kiteFetch(`/instruments/historical/${instrumentToken}/day?from=${from}&to=${to}`, opts);
+  const candles: unknown[] = data?.candles ?? [];
+  return candles
+    .filter((c): c is [string, number, number, number, number, number] => Array.isArray(c) && c.length >= 5)
+    .map((c) => ({ date: String(c[0]).slice(0, 10), close: Number(c[4]) }))
+    .filter((c) => c.close > 0);
 }
 
 function isMarketOpenIST(now = new Date()): boolean {
@@ -214,6 +243,7 @@ function serializeExpiryEvaluation(e: ReturnType<typeof evaluateExpiries>[number
     candidateCount: e.candidateCount,
     failureCount: e.failureCount,
     skipReason: e.skipReason,
+    premiumEdge: e.premiumEdge,
     best: best ? {
       targetShortDelta: best.targetShortDelta,
       wingWidth: best.wingWidth,
@@ -327,6 +357,22 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   const spot = spotData?.[indexKey]?.last_price;
   if (!(spot > 0)) { res.status(502).json({ ok: false, error: 'no_spot_price' }); return; }
 
+  // 2b. Real historical closes for the underlying (for the premium-edge —
+  // IV vs realized-volatility — signal). Best-effort: a failure here must
+  // not fail the whole scan, it just means premiumEdge is excluded from
+  // the quality score rather than fabricated (see fetchHistoricalCloses).
+  const instrumentToken = spotData?.[indexKey]?.instrument_token;
+  let historicalCloses: HistoricalClose[] = [];
+  if (instrumentToken) {
+    try {
+      historicalCloses = await fetchHistoricalCloses(instrumentToken, { token, apiKey });
+    } catch (err: any) {
+      await log('error', `Historical closes fetch failed for ${symbol} — premiumEdge will be excluded, not fabricated`, { message: err.message });
+    }
+  } else {
+    await log('error', `No instrument_token in quote response for ${indexKey} — premiumEdge will be excluded, not fabricated`);
+  }
+
   // 3. Build the live chain: for each eligible expiry, select strikes near
   // spot from the synced instruments, batch-fetch quotes, map into rows.
   const lotSize = instrumentRows.find((r: any) => r.expiry === eligibleExpiries[0])?.lot_size ?? null;
@@ -386,7 +432,8 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   // 4. Run the decision pipeline (skew -> strategy -> optimizer -> expiry
   // selection -> quality score). No live IV-rank history is wired into
   // this endpoint yet (see decisionGate.ts's own handling of a null
-  // ivRank — it's excluded and renormalized, not fabricated).
+  // ivRank — it's excluded and renormalized, not fabricated). premiumEdge
+  // IS wired, from the real historicalCloses fetched above.
   const step = enriched.slices[0]?.forward ? inferStrikeStep(enriched.slices[0].quotes.map((q) => q.quote.strike)) : 50;
   const wingWidths = [2, 4, 6].map((m) => m * step);
   const evaluations = evaluateExpiries(enriched, {
@@ -395,6 +442,7 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     minDte: settings.min_dte,
     maxDte: settings.max_dte,
     ivRank: null,
+    historicalCloses,
   });
   const thresholds: DecisionThresholds = {
     noTradeBelow: settings.no_trade_below,
@@ -405,6 +453,7 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   const diagnostics = {
     spot, symbol, scannedAt: new Date(now).toISOString(),
     eligibleExpiries, rejectedRows: rejected.length,
+    historicalClosesFetched: historicalCloses.length,
     evaluations: evaluations.map(serializeExpiryEvaluation),
   };
 

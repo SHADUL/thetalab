@@ -3,6 +3,7 @@ import App from "./App.jsx";
 import SwingScanner from "./components/SwingScanner.jsx";
 import IntradayTrader from "./components/IntradayTrader.jsx";
 import OptionsAutoTrader from "./components/OptionsAutoTrader.jsx";
+import VwapScalper from "./components/VwapScalper.jsx";
 
 /**
  * Options Desk and Swing Scanner are two genuinely separate products that
@@ -41,13 +42,16 @@ export default function Root() {
             onClick={() => setSection("intraday")} className="seg">Intraday Trader</button>
           <button role="tab" aria-selected={section === "options-auto"} data-on={section === "options-auto"}
             onClick={() => setSection("options-auto")} className="seg">Options Auto-Trader</button>
+          <button role="tab" aria-selected={section === "vwap-scalper"} data-on={section === "vwap-scalper"}
+            onClick={() => setSection("vwap-scalper")} className="seg">VWAP Scalper</button>
         </div>
       </div>
       <div className="flex-1 min-h-0">
         {section === "options" ? <App />
           : section === "swing" ? <SwingScanner />
           : section === "intraday" ? <IntradayTrader />
-          : <OptionsAutoTrader />}
+          : section === "options-auto" ? <OptionsAutoTrader />
+          : <VwapScalper />}
       </div>
     </div>
   );

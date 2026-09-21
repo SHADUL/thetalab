@@ -43,6 +43,22 @@
  * triggered (kite_session, shared-secret protected); settings/positions/log/
  * kill-switch/daily-stats/clear-daily-lock are browser-facing and need no
  * secret, matching api/intraday.js's own settings/positions convention.
+ *
+ * VWAP 3σ Mean Reversion Scalper (NSE, src/vwap-scalper/) — a completely
+ * separate standalone strategy, folded into this same file for the exact
+ * same reason this file exists at all: it needs .ts imports, and this is
+ * the one file proven to support them on Vercel (see above). Not
+ * thematically related to options — purely a technical-constraint
+ * cohabitation, kept clearly namespaced:
+ *   vwap-scalper-scan     — cron/secret-gated: scans the NIFTY 50
+ *                       universe's live 1-minute bars for a fresh
+ *                       touch/rejection signal and opens a sized PAPER
+ *                       position. See handleVwapScalperScan.
+ *   vwap-scalper-monitor  — cron/secret-gated: live target/stop
+ *                       monitoring + unrealized P&L for every ACTIVE
+ *                       position. See handleVwapScalperMonitor.
+ *   vwap-scalper-settings/positions/log/kill-switch — browser-facing,
+ *                       mirroring the options resources of the same shape.
  */
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { parseKiteOptionsCSV, filterActiveInstruments, OPTIONS_SYMBOLS } from '../src/lib/optionsInstrumentMaster.js';
@@ -63,6 +79,11 @@ import { runPreTradeValidation } from '../src/quant/execution/preTradeValidation
 import { runPaperExecution, type PlannedLeg } from '../src/quant/execution/paperFill.ts';
 import { evaluateExit, type ShortStrike } from '../src/quant/execution/exitEngine.ts';
 import { checkDailyRiskLock } from '../src/quant/execution/dailyRiskLock.ts';
+import { computeVwapBands } from '../src/vwap-scalper/vwapBands.ts';
+import { detectVwapScalperSignals } from '../src/vwap-scalper/signals.ts';
+import { computeVwapScalperPositionSize } from '../src/vwap-scalper/positionSizing.ts';
+import { NIFTY_50_UNIVERSE } from '../src/vwap-scalper/nifty50Universe.ts';
+import type { Bar as VwapBar, VwapScalperParams } from '../src/vwap-scalper/types.ts';
 
 const KITE_BASE = 'https://api.kite.trade';
 
@@ -926,6 +947,348 @@ async function handleClearDailyLock(req: any, res: any, supabase: SupabaseClient
   res.status(200).json({ ok: true, message: 'Daily risk lock cleared. New entries can resume on the next scan.' });
 }
 
+/* ================================================================== */
+/* VWAP 3σ Mean Reversion Scalper (NSE) — src/vwap-scalper/            */
+/*                                                                      */
+/* A standalone strategy, folded into THIS file rather than            */
+/* api/intraday.js (its thematic home) because this file is the one    */
+/* proven to support .ts imports on Vercel's function bundler (see this */
+/* file's own header) — api/intraday.js is plain .js, and a plain .js   */
+/* file importing a .ts sibling has never been verified to work here.   */
+/* Resources: vwap-scalper-settings/positions/log/kill-switch (browser- */
+/* facing, no secret) and vwap-scalper-scan/vwap-scalper-monitor (cron/ */
+/* secret-gated), mirroring the options resources' own split exactly.   */
+/* ================================================================== */
+
+const VWAP_SCALPER_EDITABLE_NUMERIC_FIELDS = [
+  'account_equity', 'max_risk_per_trade_pct', 'max_daily_loss_pct', 'max_open_positions', 'max_consecutive_losses',
+  'stdev_multiplier', 'slope_filter_lookback_bars', 'slope_filter_threshold_sigma', 'trend_filter_ema_length',
+  'stop_loss_percent', 'stop_loss_sigma_buffer',
+];
+const VWAP_SCALPER_EDITABLE_BOOL_FIELDS = ['slope_filter_enabled', 'trend_filter_enabled', 'stop_loss_enabled'];
+
+async function handleVwapScalperSettings(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method === 'GET') {
+    const { data, error } = await supabase.from('vwap_scalper_settings').select('*').eq('id', 1).maybeSingle();
+    if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
+    res.status(200).json(data ?? {});
+    return;
+  }
+  if (req.method === 'PUT' || req.method === 'POST') {
+    const body = req.body ?? {};
+    if (body.execution_mode !== undefined && !['OFF', 'PAPER'].includes(body.execution_mode)) {
+      res.status(400).json({ error: 'bad_request', message: 'execution_mode must be OFF or PAPER — ALERT_ONLY/SEMI_AUTO/AUTO aren\'t implemented yet.' });
+      return;
+    }
+    if (body.entry_mode !== undefined && !['TOUCH', 'REJECTION'].includes(body.entry_mode)) {
+      res.status(400).json({ error: 'bad_request', message: 'entry_mode must be TOUCH or REJECTION.' });
+      return;
+    }
+    if (body.stop_loss_mode !== undefined && !['PERCENTAGE', 'BEYOND_3SIGMA'].includes(body.stop_loss_mode)) {
+      res.status(400).json({ error: 'bad_request', message: 'stop_loss_mode must be PERCENTAGE or BEYOND_3SIGMA.' });
+      return;
+    }
+    const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (body.execution_mode !== undefined) update.execution_mode = body.execution_mode;
+    if (body.entry_mode !== undefined) update.entry_mode = body.entry_mode;
+    if (body.stop_loss_mode !== undefined) update.stop_loss_mode = body.stop_loss_mode;
+    for (const key of VWAP_SCALPER_EDITABLE_NUMERIC_FIELDS) {
+      if (body[key] !== undefined) {
+        const n = Number(body[key]);
+        if (!Number.isFinite(n)) { res.status(400).json({ error: 'bad_request', message: `${key} must be numeric.` }); return; }
+        update[key] = n;
+      }
+    }
+    for (const key of VWAP_SCALPER_EDITABLE_BOOL_FIELDS) {
+      if (body[key] !== undefined) update[key] = Boolean(body[key]);
+    }
+    const { data, error } = await supabase.from('vwap_scalper_settings').update(update).eq('id', 1).select('*').single();
+    if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
+    res.status(200).json(data);
+    return;
+  }
+  res.status(405).json({ error: 'method_not_allowed' });
+}
+
+async function handleVwapScalperPositions(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const { data, error } = await supabase.from('vwap_scalper_positions').select('*').order('created_at', { ascending: false }).limit(200);
+  if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
+  const rows = data ?? [];
+  res.status(200).json({ active: rows.filter((r: any) => r.status === 'ACTIVE'), closed: rows.filter((r: any) => r.status !== 'ACTIVE') });
+}
+
+async function handleVwapScalperLog(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const { data, error } = await supabase.from('vwap_scalper_log').select('*').order('created_at', { ascending: false }).limit(50);
+  if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
+  res.status(200).json({ entries: data ?? [] });
+}
+
+/** Same "flip execution_mode to OFF only" capability as the options kill switch — see handleKillSwitch's own docs for why it isn't an emergency square-off. */
+async function handleVwapScalperKillSwitch(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const { error } = await supabase.from('vwap_scalper_settings').update({ execution_mode: 'OFF', updated_at: new Date().toISOString() }).eq('id', 1);
+  if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
+  await supabase.from('vwap_scalper_log').insert({ level: 'info', message: 'Kill switch triggered from the dashboard — execution_mode set to OFF.' });
+  const { count } = await supabase.from('vwap_scalper_positions').select('id', { count: 'exact', head: true }).eq('status', 'ACTIVE');
+  res.status(200).json({
+    ok: true,
+    message: `New entries stopped (execution_mode set to OFF).${count ? ` ${count} paper position(s) remain open — vwap-scalper-monitor keeps evaluating them independently on its own cron.` : ' No open positions.'}`,
+  });
+}
+
+function vwapScalperParamsFromSettings(settings: any): VwapScalperParams {
+  return {
+    stdevMultiplier: Number(settings.stdev_multiplier) || 1,
+    entryMode: settings.entry_mode === 'TOUCH' ? 'TOUCH' : 'REJECTION',
+    slopeFilter: settings.slope_filter_enabled
+      ? { lookbackBars: Number(settings.slope_filter_lookback_bars) || 10, thresholdSigma: Number(settings.slope_filter_threshold_sigma) || 1 }
+      : null,
+    trendFilter: settings.trend_filter_enabled
+      ? { emaLength: Number(settings.trend_filter_ema_length) || 200 }
+      : null,
+    stopLoss: settings.stop_loss_enabled
+      ? {
+          mode: settings.stop_loss_mode === 'PERCENTAGE' ? 'PERCENTAGE' : 'BEYOND_3SIGMA',
+          percent: Number(settings.stop_loss_percent) || 0.5,
+          sigmaBuffer: Number(settings.stop_loss_sigma_buffer) || 0.5,
+        }
+      : null,
+  };
+}
+
+/**
+ * The scan: fetches today's 1-minute bars for every NIFTY 50 name without
+ * an already-open position, runs the exact same signal engine
+ * (computeVwapBands + detectVwapScalperSignals) the tests already cover,
+ * and opens a sized PAPER position for any symbol whose signal fired on
+ * the LAST (most recent) bar — a signal earlier in the array was either
+ * already acted on by a prior scan or genuinely missed, and re-opening
+ * against it now would be trading a stale setup.
+ *
+ * Sizing REQUIRES a real stop (see positionSizing.ts's own refusal
+ * discipline) — with stop_loss_enabled off (the Pine source's own
+ * default), no position can be sized at all, and this is logged plainly
+ * rather than silently no-op'd, so it's never mistaken for "no signals
+ * fired" when the real reason is "sizing has nothing to size against".
+ */
+async function handleVwapScalperScan(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+
+  const apiKey = process.env.KITE_API_KEY;
+  if (!apiKey) { res.status(500).json({ error: 'server_misconfigured' }); return; }
+
+  const log = (level: 'info' | 'error', message: string, detail?: unknown) =>
+    supabase.from('vwap_scalper_log').insert({ level, message, detail: detail ?? null });
+
+  const { data: settings } = await supabase.from('vwap_scalper_settings').select('*').eq('id', 1).maybeSingle();
+  if (!settings) { res.status(500).json({ ok: false, error: 'settings_not_found' }); return; }
+  if (settings.execution_mode !== 'PAPER') {
+    res.status(200).json({ ok: true, skipped: `execution_mode is '${settings.execution_mode}', not PAPER` });
+    return;
+  }
+  if (!isMarketOpenIST()) { res.status(200).json({ ok: true, skipped: 'outside_market_hours' }); return; }
+
+  const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const { data: dailyRow } = await supabase.from('vwap_scalper_daily_stats').select('*').eq('trade_date', todayIST).maybeSingle();
+  const lock = checkDailyRiskLock(
+    { realizedPnlToday: Number(dailyRow?.realized_pnl) || 0, consecutiveLosses: Number(dailyRow?.consecutive_losses) || 0 },
+    { equity: Number(settings.account_equity) || 0, maxDailyLossPct: settings.max_daily_loss_pct, maxConsecutiveLosses: settings.max_consecutive_losses },
+  );
+  if (lock.locked) {
+    if (!dailyRow?.locked) {
+      await supabase.from('vwap_scalper_daily_stats').upsert({ trade_date: todayIST, locked: true, lock_reason: lock.reason });
+      await log('info', `Daily risk lock engaged: ${lock.reason} — ${lock.detail}`);
+    }
+    res.status(200).json({ ok: true, skipped: 'daily_risk_locked', reason: lock.reason, detail: lock.detail });
+    return;
+  }
+
+  const { data: session } = await supabase.from('kite_session').select('access_token').eq('id', 1).maybeSingle();
+  const token = session?.access_token;
+  if (!token) { res.status(200).json({ ok: true, skipped: 'no_kite_session' }); return; }
+
+  const { data: activeRows } = await supabase.from('vwap_scalper_positions').select('symbol').eq('status', 'ACTIVE');
+  const activeSymbols = new Set((activeRows ?? []).map((r: any) => r.symbol));
+  const openSlots = Math.max(0, (Number(settings.max_open_positions) || 0) - activeSymbols.size);
+  if (openSlots <= 0) {
+    res.status(200).json({ ok: true, skipped: 'max_open_positions_reached', activeCount: activeSymbols.size });
+    return;
+  }
+
+  const candidateSymbols = NIFTY_50_UNIVERSE.map((s) => s.symbol).filter((s) => !activeSymbols.has(s));
+  const { data: stockRows } = await supabase.from('stocks').select('symbol,instrument_token').in('symbol', candidateSymbols);
+  const tokenBySymbol = new Map((stockRows ?? []).map((r: any) => [r.symbol, r.instrument_token]));
+
+  const params = vwapScalperParamsFromSettings(settings);
+  const toDate = new Date().toISOString().slice(0, 10);
+  const opened: Array<{ symbol: string; direction: string; quantity: number }> = [];
+  const rejectedNoStop: string[] = [];
+  let checked = 0;
+  let signalsFired = 0;
+
+  for (const symbol of candidateSymbols) {
+    if (opened.length >= openSlots) break;
+    const instrumentToken = tokenBySymbol.get(symbol);
+    if (!instrumentToken) continue;
+
+    let candles: any;
+    try {
+      candles = await kiteFetch(`/instruments/historical/${instrumentToken}/minute?from=${toDate}&to=${toDate}`, { token, apiKey });
+    } catch (err: any) {
+      await log('error', `Historical candle fetch failed for ${symbol}`, { message: err.message });
+      continue;
+    }
+    checked++;
+    const bars: VwapBar[] = (candles?.candles ?? [])
+      .filter((c: unknown): c is [string, number, number, number, number, number] => Array.isArray(c))
+      .map((c: [string, number, number, number, number, number]) => ({ t: new Date(c[0]).getTime(), o: c[1], h: c[2], l: c[3], c: c[4], v: c[5] }));
+    if (bars.length === 0) continue;
+
+    const bands = computeVwapBands(bars, params.stdevMultiplier);
+    const signals = detectVwapScalperSignals(bars, bands, params, false);
+    const freshSignal = signals.find((s) => s.barIndex === bars.length - 1);
+    if (!freshSignal) continue;
+    signalsFired++;
+
+    if (freshSignal.stopPrice === null) {
+      rejectedNoStop.push(symbol);
+      continue;
+    }
+    const sizing = computeVwapScalperPositionSize({
+      accountEquity: Number(settings.account_equity) || 0,
+      maxRiskPerTradePct: Number(settings.max_risk_per_trade_pct) || 0,
+      entryPrice: freshSignal.entryPrice, stopPrice: freshSignal.stopPrice,
+    });
+    if (!sizing) {
+      await log('info', `${symbol}: ${freshSignal.direction} signal fired but could not be sized (budget too small for even 1 share).`);
+      continue;
+    }
+
+    const { error: insertErr } = await supabase.from('vwap_scalper_positions').insert({
+      symbol, direction: freshSignal.direction, quantity: sizing.quantity,
+      entry_price: freshSignal.entryPrice, vwap_at_entry: freshSignal.vwapAtEntry,
+      stop_price: freshSignal.stopPrice, entry_bar_time: new Date(bars[bars.length - 1].t).toISOString(),
+      status: 'ACTIVE',
+    });
+    if (insertErr) { await log('error', `Failed to open PAPER position for ${symbol}`, { message: insertErr.message }); continue; }
+
+    await log('info', `Opened PAPER position: ${symbol} ${freshSignal.direction} x${sizing.quantity} @ ₹${freshSignal.entryPrice.toFixed(2)} (stop ₹${freshSignal.stopPrice.toFixed(2)}) — ${freshSignal.reason}`);
+    opened.push({ symbol, direction: freshSignal.direction, quantity: sizing.quantity });
+
+    await supabase.from('vwap_scalper_daily_stats').upsert({ trade_date: todayIST, trades_taken: (Number(dailyRow?.trades_taken) || 0) + opened.length });
+  }
+
+  if (rejectedNoStop.length) {
+    await log('info', `${rejectedNoStop.length} signal(s) fired but stop_loss_enabled is off, so nothing could be sized: ${rejectedNoStop.join(', ')}.`);
+  }
+
+  res.status(200).json({ ok: true, checked, signalsFired, opened, rejectedNoStop, activeCount: activeSymbols.size + opened.length });
+}
+
+/**
+ * Live target/stop monitoring for every ACTIVE position — re-fetches
+ * today's bars-so-far (for the CURRENT vwap, which keeps moving) plus a
+ * live quote (for the current price), same two-source approach
+ * options-autotrade.ts's own handlePositionMonitor uses for its legs.
+ * Persists unrealized_pnl every cycle regardless of whether an exit also
+ * triggers, mirroring that same fix.
+ */
+async function handleVwapScalperMonitor(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+
+  const apiKey = process.env.KITE_API_KEY;
+  if (!apiKey) { res.status(500).json({ error: 'server_misconfigured' }); return; }
+
+  const log = (level: 'info' | 'error', message: string, detail?: unknown) =>
+    supabase.from('vwap_scalper_log').insert({ level, message, detail: detail ?? null });
+
+  const { data: settings } = await supabase.from('vwap_scalper_settings').select('*').eq('id', 1).maybeSingle();
+  if (!settings) { res.status(500).json({ ok: false, error: 'settings_not_found' }); return; }
+
+  const { data: session } = await supabase.from('kite_session').select('access_token').eq('id', 1).maybeSingle();
+  const token = session?.access_token;
+  if (!token) { res.status(200).json({ ok: true, skipped: 'no_kite_session' }); return; }
+
+  const { data: positions } = await supabase.from('vwap_scalper_positions').select('*').eq('status', 'ACTIVE');
+  if (!positions?.length) { res.status(200).json({ ok: true, checked: 0, closed: [] }); return; }
+
+  const { data: stockRows } = await supabase.from('stocks').select('symbol,instrument_token').in('symbol', positions.map((p: any) => p.symbol));
+  const tokenBySymbol = new Map((stockRows ?? []).map((r: any) => [r.symbol, r.instrument_token]));
+
+  const quoteMap = new Map<string, any>();
+  for (const batch of chunk(positions.map((p: any) => `NSE:${p.symbol}`), MAX_QUOTE_INSTRUMENTS)) {
+    try {
+      const data = await kiteFetch(`/quote?${batch.map((k: string) => `i=${encodeURIComponent(k)}`).join('&')}`, { token, apiKey });
+      for (const key of batch) if (data?.[key]) quoteMap.set(key, data[key]);
+    } catch (err: any) {
+      await log('error', 'Live quote batch failed during vwap-scalper-monitor', { message: err.message });
+    }
+  }
+
+  const params = vwapScalperParamsFromSettings(settings);
+  const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const toDate = new Date().toISOString().slice(0, 10);
+  const closed: Array<{ positionId: number; symbol: string; reason: string; realizedPnl: number }> = [];
+
+  for (const p of positions) {
+    const quote = quoteMap.get(`NSE:${p.symbol}`);
+    const ltp = quote?.last_price;
+    if (!(ltp > 0)) { await log('error', `Position #${p.id} (${p.symbol}): no live quote this cycle — skipped.`); continue; }
+
+    const instrumentToken = tokenBySymbol.get(p.symbol);
+    if (!instrumentToken) { await log('error', `Position #${p.id} (${p.symbol}): no instrument token — skipped.`); continue; }
+    let candles: any;
+    try {
+      candles = await kiteFetch(`/instruments/historical/${instrumentToken}/minute?from=${toDate}&to=${toDate}`, { token, apiKey });
+    } catch (err: any) {
+      await log('error', `Position #${p.id} (${p.symbol}): historical candle fetch failed — skipped`, { message: err.message });
+      continue;
+    }
+    const bars: VwapBar[] = (candles?.candles ?? [])
+      .filter((c: unknown): c is [string, number, number, number, number, number] => Array.isArray(c))
+      .map((c: [string, number, number, number, number, number]) => ({ t: new Date(c[0]).getTime(), o: c[1], h: c[2], l: c[3], c: c[4], v: c[5] }));
+    if (bars.length === 0) { await log('error', `Position #${p.id} (${p.symbol}): no bars this session yet — skipped.`); continue; }
+    const currentVwap = computeVwapBands(bars, params.stdevMultiplier)[bars.length - 1].vwap;
+
+    const direction = p.direction as 'LONG' | 'SHORT';
+    const unrealizedPnl = (direction === 'LONG' ? ltp - Number(p.entry_price) : Number(p.entry_price) - ltp) * Number(p.quantity);
+    await supabase.from('vwap_scalper_positions').update({
+      unrealized_pnl: unrealizedPnl, unrealized_pnl_updated_at: new Date().toISOString(),
+    }).eq('id', p.id);
+
+    const stopPrice = p.stop_price !== null ? Number(p.stop_price) : null;
+    const stopHit = stopPrice !== null && (direction === 'LONG' ? ltp <= stopPrice : ltp >= stopPrice);
+    const targetHit = direction === 'LONG' ? ltp >= currentVwap : ltp <= currentVwap;
+    const sessionEnded = !isMarketOpenIST();
+
+    if (!stopHit && !targetHit && !sessionEnded) continue;
+
+    const exitPrice = stopHit ? stopPrice! : targetHit ? currentVwap : ltp;
+    const reason = stopHit ? 'STOP' : targetHit ? 'TARGET' : 'SESSION_END';
+    const realizedPnl = (direction === 'LONG' ? exitPrice - Number(p.entry_price) : Number(p.entry_price) - exitPrice) * Number(p.quantity);
+
+    const { error: updateErr } = await supabase.from('vwap_scalper_positions').update({
+      status: 'CLOSED', exit_price: exitPrice, exit_reason: reason, exit_bar_time: new Date().toISOString(),
+      realized_pnl: realizedPnl, unrealized_pnl: realizedPnl, updated_at: new Date().toISOString(),
+    }).eq('id', p.id);
+    if (updateErr) { await log('error', `Position #${p.id}: failed to persist close`, { message: updateErr.message }); continue; }
+
+    const { data: dailyRow } = await supabase.from('vwap_scalper_daily_stats').select('realized_pnl,consecutive_losses').eq('trade_date', todayIST).maybeSingle();
+    await supabase.from('vwap_scalper_daily_stats').upsert({
+      trade_date: todayIST,
+      realized_pnl: (Number(dailyRow?.realized_pnl) || 0) + realizedPnl,
+      consecutive_losses: realizedPnl < 0 ? (Number(dailyRow?.consecutive_losses) || 0) + 1 : 0,
+    });
+
+    await log('info', `Closed PAPER position #${p.id} (${p.symbol} ${direction}): ${reason} — realized P&L ₹${realizedPnl.toFixed(0)}.`);
+    closed.push({ positionId: p.id, symbol: p.symbol, reason, realizedPnl });
+  }
+
+  res.status(200).json({ ok: true, checked: positions.length, closed });
+}
+
 export default async function handler(req: any, res: any) {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -942,6 +1305,10 @@ export default async function handler(req: any, res: any) {
   if (resource === 'kill-switch') return handleKillSwitch(req, res, supabase);
   if (resource === 'daily-stats') return handleDailyStats(req, res, supabase);
   if (resource === 'clear-daily-lock') return handleClearDailyLock(req, res, supabase);
+  if (resource === 'vwap-scalper-settings') return handleVwapScalperSettings(req, res, supabase);
+  if (resource === 'vwap-scalper-positions') return handleVwapScalperPositions(req, res, supabase);
+  if (resource === 'vwap-scalper-log') return handleVwapScalperLog(req, res, supabase);
+  if (resource === 'vwap-scalper-kill-switch') return handleVwapScalperKillSwitch(req, res, supabase);
 
   // Cron/server-triggered resources — shared-secret gate, since these do
   // real work (live Kite calls, writing a paper position) on a schedule
@@ -955,5 +1322,7 @@ export default async function handler(req: any, res: any) {
   if (resource === 'margin') return handleMargin(req, res, supabase);
   if (resource === 'paper-scan') return handlePaperScan(req, res, supabase);
   if (resource === 'position-monitor') return handlePositionMonitor(req, res, supabase);
+  if (resource === 'vwap-scalper-scan') return handleVwapScalperScan(req, res, supabase);
+  if (resource === 'vwap-scalper-monitor') return handleVwapScalperMonitor(req, res, supabase);
   res.status(400).json({ error: 'bad_request', message: 'Unknown or missing ?resource=.' });
 }

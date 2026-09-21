@@ -82,7 +82,7 @@ function describeCandidate(evaluation: ExpiryEvaluation): string {
     `Risk/Reward: ${fmtNum(raw.riskReward)} (max profit ₹${best.result.maxProfit.toFixed(0)} / max loss ₹${best.result.maxLoss.toFixed(0)})`,
     `Expected value per unit of risk: ${best.evPerUnitRisk === null ? 'n/a' : best.evPerUnitRisk.toFixed(2)}` +
       (best.expectedValue !== null ? ` (EV ₹${best.expectedValue.toFixed(0)})` : ''),
-    `Liquidity: ${liquidityLabel(best.qualityScore.components.liquidity)}` +
+    `Liquidity: ${best.liquidity.tier} (score: ${liquidityLabel(best.qualityScore.components.liquidity)})` +
       (raw.avgSpreadPct !== null ? ` (avg spread ${fmtPct(raw.avgSpreadPct, 1)}` : ' (spread n/a — settlement-only data')  +
       `, min OI ${raw.minOpenInterest ?? 'n/a'})`,
     `Margin efficiency: ${raw.marginEfficiency === null ? 'not evaluated — no live margin figure supplied' : fmtPct(raw.marginEfficiency)}`,

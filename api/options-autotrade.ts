@@ -281,6 +281,7 @@ function serializeExpiryEvaluation(e: ReturnType<typeof evaluateExpiries>[number
       forward: best.result.forward,
       forwardSource: best.result.forwardSource,
       atmIv: best.result.atmIv,
+      liquidity: best.liquidity,
       qualityScore: {
         score: best.qualityScore.score,
         components: best.qualityScore.components,

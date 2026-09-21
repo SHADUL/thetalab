@@ -17,7 +17,8 @@
  */
 import { buildIronCondor, type IronCondorFailure, type IronCondorResult } from './ironCondor.ts';
 import { buildCreditSpread, type CreditSpreadFailure, type CreditSpreadResult } from './creditSpread.ts';
-import type { EnrichedSlice, Right } from '../types.ts';
+import { classifyLegLiquidity, classifyStrategyLiquidity, type StrategyLiquidity } from '../analytics/liquidity.ts';
+import type { EnrichedQuote, EnrichedSlice, Right } from '../types.ts';
 
 export type StrategyLabel = 'Iron Condor' | 'Bull Put Spread' | 'Bear Call Spread';
 
@@ -53,6 +54,14 @@ export interface OptimizerCandidate {
   expectedValue: number | null;
   /** expectedValue / maxLoss — the ranking metric. Null alongside expectedValue. */
   evPerUnitRisk: number | null;
+  /**
+   * The HARD liquidity gate's own read (see analytics/liquidity.ts) — never
+   * UNTRADABLE here, since an UNTRADABLE candidate is rejected into
+   * `failures` before it ever reaches this list. Distinct from
+   * tradeQualityScore.ts's own soft liquidity SCORE, which this survives
+   * regardless of tier.
+   */
+  liquidity: StrategyLiquidity;
 }
 
 export interface OptimizerFailure {
@@ -123,6 +132,8 @@ export function generateCandidates(slice: EnrichedSlice, params: StrikeOptimizer
   // so keeping whichever was built first loses no information.
   const seen = new Set<string>();
 
+  const legLookup = new Map(slice.quotes.map((q) => [`${q.quote.strike}:${q.quote.right}`, q]));
+
   for (const targetShortDelta of deltaTargets) {
     for (const wingWidth of params.wingWidths) {
       const result = buildOne(slice, params.strategyLabel, targetShortDelta, wingWidth, params.lotSize, params.entryPriceOverride);
@@ -132,10 +143,27 @@ export function generateCandidates(slice: EnrichedSlice, params: StrikeOptimizer
       }
       const key = result.legs.map((l) => `${l.side}${l.strike}${l.right}`).sort().join('|');
       if (seen.has(key)) continue;
+
+      // HARD liquidity gate (see analytics/liquidity.ts's header): a
+      // mathematically attractive but genuinely unfillable spread must be
+      // rejected outright here, not merely soft-scored lower downstream
+      // and left to possibly win anyway.
+      const legQuotes = result.legs
+        .map((l) => legLookup.get(`${l.strike}:${l.right}`))
+        .filter((q): q is EnrichedQuote => q != null);
+      const liquidity = classifyStrategyLiquidity(legQuotes.map((q) => classifyLegLiquidity(q)));
+      if (liquidity.tier === 'UNTRADABLE') {
+        seen.add(key);
+        failures.push({
+          strategyLabel: params.strategyLabel, targetShortDelta, wingWidth,
+          reason: `Rejected on liquidity: ${liquidity.blockingReasons.join('; ')}`,
+        });
+        continue;
+      }
       seen.add(key);
 
       const { expectedValue, evPerUnitRisk } = scoreExpectedValue(result);
-      candidates.push({ strategyLabel: params.strategyLabel, targetShortDelta, wingWidth, result, expectedValue, evPerUnitRisk });
+      candidates.push({ strategyLabel: params.strategyLabel, targetShortDelta, wingWidth, result, expectedValue, evPerUnitRisk, liquidity });
     }
   }
 

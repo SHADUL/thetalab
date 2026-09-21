@@ -124,3 +124,53 @@ test('wingWidthsFromStep scales multiples by the given strike step', () => {
   assert.deepEqual(wingWidthsFromStep(50, [2, 4, 6, 8]), [100, 200, 300, 400]);
   assert.deepEqual(wingWidthsFromStep(100), [200, 400, 600, 800]);
 });
+
+test('a candidate needing an UNTRADABLE leg (zero OI and zero volume) is rejected into failures, never scored as a candidate', () => {
+  const T = yearFraction(NOW, EXPIRY);
+  const r = 0.065;
+  const vol = 0.13;
+  // Every CE strike has zero OI/volume — no Iron Condor can be built
+  // without a call leg, so every candidate this generates must be
+  // rejected by the hard liquidity gate regardless of which delta/wing
+  // combination happens to be tried.
+  const rows = STRIKES.flatMap((strike) =>
+    (['CE', 'PE'] as const).map((right) => ({
+      right, strike, expiry: EXPIRY, asOf: NOW,
+      settle: black76({ forward: FORWARD, strike, timeToExpiry: T, vol, rate: r, right }).price,
+      openInterest: right === 'CE' ? 0 : 50_000,
+      volume: right === 'CE' ? 0 : 20_000,
+    })),
+  );
+  const payload: RawChainPayload = {
+    source: { providerId: 'test-live', kind: 'live', retrievedAt: NOW },
+    contract: NIFTY,
+    context: { valuationTime: NOW, spot: FORWARD * 0.998, futures: null, riskFreeRate: r, dividendYield: 0 },
+    rows,
+  };
+  const { chain } = normalise(payload);
+  const s = enrichChain(chain).slices[0];
+
+  const { candidates, failures } = generateCandidates(s, {
+    strategyLabel: 'Iron Condor', lotSize: 75,
+    deltaTargets: DEFAULT_DELTA_TARGETS,
+    wingWidths: wingWidthsFromStep(100, [2, 4, 6]),
+  });
+
+  assert.equal(candidates.length, 0, 'every candidate needs a call leg, and every call leg is untradable');
+  assert.ok(failures.length > 0);
+  assert.ok(failures.every((f) => /Rejected on liquidity/.test(f.reason)), JSON.stringify(failures.map((f) => f.reason)));
+  assert.ok(failures.some((f) => /zero open interest and zero volume/.test(f.reason)));
+});
+
+test('a healthy chain still returns real candidates, each carrying its own strategy liquidity tier', () => {
+  const s = slice();
+  const { candidates } = generateCandidates(s, {
+    strategyLabel: 'Iron Condor', lotSize: 75,
+    deltaTargets: DEFAULT_DELTA_TARGETS,
+    wingWidths: wingWidthsFromStep(100, [2, 4, 6]),
+  });
+  assert.ok(candidates.length > 0);
+  for (const c of candidates) {
+    assert.ok(['LIQUID', 'ACCEPTABLE', 'POOR'].includes(c.liquidity.tier), `UNTRADABLE candidates must never reach this list, got ${c.liquidity.tier}`);
+  }
+});

@@ -4,3 +4,7 @@ dist
 *.local
 .vercel
 .env
+
+# Historical bhavcopy fetches cached by the options backtest — large, and
+# trivially re-fetchable from NSE/BSE, so not worth committing.
+src/options-auto/backtest/.bhavcopy-cache/

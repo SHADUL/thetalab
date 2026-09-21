@@ -26,6 +26,10 @@
  *                       chain, runs the full decision pipeline, sizes and
  *                       validates the result, and records a PAPER position
  *                       (never a real order). See handlePaperScan below.
+ *   position-monitor  — the exit engine: re-quotes every leg of every
+ *                       ACTIVE position in one batched pass and closes
+ *                       anything that trips profit-target/stop-loss/
+ *                       strike-breach/time-exit. See handlePositionMonitor.
  *   settings          — browser-facing read/update of options_autotrade_settings.
  *   positions         — browser-facing read of positions + their legs.
  *   log               — browser-facing read of the most recent log entries.
@@ -48,12 +52,14 @@ import { decideTrade, type DecisionThresholds } from '../src/quant/strategies/de
 import { computePositionSize, type PortfolioState, type OpenPositionSummary } from '../src/quant/strategies/positionSizing.ts';
 import { runPreTradeValidation } from '../src/quant/execution/preTradeValidation.ts';
 import { runPaperExecution, type PlannedLeg } from '../src/quant/execution/paperFill.ts';
+import { evaluateExit, type ShortStrike } from '../src/quant/execution/exitEngine.ts';
 
 const KITE_BASE = 'https://api.kite.trade';
 
-// Kite's standard index quote keys. NIFTY/SENSEX are already used
-// elsewhere in this codebase (src/lib/kiteSymbol.js); BANKNIFTY's has not
-// been separately verified against a live call yet.
+// Kite's standard index quote keys — all three confirmed against live
+// paper-scan runs (2026-09-21). NIFTY/SENSEX were already used elsewhere
+// in this codebase (src/lib/kiteSymbol.js); BANKNIFTY's 'NSE:NIFTY BANK'
+// was this module's own addition and is now verified too, not assumed.
 const INDEX_QUOTE_KEY: Record<string, string> = {
   NIFTY: 'NSE:NIFTY 50',
   BANKNIFTY: 'NSE:NIFTY BANK',
@@ -452,11 +458,124 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   res.status(200).json({ ok: true, action: decision.action, opened: true, positionId: inserted.id, sizing, explanation: decision.explanation });
 }
 
+/**
+ * Position Monitor + Exit Engine (Phase 14-16) — the piece that was
+ * missing until now: without this, an opened paper position just sat as
+ * ACTIVE forever with no way to close except deleting the DB row by hand.
+ * Re-quotes every leg of every ACTIVE position in one batched pass (not
+ * one Kite call per position — bounded API usage regardless of how many
+ * are open), evaluates the multi-trigger exit engine, and closes anything
+ * that trips a condition, updating the SAME daily_stats.realized_pnl
+ * computePositionSize() already reads for the daily/weekly-loss caps —
+ * those caps have been live but functionally untested until this existed,
+ * since nothing ever wrote a realized P&L before.
+ */
+async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+
+  const apiKey = process.env.KITE_API_KEY;
+  if (!apiKey) { res.status(500).json({ error: 'server_misconfigured' }); return; }
+
+  const log = (level: 'info' | 'error', message: string, detail?: unknown) =>
+    supabase.from('options_autotrade_log').insert({ level, message, detail: detail ?? null });
+
+  const { data: settings } = await supabase.from('options_autotrade_settings').select('*').eq('id', 1).maybeSingle();
+  if (!settings) { res.status(500).json({ ok: false, error: 'settings_not_found' }); return; }
+
+  const { data: session } = await supabase.from('kite_session').select('access_token').eq('id', 1).maybeSingle();
+  const token = session?.access_token;
+  if (!token) { res.status(200).json({ ok: true, skipped: 'no_kite_session' }); return; }
+
+  const { data: positions, error: posErr } = await supabase
+    .from('options_autotrade_positions').select('*, options_autotrade_legs(*)').eq('status', 'ACTIVE');
+  if (posErr) { res.status(502).json({ ok: false, error: 'supabase_error', message: posErr.message }); return; }
+  if (!positions?.length) { res.status(200).json({ ok: true, checked: 0, closed: [] }); return; }
+
+  const symbolExchanges = OPTIONS_SYMBOLS as Record<string, string>;
+  const indexKeys = INDEX_QUOTE_KEY as Record<string, string>;
+
+  // Batch every quote this run needs across ALL open positions at once —
+  // every leg's tradingsymbol plus each distinct symbol's index quote key
+  // — rather than one Kite call per position, so API usage stays bounded
+  // regardless of how many positions happen to be open.
+  const legKeys = new Set<string>();
+  const symbolsNeeded = new Set<string>();
+  for (const p of positions) {
+    symbolsNeeded.add(p.symbol);
+    for (const l of (p.options_autotrade_legs ?? [])) legKeys.add(`${symbolExchanges[p.symbol] ?? 'NFO'}:${l.tradingsymbol}`);
+  }
+  for (const s of symbolsNeeded) { const key = indexKeys[s]; if (key) legKeys.add(key); }
+
+  const quoteMap = new Map<string, any>();
+  for (const batch of chunk([...legKeys], MAX_QUOTE_INSTRUMENTS)) {
+    let data: any;
+    try {
+      data = await kiteFetch(`/quote?${batch.map((k: string) => `i=${encodeURIComponent(k)}`).join('&')}`, { token, apiKey });
+    } catch (err: any) {
+      await log('error', 'Live quote batch failed during position-monitor', { message: err.message });
+      continue;
+    }
+    for (const key of batch) if (data?.[key]) quoteMap.set(key, data[key]);
+  }
+
+  const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const closed: Array<{ positionId: number; symbol: string; reason: string | null; realizedPnl: number }> = [];
+
+  for (const p of positions) {
+    const legs = p.options_autotrade_legs ?? [];
+    const exchange = symbolExchanges[p.symbol] ?? 'NFO';
+    let currentCostToClose = 0;
+    let missingQuote = false;
+    for (const l of legs) {
+      const price = quoteMap.get(`${exchange}:${l.tradingsymbol}`)?.last_price;
+      if (price == null) { missingQuote = true; continue; }
+      currentCostToClose += (l.side === 'SELL' ? 1 : -1) * price * l.quantity;
+    }
+    if (missingQuote) { await log('error', `Position #${p.id}: could not re-quote every leg — skipped this cycle.`); continue; }
+
+    const underlyingPrice = quoteMap.get(indexKeys[p.symbol])?.last_price;
+    if (!(underlyingPrice > 0)) { await log('error', `Position #${p.id}: no live spot price for ${p.symbol} — skipped this cycle.`); continue; }
+
+    const dte = Math.round((Date.parse(`${p.expiry}T00:00:00Z`) - Date.parse(`${todayIST}T00:00:00Z`)) / 86_400_000);
+    const shortStrikes: ShortStrike[] = legs
+      .filter((l: any) => l.side === 'SELL')
+      .map((l: any) => ({ strike: Number(l.strike), right: l.option_right }));
+
+    const decision = evaluateExit({
+      maxProfit: Number(p.max_profit) || 0, maxLoss: Number(p.max_loss) || 0, currentCostToClose, dte, underlyingPrice,
+      shortStrikes,
+      profitTargetPct: settings.profit_target_pct, stopLossCreditMultiple: settings.stop_loss_credit_multiple,
+      timeExitDte: settings.time_exit_dte, strikeBreachBufferPct: settings.strike_breach_buffer_pct,
+    });
+    if (decision.action !== 'CLOSE') continue;
+
+    const realizedPnl = (Number(p.max_profit) || 0) - currentCostToClose;
+    const { error: updateErr } = await supabase.from('options_autotrade_positions').update({
+      status: 'CLOSED', execution_state: 'CLOSED', exit_date: todayIST, exit_reason: decision.reason,
+      realized_pnl: realizedPnl, updated_at: new Date().toISOString(),
+    }).eq('id', p.id);
+    if (updateErr) { await log('error', `Position #${p.id}: failed to persist close`, { message: updateErr.message }); continue; }
+
+    const { data: dailyRow } = await supabase.from('options_autotrade_daily_stats').select('realized_pnl,consecutive_losses').eq('trade_date', todayIST).maybeSingle();
+    await supabase.from('options_autotrade_daily_stats').upsert({
+      trade_date: todayIST,
+      realized_pnl: (Number(dailyRow?.realized_pnl) || 0) + realizedPnl,
+      consecutive_losses: realizedPnl < 0 ? (Number(dailyRow?.consecutive_losses) || 0) + 1 : 0,
+    });
+
+    await log('info', `Closed PAPER position #${p.id} (${p.symbol} ${p.strategy_label}): ${decision.reason} — realized P&L ₹${realizedPnl.toFixed(0)}.`);
+    closed.push({ positionId: p.id, symbol: p.symbol, reason: decision.reason, realizedPnl });
+  }
+
+  res.status(200).json({ ok: true, checked: positions.length, closed });
+}
+
 const EDITABLE_SETTINGS_FIELDS = [
   'reserved_fund', 'max_risk_per_trade_pct', 'max_daily_loss_pct', 'max_weekly_loss_pct',
   'max_portfolio_risk_pct', 'max_margin_utilization_pct', 'max_positions', 'max_underlying_delta',
   'max_gamma', 'max_vega', 'max_correlated_group_risk_pct', 'no_trade_below', 'watch_below',
   'high_conviction_at_or_above', 'min_dte', 'max_dte',
+  'profit_target_pct', 'stop_loss_credit_multiple', 'time_exit_dte', 'strike_breach_buffer_pct',
 ] as const;
 
 /**
@@ -570,5 +689,6 @@ export default async function handler(req: any, res: any) {
   if (resource === 'instruments-sync') return handleInstrumentsSync(req, res, supabase);
   if (resource === 'margin') return handleMargin(req, res, supabase);
   if (resource === 'paper-scan') return handlePaperScan(req, res, supabase);
+  if (resource === 'position-monitor') return handlePositionMonitor(req, res, supabase);
   res.status(400).json({ error: 'bad_request', message: 'Unknown or missing ?resource=.' });
 }

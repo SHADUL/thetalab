@@ -1,0 +1,24 @@
+name: Options Auto-Trader Position Monitor
+
+# Every 5 minutes during market hours — the reliability floor for GitHub
+# Actions scheduled workflows (sub-5-minute schedules are documented as
+# unreliable under load) and, separately, a reasonable cadence for Kite's
+# rate limits given this batches every open position's legs into as few
+# quote calls as possible. Unlike paper-scan's 30-minute entry cadence,
+# exit conditions (profit target, stop loss, a short strike being
+# approached) genuinely benefit from checking more often once a position
+# is actually open.
+on:
+  schedule:
+    - cron: '*/5 3-10 * * 1-5'
+  workflow_dispatch: {}
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call position-monitor endpoint
+        run: |
+          curl -sf -X POST "https://thetalab-beta.vercel.app/api/options-autotrade?resource=position-monitor" \
+            -H "Authorization: Bearer ${{ secrets.OPTIONS_AUTOTRADE_CRON_SECRET }}" \
+            -w "\nHTTP %{http_code}\n"

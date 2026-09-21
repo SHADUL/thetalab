@@ -44,6 +44,14 @@ const EDITABLE_GROUPS = [
       { key: "max_dte", label: "Max DTE", step: 1, min: 1 },
     ],
   },
+  {
+    title: "Exit Engine", fields: [
+      { key: "profit_target_pct", label: "Profit target %", step: 1, min: 0, max: 100 },
+      { key: "stop_loss_credit_multiple", label: "Stop loss (× credit)", step: 0.1, min: 1 },
+      { key: "time_exit_dte", label: "Forced time-exit DTE", step: 1, min: 0 },
+      { key: "strike_breach_buffer_pct", label: "Strike breach buffer %", step: 0.1, min: 0 },
+    ],
+  },
 ];
 
 const DEFAULT_DRAFT = {
@@ -51,6 +59,7 @@ const DEFAULT_DRAFT = {
   max_portfolio_risk_pct: 10, max_margin_utilization_pct: 60, max_positions: 5,
   max_underlying_delta: 300, max_gamma: 50, max_vega: 5000, max_correlated_group_risk_pct: 6,
   no_trade_below: 70, watch_below: 80, high_conviction_at_or_above: 90, min_dte: 2, max_dte: 60,
+  profit_target_pct: 50, stop_loss_credit_multiple: 2, time_exit_dte: 2, strike_breach_buffer_pct: 0,
 };
 
 function PositionRow({ p }) {

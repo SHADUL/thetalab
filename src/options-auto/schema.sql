@@ -57,6 +57,10 @@ create table options_autotrade_settings (
   high_conviction_at_or_above numeric not null default 90,
   min_dte integer not null default 2,
   max_dte integer not null default 60,
+  profit_target_pct numeric not null default 50,
+  stop_loss_credit_multiple numeric not null default 2,
+  time_exit_dte integer not null default 2,
+  strike_breach_buffer_pct numeric not null default 0,
   updated_at timestamptz not null default now(),
   constraint options_autotrade_settings_singleton check (id = 1)
 );

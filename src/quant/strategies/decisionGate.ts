@@ -17,6 +17,7 @@
  * and tradeQualityScore.ts's weights already take.
  */
 import { selectBestExpiry, type ExpiryEvaluation } from './expirySelector.ts';
+import type { MarketRegimeResult } from '../analytics/marketRegime.ts';
 
 export type TradeAction = 'NO_TRADE' | 'WATCH' | 'TRADE_CANDIDATE' | 'HIGH_CONVICTION';
 
@@ -66,7 +67,29 @@ function liquidityLabel(score: number | null): string {
   return 'Low';
 }
 
-function describeCandidate(evaluation: ExpiryEvaluation): string {
+/**
+ * Prints market regime and skew regime as two clearly separate lines — a
+ * skew read ("options traders are paying up for downside protection
+ * right now") is NOT a market-direction claim, and printing it as "Bias:
+ * bearish" without qualification was exactly that conflation (see
+ * analytics/marketRegime.ts's own header). Neither line drives the other;
+ * both are shown, neither is silently dropped.
+ */
+function describeRegimes(evaluation: ExpiryEvaluation, marketRegime: MarketRegimeResult | null): string[] {
+  const lines = [
+    `Skew Regime: ${evaluation.bias} — ${evaluation.biasReason}`,
+  ];
+  if (marketRegime) {
+    lines.push(`Market Regime (independent of skew): ${marketRegime.regime} — ${marketRegime.reason}`);
+    if (marketRegime.indiaVix !== null) lines.push(`India VIX: ${marketRegime.indiaVix.toFixed(2)}`);
+    if (marketRegime.unavailable.length) lines.push(`Also considered but UNAVAILABLE: ${marketRegime.unavailable.join('; ')}`);
+  } else {
+    lines.push('Market Regime (independent of skew): n/a — not supplied for this scan');
+  }
+  return lines;
+}
+
+function describeCandidate(evaluation: ExpiryEvaluation, marketRegime: MarketRegimeResult | null): string {
   const best = evaluation.best!;
   const { raw, score } = best.qualityScore;
   const legs = best.result.legs.map((l) => `${l.side} ${l.strike}${l.right}`).join(' / ');
@@ -74,7 +97,7 @@ function describeCandidate(evaluation: ExpiryEvaluation): string {
   const lines = [
     `${evaluation.strategyLabel.toUpperCase()} — expiry in ${evaluation.dte}d`,
     `Legs: ${legs}`,
-    `Bias: ${evaluation.bias} — ${evaluation.biasReason}`,
+    ...describeRegimes(evaluation, marketRegime),
     `Premium Edge (IV vs realized vol): ${raw.premiumEdgePct === null ? 'n/a — no historical closes supplied' : `${raw.premiumEdgePct >= 0 ? '+' : ''}${raw.premiumEdgePct.toFixed(1)}% ${raw.premiumEdgePct >= 0 ? '(implied move richer than history)' : '(implied move below what typically realizes — weak setup)'}`}`,
     `IV Rank: ${raw.ivRank === null ? 'n/a — no history supplied' : raw.ivRank.toFixed(0)}`,
     `Probability of profit (model-implied): ${fmtPct(raw.pop)}`,
@@ -110,16 +133,20 @@ function describeCandidate(evaluation: ExpiryEvaluation): string {
 export function decideTrade(
   evaluations: ExpiryEvaluation[],
   thresholds: DecisionThresholds = DEFAULT_DECISION_THRESHOLDS,
+  marketRegime: MarketRegimeResult | null = null,
 ): TradeDecision {
   const best = selectBestExpiry(evaluations);
   if (!best) {
     const reasons = evaluations
       .map((e) => `${e.dte}d: ${e.skipReason ?? 'no eligible candidate'}`)
       .join('\n  ');
+    const regimeLine = marketRegime
+      ? `Market Regime (independent of skew): ${marketRegime.regime} — ${marketRegime.reason}\n\n`
+      : '';
     return {
       action: 'NO_TRADE',
       expiryEvaluation: null,
-      explanation: `NO TRADE\nReason: no eligible expiry today.\n  ${reasons || '(no expiries were evaluated)'}`,
+      explanation: `NO TRADE\nReason: no eligible expiry today.\n\n${regimeLine}  ${reasons || '(no expiries were evaluated)'}`,
     };
   }
 
@@ -131,6 +158,6 @@ export function decideTrade(
   return {
     action,
     expiryEvaluation: best,
-    explanation: `${header}\n\n${describeCandidate(best)}`,
+    explanation: `${header}\n\n${describeCandidate(best, marketRegime)}`,
   };
 }

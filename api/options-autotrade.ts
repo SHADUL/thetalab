@@ -54,6 +54,7 @@ import { evaluateExpiries } from '../src/quant/strategies/expirySelector.ts';
 import type { HistoricalClose } from '../src/quant/analytics/realizedVolatility.ts';
 import { ivRankAndPercentile, type IvHistoryPoint, type IvRankResult } from '../src/quant/analytics/ivRank.ts';
 import { atmIvOf } from '../src/quant/analytics/atmIv.ts';
+import { classifyMarketRegime, type MarketRegimeResult } from '../src/quant/analytics/marketRegime.ts';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { decideTrade, type DecisionThresholds } from '../src/quant/strategies/decisionGate.ts';
@@ -394,17 +395,32 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     return;
   }
 
-  // 2. Spot price for the underlying.
+  // 2. Spot price for the underlying — batched with India VIX in the SAME
+  // call (both are just quote keys Kite already serves), so the real
+  // market-regime signals below cost zero extra requests.
   const indexKey = INDEX_QUOTE_KEY[symbol];
+  const VIX_KEY = 'NSE:INDIA VIX';
   let spotData: any;
   try {
-    spotData = await kiteFetch(`/quote?i=${encodeURIComponent(indexKey)}`, { token, apiKey });
+    spotData = await kiteFetch(`/quote?i=${encodeURIComponent(indexKey)}&i=${encodeURIComponent(VIX_KEY)}`, { token, apiKey });
   } catch (err: any) {
     res.status(502).json({ ok: false, error: 'kite_error', message: err.message });
     return;
   }
   const spot = spotData?.[indexKey]?.last_price;
   if (!(spot > 0)) { res.status(502).json({ ok: false, error: 'no_spot_price' }); return; }
+
+  // Real India VIX and today's gap/intraday-range — from the SAME live
+  // quote response, no extra call. Null when genuinely absent (never
+  // fabricated) — see analytics/marketRegime.ts's own discipline.
+  const indiaVix: number | null = spotData?.[VIX_KEY]?.last_price ?? null;
+  const indexOhlc = spotData?.[indexKey]?.ohlc;
+  const gapAndRange = indexOhlc && indexOhlc.close > 0 && indexOhlc.open > 0
+    ? {
+        gapPct: ((indexOhlc.open - indexOhlc.close) / indexOhlc.close) * 100,
+        intradayRangePct: ((indexOhlc.high - indexOhlc.low) / indexOhlc.open) * 100,
+      }
+    : null;
 
   // 2b. Real historical closes for the underlying (for the premium-edge —
   // IV vs realized-volatility — signal). Best-effort: a failure here must
@@ -522,7 +538,20 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     watchBelow: settings.watch_below,
     highConvictionAtOrAbove: settings.high_conviction_at_or_above,
   };
-  const decision = decideTrade(evaluations, thresholds);
+
+  // Market regime — genuinely independent of skew (see
+  // analytics/marketRegime.ts's own header): computed from the real
+  // historicalCloses/spot/VIX/OHLC already fetched above, never from
+  // regimeSelect.ts's skew-derived bias. null (not fabricated) when there
+  // isn't enough real history yet.
+  let marketRegime: MarketRegimeResult | null = null;
+  try {
+    marketRegime = classifyMarketRegime({ historicalCloses, currentSpot: spot, indiaVix, gapAndRange });
+  } catch (err: any) {
+    await log('error', `Market regime classification failed for ${symbol}`, { message: err.message });
+  }
+
+  const decision = decideTrade(evaluations, thresholds, marketRegime);
   const diagnostics = {
     spot, symbol, scannedAt: new Date(now).toISOString(),
     eligibleExpiries, rejectedRows: rejected.length,
@@ -530,6 +559,7 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     historicalClosesFetched: historicalCloses.length,
     currentAtmIvForRank,
     ivRankByLookback,
+    marketRegime,
     evaluations: evaluations.map(serializeExpiryEvaluation),
   };
 

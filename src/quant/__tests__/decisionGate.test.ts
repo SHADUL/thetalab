@@ -70,7 +70,7 @@ test('decideTrade produces a real action with an explanation citing actual strik
   assert.notEqual(decision.expiryEvaluation, null);
   assert.ok(['NO_TRADE', 'WATCH', 'TRADE_CANDIDATE', 'HIGH_CONVICTION'].includes(decision.action));
   assert.match(decision.explanation, /IRON CONDOR/);
-  assert.match(decision.explanation, /Bias: neutral/);
+  assert.match(decision.explanation, /Skew Regime: neutral/);
   assert.match(decision.explanation, /Trade Quality Score: \d+\/100/);
   assert.match(decision.explanation, /Risk\/Reward: [\d.]+/);
   // The candidate's own legs must appear verbatim, not a summary.
@@ -115,4 +115,31 @@ test('missing IV rank is stated plainly in the explanation rather than a fabrica
   const decision = decideTrade(evaluations);
   assert.match(decision.explanation, /IV Rank: n\/a — no history supplied/);
   assert.match(decision.explanation, /excluded, not penalized:.*\bivRank\b/);
+});
+
+test('market regime is printed as its own line, separate from and never conflated with the skew-derived line', () => {
+  const { chain } = normalise(multiExpiryChain([{ dte: 21, vol: 0.16 }]));
+  const evaluations = evaluateExpiries(enrichChain(chain), BASE_PARAMS);
+  const marketRegime = {
+    regime: 'STRONG_BEARISH' as const,
+    reason: 'Spot is 4.2% below its 50-session EMA with the 20-session EMA below it — a strong downtrend structure.',
+    trend: null, higherTimeframeTrend: null, volatility: null, whipsaw: null,
+    indiaVix: 18.4, gapAndRange: null,
+    unavailable: ['market breadth (no constituent-level advance/decline data source)', 'VWAP-relative-to-price (no intraday tick series captured)'],
+  };
+  const decision = decideTrade(evaluations, DEFAULT_DECISION_THRESHOLDS, marketRegime);
+
+  assert.match(decision.explanation, /Skew Regime: neutral/);
+  assert.match(decision.explanation, /Market Regime \(independent of skew\): STRONG_BEARISH — Spot is 4\.2%/);
+  assert.match(decision.explanation, /India VIX: 18\.40/);
+  assert.match(decision.explanation, /UNAVAILABLE: market breadth/);
+  // The two regimes must never share a line or get merged into one label.
+  assert.ok(!decision.explanation.includes('Skew Regime: STRONG_BEARISH'));
+});
+
+test('omitting market regime shows it as explicitly not supplied, not silently absent', () => {
+  const { chain } = normalise(multiExpiryChain([{ dte: 21, vol: 0.16 }]));
+  const evaluations = evaluateExpiries(enrichChain(chain), BASE_PARAMS);
+  const decision = decideTrade(evaluations);
+  assert.match(decision.explanation, /Market Regime \(independent of skew\): n\/a — not supplied for this scan/);
 });

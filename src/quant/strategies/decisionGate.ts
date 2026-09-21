@@ -80,8 +80,14 @@ function describeCandidate(evaluation: ExpiryEvaluation): string {
     `Probability of profit (model-implied): ${fmtPct(raw.pop)}`,
     `Strike safety: ${raw.strikeSafetySigma === null ? 'n/a' : `${raw.strikeSafetySigma.toFixed(2)}σ from forward`}`,
     `Risk/Reward: ${fmtNum(raw.riskReward)} (max profit ₹${best.result.maxProfit.toFixed(0)} / max loss ₹${best.result.maxLoss.toFixed(0)})`,
-    `Expected value per unit of risk: ${best.evPerUnitRisk === null ? 'n/a' : best.evPerUnitRisk.toFixed(2)}` +
+    `Expected value per unit of risk (model-implied — same IV that priced the legs, near-tautological): ${best.evPerUnitRisk === null ? 'n/a' : best.evPerUnitRisk.toFixed(2)}` +
       (best.expectedValue !== null ? ` (EV ₹${best.expectedValue.toFixed(0)})` : ''),
+    `Expected value per unit of risk (INDEPENDENT — from realized history, not IV): ${raw.independentEvPerUnitRisk === null ? 'n/a — no historical closes supplied' : raw.independentEvPerUnitRisk.toFixed(2)}` +
+      (raw.independentPop !== null
+        ? ` (stay-within-strikes probability ${fmtPct(raw.independentPop)}, ${raw.independentPopMethod}` +
+          (raw.independentPopDisagreementPct !== null ? `, vs. the other model by ${raw.independentPopDisagreementPct >= 0 ? '+' : ''}${raw.independentPopDisagreementPct.toFixed(1)}pp` : '') +
+          ')'
+        : ''),
     `Liquidity: ${best.liquidity.tier} (score: ${liquidityLabel(best.qualityScore.components.liquidity)})` +
       (raw.avgSpreadPct !== null ? ` (avg spread ${fmtPct(raw.avgSpreadPct, 1)}` : ' (spread n/a — settlement-only data')  +
       `, min OI ${raw.minOpenInterest ?? 'n/a'})`,

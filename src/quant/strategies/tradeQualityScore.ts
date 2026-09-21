@@ -5,17 +5,26 @@
  * rank, strike safety (in expected-move sigmas), DTE suitability,
  * liquidity, and margin efficiency.
  *
- * premiumEdge is the primary signal, weighted accordingly (see
- * DEFAULT_TRADE_QUALITY_WEIGHTS) — "is the premium adequate for the
- * expected risk," not "can I collect premium." Before this component
- * existed, POP was doing double duty as a stand-in for edge, but POP and
- * a credit structure's payoff are BOTH derived from the same Black-76
- * implied volatility that priced the legs — comparing a structure against
- * its own pricing model is close to a zero-edge tautology, not a genuine
- * statistical edge read. A real edge can only come from comparing implied
- * volatility against what has ACTUALLY realized historically (see
- * analytics/realizedVolatility.ts) — POP's weight was reduced accordingly
- * once premiumEdge existed to do the real work.
+ * premiumEdge and independentEv are the two primary signals, weighted
+ * accordingly (see DEFAULT_TRADE_QUALITY_WEIGHTS). Before either existed,
+ * POP was doing double duty as a stand-in for edge, but POP and a credit
+ * structure's payoff are BOTH derived from the same Black-76 implied
+ * volatility that priced the legs — comparing a structure against its own
+ * pricing model is close to a zero-edge tautology, not a genuine
+ * statistical edge read. POP's weight was reduced accordingly once these
+ * two existed to do the real work:
+ *  - premiumEdge (analytics/realizedVolatility.ts): is the underlying's
+ *    IMPLIED move richer than what has actually realized historically —
+ *    a property of the option's pricing, independent of which exact
+ *    strikes get sold.
+ *  - independentEv (analytics/distributionModel.ts): given THIS SPECIFIC
+ *    structure's actual strikes/width/credit, does it have positive
+ *    expected value under a probability model that does NOT come from
+ *    the same IV that priced it (empirical historical-return distribution
+ *    first, a realized-vol-based lognormal approximation as fallback).
+ *    A rich-IV environment (good premiumEdge) does not by itself mean a
+ *    particular structure was built well — this is what actually answers
+ *    "would this trade make money," which premiumEdge alone cannot.
  *
  * Deliberately still excludes market regime (beyond skew), event risk,
  * and historical setup performance: no regime engine or event calendar
@@ -33,6 +42,7 @@
  * as zero or worst-case.
  */
 import { expectedMove } from '../analytics/expectedMove.ts';
+import type { IndependentExpectedValue } from '../analytics/distributionModel.ts';
 import { DEFAULT_CONFIG } from '../config.ts';
 import type { EnrichedQuote, EnrichedSlice } from '../types.ts';
 import type { IronCondorResult } from './ironCondor.ts';
@@ -42,6 +52,7 @@ export type PricedCandidate = IronCondorResult | CreditSpreadResult;
 
 export interface TradeQualityWeights {
   premiumEdge: number;
+  independentEv: number;
   riskReward: number;
   pop: number;
   ivRank: number;
@@ -53,27 +64,31 @@ export interface TradeQualityWeights {
 
 /**
  * Provisional — see this file's header. Sums to 100 when every component
- * is present. premiumEdge carries the largest single weight: "is the
- * premium adequate for the expected risk" is the primary question this
- * engine exists to answer. pop's weight was cut from 20 to 10 once
- * premiumEdge existed, since POP alone was a near-tautological stand-in
- * for edge (see header) — it's kept as a secondary signal, not removed,
- * because a structure can have real IV/RV edge yet still carry an
- * unacceptably low probability of profit.
+ * is present. premiumEdge and independentEv together carry the largest
+ * weight: "is the premium adequate for the expected risk" and "does this
+ * specific structure have positive expected value under an independent
+ * probability model" are the two questions this engine exists to answer.
+ * pop's weight was cut from 20 to 7 now that both exist, since POP alone
+ * was a near-tautological stand-in for edge (see header) — it's kept as a
+ * minor secondary signal, not removed, because a structure can clear both
+ * primary signals yet still carry an unacceptably low raw probability of
+ * profit.
  */
 export const DEFAULT_TRADE_QUALITY_WEIGHTS: TradeQualityWeights = {
-  premiumEdge: 25,
-  riskReward: 10,
-  pop: 10,
-  ivRank: 15,
-  strikeSafety: 15,
-  dte: 10,
-  liquidity: 10,
-  marginEfficiency: 5,
+  premiumEdge: 20,
+  independentEv: 20,
+  riskReward: 8,
+  pop: 7,
+  ivRank: 12,
+  strikeSafety: 13,
+  dte: 8,
+  liquidity: 8,
+  marginEfficiency: 4,
 };
 
 export interface TradeQualityComponents {
   premiumEdge: number | null;
+  independentEv: number | null;
   riskReward: number | null;
   pop: number | null;
   ivRank: number | null;
@@ -94,6 +109,13 @@ export interface TradeQualityComponents {
 export interface TradeQualityRaw {
   /** IV/RV edge, in percent — see IvRvEdge.edgePct in analytics/realizedVolatility.ts. */
   premiumEdgePct: number | null;
+  /** EV/maxLoss from the independent probability model — see IndependentExpectedValue.evPerUnitRisk in analytics/distributionModel.ts. */
+  independentEvPerUnitRisk: number | null;
+  /** The independent model's own stay-within-short-strikes probability and method, for the same reason POP's raw number is exposed alongside it. */
+  independentPop: number | null;
+  independentPopMethod: 'empirical' | 'normal-from-realized-vol' | null;
+  /** The OTHER model's disagreement on that same probability, in percentage points, when both were computable — see IndependentPopResult.disagreementPct. */
+  independentPopDisagreementPct: number | null;
   riskReward: number | null;
   pop: number | null;
   ivRank: number | null;
@@ -137,6 +159,21 @@ function lerp(x: number, xLo: number, xHi: number, yLo = 0, yHi = 100): number {
  */
 function scorePremiumEdge(edgePct: number | null): number | null {
   return edgePct === null ? null : lerp(edgePct, -10, 20);
+}
+
+/**
+ * The other primary signal (see this file's header): does THIS structure
+ * have positive expected value under the independent probability model,
+ * per unit of risk. Unlike premiumEdge, 0 (genuinely breakeven) is scored
+ * as a true midpoint (50) rather than pulled below it — evPerUnitRisk is
+ * already a direct EV read, not a richness-vs-history comparison, so
+ * "breakeven" really is a neutral result here, not a mediocre one.
+ * -0.15/+0.15 is a provisional band matching the rough magnitude this
+ * engine's own live diagnostics have shown (see this file's header caveat
+ * on all such bands).
+ */
+function scoreIndependentEv(evPerUnitRisk: number | null): number | null {
+  return evPerUnitRisk === null ? null : lerp(evPerUnitRisk, -0.15, 0.15);
 }
 
 /** 0 -> 0, 0.5+ -> 100. Most defined-risk credit structures run 0.15-0.4; RR>=1 is rare by construction. */
@@ -226,11 +263,24 @@ function scoreMarginEfficiency(totalCredit: number, marginRequired: number | nul
  *   available yet, in which case premiumEdge is excluded and the other
  *   weights renormalize (see this file's header) — never defaulted to 0
  *   or to a fabricated "neutral" edge.
+ * @param extras.independentEv  The full result from
+ *   analytics/distributionModel.ts's computeIndependentExpectedValue(),
+ *   computed by the caller from this exact candidate's legs and real
+ *   historical closes — same "caller supplies it" pattern as ivRank and
+ *   premiumEdgePct. Null/omitted excludes independentEv (renormalized),
+ *   never substituted with the candidate's own Black-76-derived
+ *   expectedValue — that number is exactly what this component exists to
+ *   NOT rely on (see this file's header).
  */
 export function scoreTradeQuality(
   candidate: PricedCandidate,
   slice: EnrichedSlice,
-  extras: { ivRank: number | null; marginRequired?: number | null; premiumEdgePct?: number | null },
+  extras: {
+    ivRank: number | null;
+    marginRequired?: number | null;
+    premiumEdgePct?: number | null;
+    independentEv?: IndependentExpectedValue | null;
+  },
   weights: TradeQualityWeights = DEFAULT_TRADE_QUALITY_WEIGHTS,
 ): TradeQualityScore {
   const riskRewardRaw = candidate.maxLoss > 0 ? candidate.maxProfit / candidate.maxLoss : null;
@@ -255,9 +305,11 @@ export function scoreTradeQuality(
   }
 
   const premiumEdgePct = extras.premiumEdgePct ?? null;
+  const independentEv = extras.independentEv ?? null;
 
   const components: TradeQualityComponents = {
     premiumEdge: scorePremiumEdge(premiumEdgePct),
+    independentEv: scoreIndependentEv(independentEv?.evPerUnitRisk ?? null),
     riskReward: scoreRiskReward(riskRewardRaw),
     pop: scorePop(candidate.pop),
     ivRank: scoreIvRank(extras.ivRank),
@@ -283,6 +335,10 @@ export function scoreTradeQuality(
 
   const raw: TradeQualityRaw = {
     premiumEdgePct,
+    independentEvPerUnitRisk: independentEv?.evPerUnitRisk ?? null,
+    independentPop: independentEv?.pop.probability ?? null,
+    independentPopMethod: independentEv?.pop.method ?? null,
+    independentPopDisagreementPct: independentEv?.pop.disagreementPct ?? null,
     riskReward: riskRewardRaw,
     pop: candidate.pop,
     ivRank: extras.ivRank,

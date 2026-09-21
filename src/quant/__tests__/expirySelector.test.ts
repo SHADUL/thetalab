@@ -156,6 +156,40 @@ test('too little historicalCloses (below MIN_RETURNS_FOR_RV) leaves premiumEdge 
   assert.equal(evaluation.best!.qualityScore.raw.premiumEdgePct, null);
 });
 
+test('without historicalCloses, independentEv is excluded rather than fabricated', () => {
+  const { chain } = normalise(multiExpiryChain([{ dte: 30, vol: 0.13 }]));
+  const [evaluation] = evaluateExpiries(enrichChain(chain), BASE_PARAMS);
+
+  assert.equal(evaluation.best!.qualityScore.raw.independentEvPerUnitRisk, null);
+  assert.equal(evaluation.best!.qualityScore.components.independentEv, null);
+  assert.ok(evaluation.best!.qualityScore.missingComponents.includes('independentEv'));
+});
+
+test('with historicalCloses supplied, independentEv is computed from the SELECTED candidate\'s own strikes, not the candidate\'s own Black-76 POP', () => {
+  const { chain } = normalise(multiExpiryChain([{ dte: 30, vol: 0.13 }]));
+  const historicalCloses = syntheticCloses(120, FORWARD, 0.004);
+  const [evaluation] = evaluateExpiries(enrichChain(chain), { ...BASE_PARAMS, historicalCloses });
+
+  const raw = evaluation.best!.qualityScore.raw;
+  assert.notEqual(raw.independentEvPerUnitRisk, null);
+  assert.equal(typeof raw.independentEvPerUnitRisk, 'number');
+  assert.notEqual(raw.independentPop, null);
+  assert.ok(raw.independentPopMethod === 'empirical' || raw.independentPopMethod === 'normal-from-realized-vol');
+  // The independent POP must not equal the candidate's own model-implied POP —
+  // if it did, this would just be silently re-deriving the same tautology.
+  assert.notEqual(raw.independentPop, evaluation.best!.result.pop);
+  assert.notEqual(evaluation.best!.qualityScore.components.independentEv, null);
+  assert.ok(!evaluation.best!.qualityScore.missingComponents.includes('independentEv'));
+});
+
+test('too little historicalCloses leaves independentEv excluded, not a zero/neutral fabrication', () => {
+  const { chain } = normalise(multiExpiryChain([{ dte: 30, vol: 0.13 }]));
+  const tooFew = syntheticCloses(10, FORWARD, 0.004);
+  const [evaluation] = evaluateExpiries(enrichChain(chain), { ...BASE_PARAMS, historicalCloses: tooFew });
+
+  assert.equal(evaluation.best!.qualityScore.raw.independentEvPerUnitRisk, null);
+});
+
 test('custom minDte/maxDte widen or narrow the eligible band', () => {
   const { chain } = normalise(multiExpiryChain([{ dte: 1, vol: 0.13 }]));
   const [allowedZero] = evaluateExpiries(enrichChain(chain), { ...BASE_PARAMS, minDte: 0 });

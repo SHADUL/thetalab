@@ -33,6 +33,7 @@ import {
   type HistoricalClose,
   type IvRvEdge,
 } from '../analytics/realizedVolatility.ts';
+import { computeIndependentExpectedValue } from '../analytics/distributionModel.ts';
 import { classifyBias, type Bias } from './regimeSelect.ts';
 import {
   generateCandidates,
@@ -148,9 +149,20 @@ function evaluateOne(slice: EnrichedSlice, params: ExpirySelectorParams): Expiry
   }
 
   const top = candidates[0];
+  // Independent EV depends on the SPECIFIC selected candidate's own
+  // strikes/credit (unlike premiumEdge, which is a property of the expiry
+  // as a whole) — computed only once the top candidate is known, from the
+  // same real historicalCloses, never from the candidate's own
+  // Black-76-derived POP (see distributionModel.ts's header).
+  const independentEv = params.historicalCloses && params.historicalCloses.length > 0
+    ? computeIndependentExpectedValue(
+        top.result.legs, top.result.maxProfit, top.result.maxLoss,
+        params.historicalCloses, slice.forward, dte,
+      )
+    : null;
   const qualityScore = scoreTradeQuality(
     top.result, slice,
-    { ivRank: params.ivRank ?? null, premiumEdgePct: premiumEdge?.edgePct ?? null },
+    { ivRank: params.ivRank ?? null, premiumEdgePct: premiumEdge?.edgePct ?? null, independentEv },
     params.weights ?? DEFAULT_TRADE_QUALITY_WEIGHTS,
   );
 

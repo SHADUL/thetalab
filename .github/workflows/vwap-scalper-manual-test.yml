@@ -1,0 +1,26 @@
+name: VWAP Scalper Manual Test
+
+# Manual-trigger-only diagnostic: calls vwap-scalper-scan then
+# vwap-scalper-monitor once, using the same OPTIONS_AUTOTRADE_CRON_SECRET
+# already stored here for the options workflows. Not on a schedule — the
+# real recurring trigger is the external cron-job.org pinger the user set
+# up (GitHub Actions can't reliably do 1-minute schedules). This exists
+# purely to verify the endpoints respond correctly without needing the
+# raw secret value locally.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call vwap-scalper-scan
+        run: |
+          curl -sf -X POST "https://thetalab-beta.vercel.app/api/options-autotrade?resource=vwap-scalper-scan" \
+            -H "Authorization: Bearer ${{ secrets.OPTIONS_AUTOTRADE_CRON_SECRET }}" \
+            -w "\nHTTP %{http_code}\n"
+      - name: Call vwap-scalper-monitor
+        run: |
+          curl -sf -X POST "https://thetalab-beta.vercel.app/api/options-autotrade?resource=vwap-scalper-monitor" \
+            -H "Authorization: Bearer ${{ secrets.OPTIONS_AUTOTRADE_CRON_SECRET }}" \
+            -w "\nHTTP %{http_code}\n"

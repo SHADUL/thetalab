@@ -105,7 +105,16 @@ export default function IntradaySignalChart({ symbol, candidate, children, class
     const candleSeries = chart.addSeries(CandlestickSeries, {
       upColor: gain, downColor: loss, borderVisible: false, wickUpColor: gain, wickDownColor: loss,
     });
-    const toTime = (ms) => Math.floor(ms / 1000);
+    // lightweight-charts displays a UTCTimestamp's raw UTC clock reading
+    // directly — it does NOT convert to the viewer's own system timezone
+    // (verified on VwapScalperChart.jsx's identical chart: a real trade at
+    // 15:14 IST was rendering as "09:44", the exact UTC time, regardless
+    // of the viewer's own locale). Since every bar's t here is a true UTC
+    // epoch, shifting it by the fixed +5:30 IST offset before handing it
+    // to the chart makes the displayed clock numbers read as IST — the
+    // only timezone that makes sense for an NSE chart — for every viewer.
+    const IST_OFFSET_SECONDS = 5.5 * 3600;
+    const toTime = (ms) => Math.floor(ms / 1000) + IST_OFFSET_SECONDS;
     candleSeries.setData(chartData.bars.map((b) => ({ time: toTime(b.t), open: b.o, high: b.h, low: b.l, close: b.c })));
 
     const vwapSeries = chart.addSeries(LineSeries, { color: "#d97706", lineWidth: 2, title: "VWAP" });

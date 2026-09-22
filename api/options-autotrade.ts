@@ -62,6 +62,8 @@
  *   vwap-scalper-chart   — browser-facing: today's 1-minute bars + VWAP/
  *                       band series for one symbol, for the dashboard's
  *                       chart. See handleVwapScalperChart.
+ *   vwap-scalper-daily-stats/clear-daily-lock — browser-facing, mirroring
+ *                       the options resources of the same shape.
  */
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { parseKiteOptionsCSV, filterActiveInstruments, OPTIONS_SYMBOLS } from '../src/lib/optionsInstrumentMaster.js';
@@ -1028,6 +1030,25 @@ async function handleVwapScalperLog(req: any, res: any, supabase: SupabaseClient
   res.status(200).json({ entries: data ?? [] });
 }
 
+/** Browser-facing: today's risk-lock state — same reasoning as handleDailyStats. */
+async function handleVwapScalperDailyStats(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const { data, error } = await supabase.from('vwap_scalper_daily_stats').select('*').eq('trade_date', todayIST).maybeSingle();
+  if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
+  res.status(200).json(data ?? { trade_date: todayIST, trades_taken: 0, realized_pnl: 0, consecutive_losses: 0, locked: false, lock_reason: null });
+}
+
+/** Browser-facing manual override — same "require manual re-enable" instruction as handleClearDailyLock. */
+async function handleVwapScalperClearDailyLock(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const { error } = await supabase.from('vwap_scalper_daily_stats').upsert({ trade_date: todayIST, locked: false, lock_reason: null });
+  if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
+  await supabase.from('vwap_scalper_log').insert({ level: 'info', message: 'Daily risk lock manually cleared from the dashboard — new entries can resume today.' });
+  res.status(200).json({ ok: true, message: 'Daily risk lock cleared. New entries can resume on the next scan.' });
+}
+
 /** Same "flip execution_mode to OFF only" capability as the options kill switch — see handleKillSwitch's own docs for why it isn't an emergency square-off. */
 async function handleVwapScalperKillSwitch(req: any, res: any, supabase: SupabaseClient) {
   if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
@@ -1355,6 +1376,8 @@ export default async function handler(req: any, res: any) {
   if (resource === 'vwap-scalper-log') return handleVwapScalperLog(req, res, supabase);
   if (resource === 'vwap-scalper-kill-switch') return handleVwapScalperKillSwitch(req, res, supabase);
   if (resource === 'vwap-scalper-chart') return handleVwapScalperChart(req, res, supabase);
+  if (resource === 'vwap-scalper-daily-stats') return handleVwapScalperDailyStats(req, res, supabase);
+  if (resource === 'vwap-scalper-clear-daily-lock') return handleVwapScalperClearDailyLock(req, res, supabase);
 
   // Cron/server-triggered resources — shared-secret gate, since these do
   // real work (live Kite calls, writing a paper position) on a schedule

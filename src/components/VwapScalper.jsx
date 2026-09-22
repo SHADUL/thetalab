@@ -93,6 +93,8 @@ export default function VwapScalper() {
   const [error, setError] = useState(null);
   const [killSwitchBusy, setKillSwitchBusy] = useState(false);
   const [killSwitchResult, setKillSwitchResult] = useState(null);
+  const [dailyStats, setDailyStats] = useState(null);
+  const [clearingLock, setClearingLock] = useState(false);
   const timerRef = useRef(null);
 
   const load = useCallback(() => {
@@ -100,18 +102,29 @@ export default function VwapScalper() {
       fetch("/api/options-autotrade?resource=vwap-scalper-settings").then((r) => r.json()),
       fetch("/api/options-autotrade?resource=vwap-scalper-positions").then((r) => r.json()),
       fetch("/api/options-autotrade?resource=vwap-scalper-log").then((r) => r.json()),
+      fetch("/api/options-autotrade?resource=vwap-scalper-daily-stats").then((r) => r.json()),
     ])
-      .then(([s, posBody, logBody]) => {
+      .then(([s, posBody, logBody, dailyBody]) => {
         if (s?.error) { setError(s.message || s.error); return; }
         setError(null);
         setSettings(s);
         setDraft((d) => ({ ...d, ...s }));
         setPositions({ active: posBody.active ?? [], closed: posBody.closed ?? [] });
         setLogEntries(logBody.entries ?? []);
+        setDailyStats(dailyBody);
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
+
+  const clearDailyLock = () => {
+    setClearingLock(true);
+    fetch("/api/options-autotrade?resource=vwap-scalper-clear-daily-lock", { method: "POST" })
+      .then((r) => r.json())
+      .then(() => load())
+      .catch(() => {})
+      .finally(() => setClearingLock(false));
+  };
 
   useEffect(() => {
     load();
@@ -211,6 +224,19 @@ export default function VwapScalper() {
           <HandPalm size={15} weight="bold" className="shrink-0 mt-px text-loss" />
           <div className="text-[12px] flex-1">{killSwitchResult.ok === false ? `Kill switch failed: ${killSwitchResult.message}` : killSwitchResult.message}</div>
           <button onClick={() => setKillSwitchResult(null)} className="text-[11px] text-muted shrink-0">Dismiss</button>
+        </div>
+      )}
+
+      {dailyStats?.locked && (
+        <div className="flex items-start gap-2.5 px-4 py-3 rounded-[12px] mb-4" style={{ border: "1px solid var(--c-warn)", background: "var(--c-warn-soft)" }}>
+          <Info size={15} weight="duotone" className="shrink-0 mt-px text-warn" />
+          <div className="text-[12px] flex-1 text-ink2">
+            <span className="font-semibold">Daily risk lock engaged</span> ({dailyStats.lock_reason}) — new entries are refused for the rest of today.
+            Realized P&L today: {inr(dailyStats.realized_pnl ?? 0)}, consecutive losses: {dailyStats.consecutive_losses ?? 0}.
+          </div>
+          <button onClick={clearDailyLock} disabled={clearingLock} className="topstep text-[11px] shrink-0">
+            {clearingLock ? "Clearing…" : "Clear Lock"}
+          </button>
         </div>
       )}
 

@@ -42,12 +42,21 @@ export interface DailyRiskLimits {
 }
 
 export function checkDailyRiskLock(state: DailyRiskState, limits: DailyRiskLimits): DailyLockResult {
-  const maxLossAmount = limits.equity * (limits.maxDailyLossPct / 100);
-  if (state.realizedPnlToday <= -maxLossAmount) {
-    return {
-      locked: true, reason: 'MAX_DAILY_LOSS',
-      detail: `Realized loss today (₹${(-state.realizedPnlToday).toFixed(0)}) has reached the daily budget (₹${maxLossAmount.toFixed(0)}, ${limits.maxDailyLossPct}% of equity).`,
-    };
+  // equity <= 0 means "not configured yet", not "a ₹0 budget" — without
+  // this guard, a fresh settings row (equity 0, realizedPnlToday 0, the
+  // default starting state) trivially satisfies `0 <= -0` and locks out
+  // on the very first check of the day, before the user ever gets a
+  // chance to configure real equity. A genuinely unconfigured risk
+  // budget can't be evaluated, so it's skipped here rather than treated
+  // as already exceeded.
+  if (limits.equity > 0) {
+    const maxLossAmount = limits.equity * (limits.maxDailyLossPct / 100);
+    if (state.realizedPnlToday <= -maxLossAmount) {
+      return {
+        locked: true, reason: 'MAX_DAILY_LOSS',
+        detail: `Realized loss today (₹${(-state.realizedPnlToday).toFixed(0)}) has reached the daily budget (₹${maxLossAmount.toFixed(0)}, ${limits.maxDailyLossPct}% of equity).`,
+      };
+    }
   }
   if (state.consecutiveLosses >= limits.maxConsecutiveLosses) {
     return {

@@ -44,3 +44,37 @@ test('daily loss is checked before consecutive losses when both would independen
   const r = checkDailyRiskLock({ realizedPnlToday: -20_000, consecutiveLosses: 3 }, LIMITS);
   assert.equal(r.reason, 'MAX_DAILY_LOSS');
 });
+
+test('unconfigured (zero) equity never locks on a fresh, zero-P&L day — a ₹0 budget is "not set up yet", not "already exceeded"', () => {
+  const r = checkDailyRiskLock(
+    { realizedPnlToday: 0, consecutiveLosses: 0 },
+    { equity: 0, maxDailyLossPct: 3, maxConsecutiveLosses: 3 },
+  );
+  assert.equal(r.locked, false);
+  assert.equal(r.reason, null);
+});
+
+test('zero equity does not lock even with some existing realized loss — there is no real budget to compare against', () => {
+  const r = checkDailyRiskLock(
+    { realizedPnlToday: -500, consecutiveLosses: 0 },
+    { equity: 0, maxDailyLossPct: 3, maxConsecutiveLosses: 3 },
+  );
+  assert.equal(r.locked, false);
+});
+
+test('negative equity is treated the same as zero — never evaluated as a daily-loss budget', () => {
+  const r = checkDailyRiskLock(
+    { realizedPnlToday: 0, consecutiveLosses: 0 },
+    { equity: -100, maxDailyLossPct: 3, maxConsecutiveLosses: 3 },
+  );
+  assert.equal(r.locked, false);
+});
+
+test('consecutive-loss locking still works even when equity is unconfigured — the two checks are independent', () => {
+  const r = checkDailyRiskLock(
+    { realizedPnlToday: 0, consecutiveLosses: 3 },
+    { equity: 0, maxDailyLossPct: 3, maxConsecutiveLosses: 3 },
+  );
+  assert.equal(r.locked, true);
+  assert.equal(r.reason, 'MAX_CONSECUTIVE_LOSSES');
+});

@@ -59,6 +59,9 @@
  *                       position. See handleVwapScalperMonitor.
  *   vwap-scalper-settings/positions/log/kill-switch — browser-facing,
  *                       mirroring the options resources of the same shape.
+ *   vwap-scalper-chart   — browser-facing: today's 1-minute bars + VWAP/
+ *                       band series for one symbol, for the dashboard's
+ *                       chart. See handleVwapScalperChart.
  */
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { parseKiteOptionsCSV, filterActiveInstruments, OPTIONS_SYMBOLS } from '../src/lib/optionsInstrumentMaster.js';
@@ -955,9 +958,9 @@ async function handleClearDailyLock(req: any, res: any, supabase: SupabaseClient
 /* proven to support .ts imports on Vercel's function bundler (see this */
 /* file's own header) — api/intraday.js is plain .js, and a plain .js   */
 /* file importing a .ts sibling has never been verified to work here.   */
-/* Resources: vwap-scalper-settings/positions/log/kill-switch (browser- */
-/* facing, no secret) and vwap-scalper-scan/vwap-scalper-monitor (cron/ */
-/* secret-gated), mirroring the options resources' own split exactly.   */
+/* Resources: vwap-scalper-settings/positions/log/kill-switch/chart      */
+/* (browser-facing, no secret) and vwap-scalper-scan/vwap-scalper-monitor*/
+/* (cron/secret-gated), mirroring the options resources' own split.      */
 /* ================================================================== */
 
 const VWAP_SCALPER_EDITABLE_NUMERIC_FIELDS = [
@@ -1036,6 +1039,48 @@ async function handleVwapScalperKillSwitch(req: any, res: any, supabase: Supabas
     ok: true,
     message: `New entries stopped (execution_mode set to OFF).${count ? ` ${count} paper position(s) remain open — vwap-scalper-monitor keeps evaluating them independently on its own cron.` : ' No open positions.'}`,
   });
+}
+
+/**
+ * Browser-facing, no secret gate (same reasoning as api/intraday.js's own
+ * `chart` resource): fetches today's 1-minute bars for one symbol and
+ * returns the VWAP + all six bands (upper/lower 1σ/2σ/3σ) from the exact
+ * same computeVwapBands() the live scan/monitor use — this is a read-only
+ * visualization of the real signal engine, not a separate calculation.
+ */
+async function handleVwapScalperChart(req: any, res: any, supabase: SupabaseClient) {
+  const symbol = String(req.query?.symbol || '').toUpperCase();
+  if (!symbol) { res.status(400).json({ error: 'bad_request', message: 'symbol is required.' }); return; }
+
+  const apiKey = process.env.KITE_API_KEY;
+  const { data: session } = await supabase.from('kite_session').select('access_token').eq('id', 1).maybeSingle();
+  const token = session?.access_token;
+  if (!apiKey || !token) { res.status(200).json({ error: 'no_kite_session', message: 'Connect Kite first.' }); return; }
+
+  const { data: stockRow } = await supabase.from('stocks').select('instrument_token').eq('symbol', symbol).maybeSingle();
+  if (!stockRow?.instrument_token) { res.status(200).json({ error: 'not_found', message: `No instrument token for ${symbol}.` }); return; }
+
+  const { data: settings } = await supabase.from('vwap_scalper_settings').select('stdev_multiplier').eq('id', 1).maybeSingle();
+  const stdevMultiplier = Number(settings?.stdev_multiplier) || 1;
+
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const candles = await kiteFetch(`/instruments/historical/${stockRow.instrument_token}/minute?from=${today}&to=${today}`, { token, apiKey });
+    const bars: VwapBar[] = (candles?.candles ?? [])
+      .filter((c: unknown): c is [string, number, number, number, number, number] => Array.isArray(c))
+      .map((c: [string, number, number, number, number, number]) => ({ t: new Date(c[0]).getTime(), o: c[1], h: c[2], l: c[3], c: c[4], v: c[5] }));
+    if (bars.length === 0) { res.status(200).json({ error: 'no_data', message: 'No bars for today yet.' }); return; }
+
+    const bands = computeVwapBands(bars, stdevMultiplier);
+    res.status(200).json({
+      symbol, bars,
+      vwap: bands.map((b) => b.vwap),
+      upper1: bands.map((b) => b.upper1), upper2: bands.map((b) => b.upper2), upper3: bands.map((b) => b.upper3),
+      lower1: bands.map((b) => b.lower1), lower2: bands.map((b) => b.lower2), lower3: bands.map((b) => b.lower3),
+    });
+  } catch (err: any) {
+    res.status(502).json({ error: 'kite_error', message: err.message });
+  }
 }
 
 function vwapScalperParamsFromSettings(settings: any): VwapScalperParams {
@@ -1309,6 +1354,7 @@ export default async function handler(req: any, res: any) {
   if (resource === 'vwap-scalper-positions') return handleVwapScalperPositions(req, res, supabase);
   if (resource === 'vwap-scalper-log') return handleVwapScalperLog(req, res, supabase);
   if (resource === 'vwap-scalper-kill-switch') return handleVwapScalperKillSwitch(req, res, supabase);
+  if (resource === 'vwap-scalper-chart') return handleVwapScalperChart(req, res, supabase);
 
   // Cron/server-triggered resources — shared-secret gate, since these do
   // real work (live Kite calls, writing a paper position) on a schedule

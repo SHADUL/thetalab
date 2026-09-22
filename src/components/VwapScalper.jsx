@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { ChartLineUp, Info, Wallet, Gear, CaretDown, CaretUp, HandPalm, Bell } from "@phosphor-icons/react";
 import { inr, toneClass } from "./swingFormat.js";
+import VwapScalperChart from "./VwapScalperChart.jsx";
 
 const POLL_MS = 60_000; // reads already-computed state — the live scan itself runs on its own 1-minute cron, not on this poll
 
@@ -323,6 +324,8 @@ export default function VwapScalper() {
           </div>
         )}
       </div>
+
+      <VwapScalperChart activeSymbols={positions.active.map((p) => p.symbol)} />
 
       {loading ? (
         <p className="text-[12.5px] text-muted py-10 text-center">Loading…</p>

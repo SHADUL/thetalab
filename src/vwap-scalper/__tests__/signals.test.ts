@@ -187,3 +187,100 @@ test('stop price is computed per the selected mode and attached to the emitted s
   const lastBand = allBands[allBands.length - 1];
   assert.ok(Math.abs(sigmaStop[0].stopPrice! - (lastBand.upper3 + 0.5 * lastBand.stdev)) < 1e-9);
 });
+
+test('CANDLE_REVERSAL fires SHORT: a green candle touches +3σ, the NEXT candle is red and closes back below it', () => {
+  const bars = baselineBars(30, 100, 1000);
+  const bandsSoFar = computeVwapBands(bars);
+  const upper3 = bandsSoFar[bandsSoFar.length - 1].upper3;
+  const touchBar: Bar = { t: 30, o: 100, h: upper3 + 4, l: 99.5, c: upper3 + 3, v: 1000 }; // green (c > o), touches well beyond +3σ
+  const confirmBar: Bar = { t: 31, o: upper3 + 3, h: upper3 + 3.2, l: upper3 - 4, c: upper3 - 3, v: 1000 }; // red (c < o), closes well below +3σ
+  const allBars = [...bars, touchBar, confirmBar];
+  const allBands = computeVwapBands(allBars);
+
+  const signals = detectVwapScalperSignals(allBars, allBands, { ...BASE_PARAMS, entryMode: 'CANDLE_REVERSAL' });
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0].direction, 'SHORT');
+  assert.equal(signals[0].barIndex, 31);
+  assert.equal(signals[0].entryPrice, confirmBar.c);
+});
+
+test('CANDLE_REVERSAL fires LONG: a red candle touches -3σ, the NEXT candle is green and closes back above it', () => {
+  const bars = baselineBars(30, 100, 1000);
+  const bandsSoFar = computeVwapBands(bars);
+  const lower3 = bandsSoFar[bandsSoFar.length - 1].lower3;
+  const touchBar: Bar = { t: 30, o: 100, h: 100.5, l: lower3 - 4, c: lower3 - 3, v: 1000 }; // red (c < o), touches well beyond -3σ
+  const confirmBar: Bar = { t: 31, o: lower3 - 3, h: lower3 + 4, l: lower3 - 3.2, c: lower3 + 3, v: 1000 }; // green (c > o), closes well above -3σ
+  const allBars = [...bars, touchBar, confirmBar];
+  const allBands = computeVwapBands(allBars);
+
+  const signals = detectVwapScalperSignals(allBars, allBands, { ...BASE_PARAMS, entryMode: 'CANDLE_REVERSAL' });
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0].direction, 'LONG');
+  assert.equal(signals[0].barIndex, 31);
+  assert.equal(signals[0].entryPrice, confirmBar.c);
+});
+
+test('CANDLE_REVERSAL does NOT fire SHORT when the touch candle is red instead of green, even if its wick reaches +3σ', () => {
+  const bars = baselineBars(30, 100, 1000);
+  const bandsSoFar = computeVwapBands(bars);
+  const upper3 = bandsSoFar[bandsSoFar.length - 1].upper3;
+  const touchBar: Bar = { t: 30, o: upper3 + 3, h: upper3 + 4, l: 99.5, c: 100, v: 1000 }; // RED (c < o) despite the high reaching +3σ
+  const confirmBar: Bar = { t: 31, o: 100, h: upper3 + 3.2, l: upper3 - 4, c: upper3 - 3, v: 1000 };
+  const allBars = [...bars, touchBar, confirmBar];
+  const allBands = computeVwapBands(allBars);
+
+  const signals = detectVwapScalperSignals(allBars, allBands, { ...BASE_PARAMS, entryMode: 'CANDLE_REVERSAL' });
+  assert.equal(signals.length, 0);
+});
+
+test('CANDLE_REVERSAL does NOT fire SHORT when the confirming candle does not close back below the band', () => {
+  const bars = baselineBars(30, 100, 1000);
+  const bandsSoFar = computeVwapBands(bars);
+  const upper3 = bandsSoFar[bandsSoFar.length - 1].upper3;
+  const touchBar: Bar = { t: 30, o: 100, h: upper3 + 4, l: 99.5, c: upper3 + 3, v: 1000 };
+  const confirmBar: Bar = { t: 31, o: upper3 + 3, h: upper3 + 3.5, l: upper3 + 1, c: upper3 + 2, v: 1000 }; // red, but STILL closes above +3σ
+  const allBars = [...bars, touchBar, confirmBar];
+  const allBands = computeVwapBands(allBars);
+
+  const signals = detectVwapScalperSignals(allBars, allBands, { ...BASE_PARAMS, entryMode: 'CANDLE_REVERSAL' });
+  assert.equal(signals.length, 0);
+});
+
+test('CANDLE_REVERSAL never fires on the very first bar (no prior bar to have touched anything)', () => {
+  const bars: Bar[] = [{ t: 0, o: 100, h: 100, l: 100, c: 100, v: 1000 }];
+  const bands = computeVwapBands(bars);
+  const signals = detectVwapScalperSignals(bars, bands, { ...BASE_PARAMS, entryMode: 'CANDLE_REVERSAL' });
+  assert.equal(signals.length, 0);
+});
+
+test('CANDLE_REVERSAL respects the same one-signal-per-excursion re-arm rule as the other entry modes', () => {
+  // Each touch bar is itself a large excursion, which shifts VWAP/stdev
+  // meaningfully for every bar after it (unlike the single-excursion tests
+  // elsewhere in this file) — so each confirm bar's target close is
+  // computed from the ACTUAL bands including its own touch bar, not a
+  // stale precomputed estimate, to reliably land it above +2σ (no
+  // accidental same-bar re-arm) but below +3σ (a valid confirmation).
+  let bars = baselineBars(30, 100, 1000);
+
+  function addTouchAndConfirm(t: number) {
+    const upper3Before = computeVwapBands(bars).at(-1)!.upper3;
+    bars = [...bars, { t, o: 100, h: upper3Before + 4, l: 99.5, c: upper3Before + 3, v: 1000 }];
+
+    const afterTouch = computeVwapBands(bars).at(-1)!;
+    const gap = afterTouch.upper3 - afterTouch.upper2;
+    const confirmClose = afterTouch.upper3 - gap * 0.3; // comfortably between +2σ and +3σ
+    bars = [...bars, { t: t + 1, o: afterTouch.upper3 + 3, h: afterTouch.upper3 + 3.2, l: confirmClose - 0.2, c: confirmClose, v: 1000 }];
+  }
+
+  addTouchAndConfirm(30); // fires SHORT #1 at index 31
+  addTouchAndConfirm(32); // no genuine retreat since #1 — must NOT fire again
+  bars = [...bars, { t: 34, o: 100, h: 100.5, l: 99.5, c: 100, v: 1000 }]; // unambiguous retreat to baseline — re-arms
+  addTouchAndConfirm(35); // fires SHORT #2 at index 36
+
+  const allBands = computeVwapBands(bars);
+  const signals = detectVwapScalperSignals(bars, allBands, { ...BASE_PARAMS, entryMode: 'CANDLE_REVERSAL' });
+
+  assert.equal(signals.length, 2, `expected exactly 2 signals, got ${signals.length}`);
+  assert.equal(signals[0].barIndex, 31);
+  assert.equal(signals[1].barIndex, 36);
+});

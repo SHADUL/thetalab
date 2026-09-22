@@ -22,15 +22,16 @@ const NUMERIC_GROUPS = [
     ],
   },
   {
-    title: "VWAP Bands", fields: [
+    title: "VWAP Bands & Target", fields: [
       { key: "stdev_multiplier", label: "Std. deviation multiplier", step: 0.1, min: 0.1 },
+      { key: "min_reward_risk_multiple", label: "Min reward : risk", step: 0.1, min: 0 },
     ],
   },
 ];
 
 const DEFAULT_DRAFT = {
   account_equity: 0, max_risk_per_trade_pct: 1, max_daily_loss_pct: 3, max_open_positions: 3,
-  max_consecutive_losses: 3, stdev_multiplier: 1.0, entry_mode: "REJECTION",
+  max_consecutive_losses: 3, stdev_multiplier: 1.0, min_reward_risk_multiple: 2, entry_mode: "REJECTION",
   slope_filter_enabled: false, slope_filter_lookback_bars: 10, slope_filter_threshold_sigma: 1.0,
   trend_filter_enabled: false, trend_filter_ema_length: 200,
   stop_loss_enabled: false, stop_loss_mode: "BEYOND_3SIGMA", stop_loss_percent: 0.5, stop_loss_sigma_buffer: 0.5,
@@ -213,10 +214,10 @@ export default function VwapScalper() {
         </button>
       </div>
       <p className="text-[11px] text-muted mb-3 max-w-[80ch]">
-        Session-VWAP mean reversion scalp across the NIFTY 50: touch/rejection entries at the 3σ band, targeting a return to
-        VWAP, with an optional stop-loss. Runs on its own 1-minute cron against live Kite 1-min bars — this page only displays
-        the result, it doesn't trigger a scan. PAPER mode only: no real order is ever placed. Nasdaq is a separate, not-yet-built
-        strategy (needs an Alpaca integration).
+        Session-VWAP mean reversion scalp across the NIFTY 50: touch/rejection/candle-reversal entries at the 3σ band,
+        targeting VWAP or a minimum reward:risk floor (whichever is farther), with an optional stop-loss. Runs on its own
+        1-minute cron against live Kite 1-min bars — this page only displays the result, it doesn't trigger a scan. PAPER mode
+        only: no real order is ever placed. Nasdaq is a separate, not-yet-built strategy (needs an Alpaca integration).
       </p>
 
       {killSwitchResult && (
@@ -294,6 +295,7 @@ export default function VwapScalper() {
                 >
                   <option value="REJECTION">Rejection (conservative, confirmed candle)</option>
                   <option value="TOUCH">Touch (fires on intrabar touch)</option>
+                  <option value="CANDLE_REVERSAL">Candle Reversal (2-bar: touch candle + reversal candle closing back across the band)</option>
                 </select>
               </div>
 
@@ -345,7 +347,7 @@ export default function VwapScalper() {
 
             <div className="flex items-center gap-2.5 mt-3">
               <button onClick={saveSettings} disabled={saving} className="topstep text-[11.5px]">{saving ? "Saving…" : "Save Settings"}</button>
-              <span className="text-[10.5px] text-faint">Last saved values are pre-filled above — unsaved edits are only local until you click Save. Sizing needs Stop Loss enabled (a signal can't be sized without a real stop).</span>
+              <span className="text-[10.5px] text-faint">Last saved values are pre-filled above — unsaved edits are only local until you click Save. Sizing needs Stop Loss enabled (a signal can't be sized without a real stop) — the min reward:risk floor also has no effect without one, since it needs a stop distance to measure risk against.</span>
             </div>
           </div>
         )}

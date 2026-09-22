@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { evaluateVwapScalperExit } from '../targetAndStop.ts';
+import { evaluateVwapScalperExit, computeEffectiveTarget } from '../targetAndStop.ts';
 import type { Bar, VwapBandsPoint } from '../types.ts';
 
 function bar(t: number, h: number, l: number, c: number): Bar {
@@ -82,4 +82,49 @@ test('the target price tracks each bar\'s OWN vwap, not the vwap at entry time',
   const result = evaluateVwapScalperExit('LONG', null, bars, bands);
   assert.equal(result.exited, true);
   assert.equal(result.exitPrice, 105);
+});
+
+test('computeEffectiveTarget falls back to plain VWAP when entryPrice, stopPrice or minRewardMultiple is missing', () => {
+  assert.equal(computeEffectiveTarget('LONG', null, 98, 105), 105);
+  assert.equal(computeEffectiveTarget('LONG', 100, null, 105), 105);
+  assert.equal(computeEffectiveTarget('LONG', 100, 98, 105, null), 105);
+  assert.equal(computeEffectiveTarget('LONG', 100, 98, 105, 0), 105);
+});
+
+test('computeEffectiveTarget picks the minimum-reward level for LONG when it is FARTHER than VWAP', () => {
+  // entry=100, stop=98 -> risk=2. minReward=2 -> floor at 104. VWAP is only 101 (closer) -> use the floor.
+  const target = computeEffectiveTarget('LONG', 100, 98, 101, 2);
+  assert.equal(target, 104);
+});
+
+test('computeEffectiveTarget picks VWAP for LONG when it is FARTHER than the minimum-reward level', () => {
+  // Same risk (2), same minReward multiple (2) -> floor at 104, but VWAP has moved out to 110 — take the bigger win.
+  const target = computeEffectiveTarget('LONG', 100, 98, 110, 2);
+  assert.equal(target, 110);
+});
+
+test('computeEffectiveTarget mirrors correctly for SHORT (farther = lower price)', () => {
+  // entry=100, stop=102 -> risk=2. minReward=2 -> floor at 96.
+  const nearVwap = computeEffectiveTarget('SHORT', 100, 102, 99, 2); // VWAP only at 99 (closer) -> use floor 96
+  assert.equal(nearVwap, 96);
+  const farVwap = computeEffectiveTarget('SHORT', 100, 102, 90, 2); // VWAP at 90 (farther) -> use VWAP
+  assert.equal(farVwap, 90);
+});
+
+test('evaluateVwapScalperExit honors the minimum-reward floor end-to-end, exiting at the floor rather than a too-close VWAP', () => {
+  // entry=100, stop=98 (risk=2), minReward=2 -> floor target 104. VWAP sits at 101 (too close to satisfy 1:2).
+  const bars = [bar(1, 105, 99, 102)]; // high (105) clears the 104 floor, but NOT because it reached the (closer) 101 vwap
+  const bands = [band(101)];
+  const result = evaluateVwapScalperExit('LONG', 98, bars, bands, 100, 2);
+  assert.equal(result.exited, true);
+  assert.equal(result.reason, 'TARGET');
+  assert.equal(result.exitPrice, 104);
+});
+
+test('evaluateVwapScalperExit does not exit early at VWAP when the minimum-reward floor has not been reached yet', () => {
+  // Same setup, but this bar's high only reaches the vwap level (101), not the floor (104) — must NOT exit.
+  const bars = [bar(1, 101, 99, 100)];
+  const bands = [band(101)];
+  const result = evaluateVwapScalperExit('LONG', 98, bars, bands, 100, 2);
+  assert.equal(result.exited, false);
 });

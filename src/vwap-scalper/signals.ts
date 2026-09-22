@@ -5,11 +5,20 @@
  *   Touch:     SHORT when high >= VWAP+3σ,  LONG when low <= VWAP-3σ
  *   Rejection: Touch condition AND close back inside the band, confirmed
  *              bar only (never repaints)
+ *   CandleReversal: a two-bar confirmation instead of a single-bar check —
+ *              SHORT needs the PRIOR bar to be a green candle that touched
+ *              upperBand3, THEN the current bar to be a red candle that
+ *              closes back below upperBand3 (entry = that close). LONG is
+ *              the mirror at the lower band. See types.ts's EntryMode doc
+ *              for the full rationale — this is a later, stronger
+ *              confirmation than plain Rejection (a real reversal candle,
+ *              not just a close back inside on the same bar).
  *
  * "One signal per excursion": after a SHORT signal, no new SHORT fires
  * until price closes back inside VWAP+2σ; same logic mirrored for LONG
  * vs VWAP-2σ. The two sides are tracked independently — reaching the
- * opposite band never auto-reverses or cancels a setup (Section 3).
+ * opposite band never auto-reverses or cancels a setup (Section 3). This
+ * re-arm rule applies identically to CandleReversal mode.
  *
  * Optional filters (both off by default, purely additive, matching the
  * Pine source's own "Filters (Off by Default)" input group): a VWAP
@@ -78,8 +87,22 @@ export function detectVwapScalperSignals(
     const rejectShort = touchShort && bar.c < band.upper3 && confirmed;
     const rejectLong = touchLong && bar.c > band.lower3 && confirmed;
 
-    const baseShort = params.entryMode === 'TOUCH' ? touchShort : rejectShort;
-    const baseLong = params.entryMode === 'TOUCH' ? touchLong : rejectLong;
+    // CandleReversal needs the PRIOR bar as the touch candle and the
+    // current bar as the confirming reversal candle — undefined (never
+    // fires) on the very first bar, since there is no prior bar yet.
+    const prior = i > 0 ? bars[i - 1] : null;
+    const priorBand = i > 0 ? bands[i - 1] : null;
+    const priorWasBullish = prior !== null && prior.c > prior.o;
+    const priorWasBearish = prior !== null && prior.c < prior.o;
+    const priorTouchedUpper = prior !== null && priorBand !== null && priorBand.stdev > 0 && prior.h >= priorBand.upper3;
+    const priorTouchedLower = prior !== null && priorBand !== null && priorBand.stdev > 0 && prior.l <= priorBand.lower3;
+    const currentIsBearish = bar.c < bar.o;
+    const currentIsBullish = bar.c > bar.o;
+    const candleReversalShort = priorWasBullish && priorTouchedUpper && currentIsBearish && band.stdev > 0 && bar.c < band.upper3 && confirmed;
+    const candleReversalLong = priorWasBearish && priorTouchedLower && currentIsBullish && band.stdev > 0 && bar.c > band.lower3 && confirmed;
+
+    const baseShort = params.entryMode === 'TOUCH' ? touchShort : params.entryMode === 'CANDLE_REVERSAL' ? candleReversalShort : rejectShort;
+    const baseLong = params.entryMode === 'TOUCH' ? touchLong : params.entryMode === 'CANDLE_REVERSAL' ? candleReversalLong : rejectLong;
 
     let trendAllowsShort = true, trendAllowsLong = true;
     if (params.trendFilter && emaSeries) {
@@ -112,6 +135,8 @@ export function detectVwapScalperSignals(
         direction: 'SHORT', barIndex: i, entryPrice: bar.c, vwapAtEntry: band.vwap, stopPrice,
         reason: params.entryMode === 'TOUCH'
           ? `Touched VWAP+3σ (${band.upper3.toFixed(2)}) at ${bar.h.toFixed(2)}.`
+          : params.entryMode === 'CANDLE_REVERSAL'
+          ? `Prior green candle touched VWAP+3σ (${priorBand!.upper3.toFixed(2)}) — confirmed by a red candle closing back below (${band.upper3.toFixed(2)}) at ${bar.c.toFixed(2)}.`
           : `Rejected at VWAP+3σ (${band.upper3.toFixed(2)}) — closed back inside at ${bar.c.toFixed(2)}.`,
       });
       shortReady = false;
@@ -126,6 +151,8 @@ export function detectVwapScalperSignals(
         direction: 'LONG', barIndex: i, entryPrice: bar.c, vwapAtEntry: band.vwap, stopPrice,
         reason: params.entryMode === 'TOUCH'
           ? `Touched VWAP-3σ (${band.lower3.toFixed(2)}) at ${bar.l.toFixed(2)}.`
+          : params.entryMode === 'CANDLE_REVERSAL'
+          ? `Prior red candle touched VWAP-3σ (${priorBand!.lower3.toFixed(2)}) — confirmed by a green candle closing back above (${band.lower3.toFixed(2)}) at ${bar.c.toFixed(2)}.`
           : `Rejected at VWAP-3σ (${band.lower3.toFixed(2)}) — closed back inside at ${bar.c.toFixed(2)}.`,
       });
       longReady = false;

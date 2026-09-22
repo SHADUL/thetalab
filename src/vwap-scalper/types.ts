@@ -33,7 +33,20 @@ export interface VwapBandsPoint {
 }
 
 export type Direction = 'LONG' | 'SHORT';
-export type EntryMode = 'TOUCH' | 'REJECTION';
+/**
+ * TOUCH/REJECTION are single-bar checks against the CURRENT bar's own
+ * band. CANDLE_REVERSAL is a two-bar confirmation pattern instead:
+ *  - SHORT: the PRIOR bar is a green/bullish candle whose high reached
+ *    upperBand3 (an up-move exhausting right at the extreme), and the
+ *    CURRENT bar is a red/bearish candle that closes back BELOW that
+ *    band — the reversal is confirmed on the current bar's close, which
+ *    is also the entry price.
+ *  - LONG: mirrored — prior bar red/bearish touching lowerBand3, current
+ *    bar green/bullish closing back above it.
+ * Requires two real candles (not just a wick), which is a stronger,
+ * later-but-more-selective confirmation than plain Rejection mode.
+ */
+export type EntryMode = 'TOUCH' | 'REJECTION' | 'CANDLE_REVERSAL';
 export type StopLossMode = 'PERCENTAGE' | 'BEYOND_3SIGMA';
 
 export interface VwapScalperParams {

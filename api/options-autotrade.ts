@@ -88,6 +88,7 @@ import { computeVwapBands } from '../src/vwap-scalper/vwapBands.ts';
 import { detectVwapScalperSignals } from '../src/vwap-scalper/signals.ts';
 import { computeVwapScalperPositionSize } from '../src/vwap-scalper/positionSizing.ts';
 import { NIFTY_50_UNIVERSE } from '../src/vwap-scalper/nifty50Universe.ts';
+import { computeEffectiveTarget } from '../src/vwap-scalper/targetAndStop.ts';
 import type { Bar as VwapBar, VwapScalperParams } from '../src/vwap-scalper/types.ts';
 
 const KITE_BASE = 'https://api.kite.trade';
@@ -967,7 +968,7 @@ async function handleClearDailyLock(req: any, res: any, supabase: SupabaseClient
 
 const VWAP_SCALPER_EDITABLE_NUMERIC_FIELDS = [
   'account_equity', 'max_risk_per_trade_pct', 'max_daily_loss_pct', 'max_open_positions', 'max_consecutive_losses',
-  'stdev_multiplier', 'slope_filter_lookback_bars', 'slope_filter_threshold_sigma', 'trend_filter_ema_length',
+  'stdev_multiplier', 'min_reward_risk_multiple', 'slope_filter_lookback_bars', 'slope_filter_threshold_sigma', 'trend_filter_ema_length',
   'stop_loss_percent', 'stop_loss_sigma_buffer',
 ];
 const VWAP_SCALPER_EDITABLE_BOOL_FIELDS = ['slope_filter_enabled', 'trend_filter_enabled', 'stop_loss_enabled'];
@@ -985,8 +986,8 @@ async function handleVwapScalperSettings(req: any, res: any, supabase: SupabaseC
       res.status(400).json({ error: 'bad_request', message: 'execution_mode must be OFF or PAPER — ALERT_ONLY/SEMI_AUTO/AUTO aren\'t implemented yet.' });
       return;
     }
-    if (body.entry_mode !== undefined && !['TOUCH', 'REJECTION'].includes(body.entry_mode)) {
-      res.status(400).json({ error: 'bad_request', message: 'entry_mode must be TOUCH or REJECTION.' });
+    if (body.entry_mode !== undefined && !['TOUCH', 'REJECTION', 'CANDLE_REVERSAL'].includes(body.entry_mode)) {
+      res.status(400).json({ error: 'bad_request', message: 'entry_mode must be TOUCH, REJECTION, or CANDLE_REVERSAL.' });
       return;
     }
     if (body.stop_loss_mode !== undefined && !['PERCENTAGE', 'BEYOND_3SIGMA'].includes(body.stop_loss_mode)) {
@@ -1107,7 +1108,7 @@ async function handleVwapScalperChart(req: any, res: any, supabase: SupabaseClie
 function vwapScalperParamsFromSettings(settings: any): VwapScalperParams {
   return {
     stdevMultiplier: Number(settings.stdev_multiplier) || 1,
-    entryMode: settings.entry_mode === 'TOUCH' ? 'TOUCH' : 'REJECTION',
+    entryMode: settings.entry_mode === 'TOUCH' ? 'TOUCH' : settings.entry_mode === 'CANDLE_REVERSAL' ? 'CANDLE_REVERSAL' : 'REJECTION',
     slopeFilter: settings.slope_filter_enabled
       ? { lookbackBars: Number(settings.slope_filter_lookback_bars) || 10, thresholdSigma: Number(settings.slope_filter_threshold_sigma) || 1 }
       : null,
@@ -1325,13 +1326,15 @@ async function handleVwapScalperMonitor(req: any, res: any, supabase: SupabaseCl
     }).eq('id', p.id);
 
     const stopPrice = p.stop_price !== null ? Number(p.stop_price) : null;
+    const minRewardMultiple = Number(settings.min_reward_risk_multiple) || null;
+    const effectiveTarget = computeEffectiveTarget(direction, Number(p.entry_price), stopPrice, currentVwap, minRewardMultiple);
     const stopHit = stopPrice !== null && (direction === 'LONG' ? ltp <= stopPrice : ltp >= stopPrice);
-    const targetHit = direction === 'LONG' ? ltp >= currentVwap : ltp <= currentVwap;
+    const targetHit = direction === 'LONG' ? ltp >= effectiveTarget : ltp <= effectiveTarget;
     const sessionEnded = !isMarketOpenIST();
 
     if (!stopHit && !targetHit && !sessionEnded) continue;
 
-    const exitPrice = stopHit ? stopPrice! : targetHit ? currentVwap : ltp;
+    const exitPrice = stopHit ? stopPrice! : targetHit ? effectiveTarget : ltp;
     const reason = stopHit ? 'STOP' : targetHit ? 'TARGET' : 'SESSION_END';
     const realizedPnl = (direction === 'LONG' ? exitPrice - Number(p.entry_price) : Number(p.entry_price) - exitPrice) * Number(p.quantity);
 

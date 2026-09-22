@@ -20,7 +20,14 @@ create table vwap_scalper_settings (
   -- Strategy parameters — see src/vwap-scalper/types.ts's VwapScalperParams,
   -- which these map onto directly.
   stdev_multiplier numeric not null default 1.0,
-  entry_mode text not null default 'REJECTION',   -- TOUCH | REJECTION
+  entry_mode text not null default 'REJECTION',   -- TOUCH | REJECTION | CANDLE_REVERSAL
+  -- Target floor: the effective target becomes whichever is FARTHER from
+  -- entry between VWAP and entry ± this-many × riskPerUnit (see
+  -- targetAndStop.ts's computeEffectiveTarget). 0/null falls back to a
+  -- pure VWAP target (the original behavior) — this requires a real stop
+  -- to mean anything, same "excluded, not fabricated" discipline as
+  -- position sizing itself.
+  min_reward_risk_multiple numeric not null default 2,
   slope_filter_enabled boolean not null default false,
   slope_filter_lookback_bars integer not null default 10,
   slope_filter_threshold_sigma numeric not null default 1.0,

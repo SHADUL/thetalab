@@ -82,6 +82,7 @@ import { decideTrade, type DecisionThresholds } from '../src/quant/strategies/de
 import { computePositionSize, type PortfolioState, type OpenPositionSummary } from '../src/quant/strategies/positionSizing.ts';
 import { runPreTradeValidation } from '../src/quant/execution/preTradeValidation.ts';
 import { runPaperExecution, type PlannedLeg } from '../src/quant/execution/paperFill.ts';
+import { runLiveExecution, type LiveOrderPlacer } from '../src/quant/execution/liveFill.ts';
 import { evaluateExit, type ShortStrike } from '../src/quant/execution/exitEngine.ts';
 import { checkDailyRiskLock } from '../src/quant/execution/dailyRiskLock.ts';
 import { computeVwapBands } from '../src/vwap-scalper/vwapBands.ts';
@@ -138,6 +139,133 @@ async function kiteFetch(path: string, opts: { method?: string; token: string; a
     throw new Error(json?.message || `Kite API error (${resp.status}) on ${path}`);
   }
   return json?.data;
+}
+
+/**
+ * Order placement/modification on Kite Connect uses
+ * application/x-www-form-urlencoded bodies, NOT JSON — unlike every other
+ * endpoint this file talks to (margins/basket, quotes, historical data all
+ * take/return JSON). Sending an order as JSON would either be silently
+ * misparsed or rejected by the broker; this is its own helper specifically
+ * so that mistake can't happen by reusing kiteFetch's JSON body encoding.
+ */
+async function kiteFetchForm(path: string, opts: { method?: string; token: string; apiKey: string; form: Record<string, string | number> }): Promise<any> {
+  const { method = 'POST', token, apiKey, form } = opts;
+  const body = new URLSearchParams(Object.entries(form).map(([k, v]) => [k, String(v)])).toString();
+  const resp = await fetch(`${KITE_BASE}${path}`, {
+    method,
+    headers: {
+      'X-Kite-Version': '3',
+      Authorization: `token ${apiKey}:${token}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body,
+  });
+  const json = await resp.json().catch(() => null);
+  if (!resp.ok || json?.status === 'error') {
+    throw new Error(json?.message || `Kite API error (${resp.status}) on ${path}`);
+  }
+  return json?.data;
+}
+
+/**
+ * Real order placement/polling/quoting, implementing liveFill.ts's
+ * LiveOrderPlacer interface against the actual Kite Connect API. This is
+ * the ONLY place real money moves in this entire codebase — everywhere
+ * else (paperFill.ts, this file's own PAPER-mode path) simulates. Kept
+ * deliberately thin: all the sequencing/retry/unwind judgment already
+ * lives in liveFill.ts, independently tested against a mocked version of
+ * this same interface.
+ */
+function makeLiveOrderPlacer(token: string, apiKey: string): LiveOrderPlacer {
+  return {
+    async getQuote(tradingsymbol, exchange) {
+      try {
+        const data = await kiteFetch(`/quote?i=${encodeURIComponent(`${exchange}:${tradingsymbol}`)}`, { token, apiKey });
+        const q = data?.[`${exchange}:${tradingsymbol}`];
+        const depth = q?.depth;
+        const bid = depth?.buy?.[0]?.price;
+        const ask = depth?.sell?.[0]?.price;
+        const lastPrice = q?.last_price;
+        if (!(lastPrice > 0)) return null;
+        // A thin/no-depth instrument can have an empty order book on one
+        // side — fall back to last_price for whichever side is missing
+        // rather than treating the whole quote as unusable.
+        return { bid: bid > 0 ? bid : lastPrice, ask: ask > 0 ? ask : lastPrice, lastPrice };
+      } catch {
+        return null;
+      }
+    },
+
+    async placeOrder(leg, exchange, transactionType, limitPrice) {
+      const data = await kiteFetchForm('/orders/regular', {
+        token, apiKey,
+        form: {
+          tradingsymbol: leg.tradingsymbol, exchange,
+          transaction_type: transactionType,
+          quantity: leg.quantity,
+          product: 'NRML',
+          order_type: 'LIMIT',
+          price: limitPrice.toFixed(2),
+          validity: 'DAY',
+        },
+      });
+      return data?.order_id;
+    },
+
+    async closeLeg(leg, exchange) {
+      // Best-effort unwind: MARKET, opposite side of how the leg was
+      // meant to be held — a BUY leg that filled gets sold back, a SELL
+      // leg that filled gets bought back. Speed of execution matters far
+      // more than price here, hence MARKET rather than LIMIT.
+      const data = await kiteFetchForm('/orders/regular', {
+        token, apiKey,
+        form: {
+          tradingsymbol: leg.tradingsymbol, exchange,
+          transaction_type: leg.side === 'BUY' ? 'SELL' : 'BUY',
+          quantity: leg.quantity,
+          product: 'NRML',
+          order_type: 'MARKET',
+          validity: 'DAY',
+        },
+      });
+      return data?.order_id;
+    },
+
+    async awaitFill(orderId, timeoutMs) {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const history = await kiteFetch(`/orders/${orderId}`, { token, apiKey }).catch(() => null);
+        const last = Array.isArray(history) ? history[history.length - 1] : null;
+        const status = last?.status as string | undefined;
+        if (status === 'COMPLETE') {
+          const avg = Number(last?.average_price);
+          return { status: 'COMPLETE', averagePrice: avg > 0 ? avg : null };
+        }
+        if (status === 'REJECTED') return { status: 'REJECTED', averagePrice: null };
+        if (status === 'CANCELLED') return { status: 'CANCELLED', averagePrice: null };
+        if (Date.now() >= deadline) return { status: 'TIMEOUT', averagePrice: null };
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    },
+  };
+}
+
+/**
+ * Real available funds for F&O (the "equity" segment covers NFO/BFO
+ * derivatives on Kite) — checked independently of the user-set
+ * reserved_fund setting, which is a self-declared allocation, not a live
+ * pull of the actual broker balance. AUTO mode must never fire a real
+ * order sized against a number the account doesn't actually have.
+ */
+async function fetchRealAvailableFunds(token: string, apiKey: string): Promise<number | null> {
+  try {
+    const data = await kiteFetch('/user/margins/equity', { token, apiKey });
+    const available = Number(data?.available?.live_balance ?? data?.net);
+    return available > 0 ? available : 0;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -644,13 +772,30 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     }
   }
 
+  // AUTO mode sizes against the REAL broker balance, never the self-
+  // declared reserved_fund setting — that number is a risk-budget
+  // allocation a human typed in, not a live account balance. A failed
+  // fetch refuses the trade outright rather than falling back to
+  // reserved_fund, which would size a real order against a number nobody
+  // has verified the account actually holds.
+  const isLive = settings.execution_mode === 'AUTO';
+  const realAvailableFunds = isLive ? await fetchRealAvailableFunds(token, apiKey) : null;
+  if (isLive && realAvailableFunds === null) {
+    await log('error', `AUTO: could not verify real account funds for ${symbol} — refusing to size or place any order this cycle.`);
+    res.status(200).json({ ok: true, action: decision.action, opened: false, skipped: 'real_funds_unavailable', diagnostics });
+    return;
+  }
+
   const sizing = computePositionSize(
     {
       pricing: { maxLoss: best.result.maxLoss, maxProfit: best.result.maxProfit, netCredit: best.result.netCredit, netGreeks: best.result.netGreeks },
       marginRequiredPerLot,
       underlyingGroup: candidateSymbolGroup,
     },
-    { equity: Number(settings.reserved_fund) || 0, availableFunds: Number(settings.reserved_fund) || 0 },
+    {
+      equity: Number(settings.reserved_fund) || 0,
+      availableFunds: isLive ? (realAvailableFunds ?? 0) : Number(settings.reserved_fund) || 0,
+    },
     portfolio,
     {
       maxRiskPerTradePct: settings.max_risk_per_trade_pct, maxDailyLossPct: settings.max_daily_loss_pct,
@@ -660,6 +805,13 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
       maxCorrelatedGroupRiskPct: settings.max_correlated_group_risk_pct,
     },
   );
+
+  // Lots are only known AFTER sizing — legs above were built at exactly
+  // ONE lot's quantity (to price the per-lot margin call). Scale every
+  // leg's quantity by sizing.lots now, before it goes anywhere near
+  // execution or persistence; using the unscaled `legs` past this point
+  // would trade/record the wrong quantity whenever sizing.lots > 1.
+  const scaledLegs: PlannedLeg[] = legs.map((l) => ({ ...l, quantity: l.quantity * sizing.lots }));
 
   // 7. Pre-trade validation. This synchronous flow has no time gap between
   // scoring and "submission" — priceDrift/Greeks/max-loss recalculation are
@@ -680,18 +832,26 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     recalculatedMaxLoss: best.result.maxLoss, originalMaxLoss: best.result.maxLoss, maxLossDriftPct: 5,
   });
 
-  const paperResult = runPaperExecution(legs, validation);
+  // AUTO fires REAL orders against the real Zerodha account — BUY (hedge)
+  // legs first, confirmed FILLED, before any SELL (short) leg, exactly the
+  // sequencing real margin treatment requires (see liveFill.ts's own
+  // header). PAPER keeps simulating every leg filling instantly.
+  const execResult = isLive
+    ? await runLiveExecution(scaledLegs, validation, makeLiveOrderPlacer(token, apiKey), { exchange })
+    : runPaperExecution(scaledLegs, validation);
+  const modeLabel = isLive ? 'AUTO' : 'PAPER';
 
-  if (paperResult.state !== 'ACTIVE') {
-    await log('info', `Paper position not opened for ${symbol}`, { reason: paperResult.log });
-    res.status(200).json({ ok: true, action: decision.action, opened: false, validation, sizing, log: paperResult.log, diagnostics });
+  if (execResult.state !== 'ACTIVE') {
+    await log(isLive ? 'error' : 'info', `${modeLabel} position not opened for ${symbol}`, { reason: execResult.log });
+    res.status(200).json({ ok: true, action: decision.action, opened: false, validation, sizing, log: execResult.log, diagnostics });
     return;
   }
 
   const { data: inserted, error: insertErr } = await supabase.from('options_autotrade_positions').insert({
     symbol, strategy_label: decision.expiryEvaluation.strategyLabel,
     expiry: expiryDateStr,
-    status: 'ACTIVE', execution_state: paperResult.state, protection: paperResult.protection,
+    status: 'ACTIVE', execution_state: execResult.state, protection: execResult.protection,
+    execution_mode: modeLabel,
     lots: sizing.lots, net_credit: best.result.netCredit, max_profit: sizing.sizedMaxProfit, max_loss: sizing.sizedMaxLoss,
     margin_required: sizing.sizedMarginRequired,
     net_delta: (best.result.netGreeks.delta ?? 0) * sizing.lots, net_gamma: (best.result.netGreeks.gamma ?? 0) * sizing.lots,
@@ -702,12 +862,13 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
 
   if (insertErr) { res.status(502).json({ ok: false, error: 'supabase_error', message: insertErr.message }); return; }
 
-  const legRows = paperResult.legFills.map((l) => ({
+  const legRows = execResult.legFills.map((l) => ({
     position_id: inserted.id, side: l.side, option_right: l.right, strike: l.strike,
     tradingsymbol: l.tradingsymbol, quantity: l.quantity, fill_price: l.fillPrice, status: l.status,
+    order_id: l.orderId ?? null,
   }));
   await supabase.from('options_autotrade_legs').insert(legRows);
-  await log('info', `Opened PAPER position #${inserted.id}: ${decision.expiryEvaluation.strategyLabel} on ${symbol}, ${sizing.lots} lot(s).`);
+  await log('info', `Opened ${modeLabel} position #${inserted.id}: ${decision.expiryEvaluation.strategyLabel} on ${symbol}, ${sizing.lots} lot(s).`, isLive ? { log: execResult.log } : undefined);
 
   res.status(200).json({ ok: true, action: decision.action, opened: true, positionId: inserted.id, sizing, explanation: decision.explanation, diagnostics });
 }
@@ -830,7 +991,52 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
     });
     if (decision.action !== 'CLOSE') continue;
 
-    const realizedPnl = (Number(p.max_profit) || 0) - currentCostToClose;
+    let realizedPnl = (Number(p.max_profit) || 0) - currentCostToClose;
+
+    if (p.execution_mode === 'AUTO') {
+      // Real closing orders — SELL(short) legs first (buy-to-cover removes
+      // the unbounded-risk leg first), then BUY(long) legs. MARKET orders:
+      // getting flat matters more than price on an exit. A leg whose
+      // closing order doesn't confirm FILLED means the position is left
+      // in a status this monitor's own query (status = 'ACTIVE') will
+      // never pick up again — CLOSE_FAILED, not ACTIVE — so a failed
+      // unwind can never be silently retried into double-closing a leg
+      // that already went through; it waits for a human to reconcile
+      // against the broker directly, same posture as stateMachine.ts's
+      // RECONCILIATION_REQUIRED.
+      const placer = makeLiveOrderPlacer(token, apiKey);
+      const orderedClose = [...legs.filter((l: any) => l.side === 'SELL'), ...legs.filter((l: any) => l.side === 'BUY')];
+      let allClosed = true;
+      let actualCostToClose = 0;
+      for (const l of orderedClose) {
+        try {
+          const orderId = await placer.closeLeg(
+            { side: l.side, right: l.option_right, strike: Number(l.strike), tradingsymbol: l.tradingsymbol, quantity: l.quantity, fillPrice: 0 },
+            exchange,
+          );
+          const fill = await placer.awaitFill(orderId, 15_000);
+          if (fill.status === 'COMPLETE' && fill.averagePrice != null) {
+            actualCostToClose += (l.side === 'SELL' ? 1 : -1) * fill.averagePrice * l.quantity;
+            await supabase.from('options_autotrade_legs').update({ exit_order_id: orderId, exit_fill_price: fill.averagePrice }).eq('id', l.id);
+          } else {
+            allClosed = false;
+            await log('error', `Position #${p.id}: AUTO closing order for ${l.side} ${l.tradingsymbol} ended ${fill.status} — THIS LEG MAY STILL BE OPEN AT THE BROKER. Manual check required immediately.`);
+          }
+        } catch (err: any) {
+          allClosed = false;
+          await log('error', `Position #${p.id}: AUTO closing order request FAILED for ${l.side} ${l.tradingsymbol} — ${err.message}. THIS LEG MAY STILL BE OPEN AT THE BROKER. Manual check required immediately.`);
+        }
+      }
+      if (!allClosed) {
+        await supabase.from('options_autotrade_positions').update({
+          status: 'CLOSE_FAILED', exit_reason: decision.reason, updated_at: new Date().toISOString(),
+        }).eq('id', p.id);
+        await log('error', `Position #${p.id}: marked CLOSE_FAILED — at least one real closing order did not confirm. This position will NOT be retried automatically; verify against the broker and resolve manually.`);
+        continue;
+      }
+      realizedPnl = (Number(p.max_profit) || 0) - actualCostToClose;
+    }
+
     const { error: updateErr } = await supabase.from('options_autotrade_positions').update({
       status: 'CLOSED', execution_state: 'CLOSED', exit_date: todayIST, exit_reason: decision.reason,
       realized_pnl: realizedPnl, updated_at: new Date().toISOString(),
@@ -844,7 +1050,7 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
       consecutive_losses: realizedPnl < 0 ? (Number(dailyRow?.consecutive_losses) || 0) + 1 : 0,
     });
 
-    await log('info', `Closed PAPER position #${p.id} (${p.symbol} ${p.strategy_label}): ${decision.reason} — realized P&L ₹${realizedPnl.toFixed(0)}.`);
+    await log('info', `Closed ${p.execution_mode ?? 'PAPER'} position #${p.id} (${p.symbol} ${p.strategy_label}): ${decision.reason} — realized P&L ₹${realizedPnl.toFixed(0)}.`);
     closed.push({ positionId: p.id, symbol: p.symbol, reason: decision.reason, realizedPnl });
   }
 
@@ -879,8 +1085,13 @@ async function handleSettings(req: any, res: any, supabase: SupabaseClient) {
   }
   if (req.method === 'PUT' || req.method === 'POST') {
     const body = req.body ?? {};
-    if (body.execution_mode !== undefined && !['OFF', 'PAPER'].includes(body.execution_mode)) {
-      res.status(400).json({ error: 'bad_request', message: `execution_mode must be OFF or PAPER — ALERT_ONLY/SEMI_AUTO/AUTO aren't implemented yet.` });
+    // AUTO places REAL orders against the real Zerodha account (see
+    // liveFill.ts + makeLiveOrderPlacer) — ALERT_ONLY/SEMI_AUTO still
+    // aren't implemented, but AUTO now is. There is no separate
+    // confirmation step here; the UI itself is responsible for a strong
+    // real-money warning before ever sending execution_mode: 'AUTO'.
+    if (body.execution_mode !== undefined && !['OFF', 'PAPER', 'AUTO'].includes(body.execution_mode)) {
+      res.status(400).json({ error: 'bad_request', message: `execution_mode must be OFF, PAPER, or AUTO — ALERT_ONLY/SEMI_AUTO aren't implemented yet.` });
       return;
     }
     const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
@@ -938,10 +1149,14 @@ async function handleKillSwitch(req: any, res: any, supabase: SupabaseClient) {
   const { error } = await supabase.from('options_autotrade_settings').update({ execution_mode: 'OFF', updated_at: new Date().toISOString() }).eq('id', 1);
   if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
   await supabase.from('options_autotrade_log').insert({ level: 'info', message: 'Kill switch triggered from the dashboard — execution_mode set to OFF.' });
-  const { count } = await supabase.from('options_autotrade_positions').select('id', { count: 'exact', head: true }).eq('status', 'ACTIVE');
+  const { data: openPositions } = await supabase.from('options_autotrade_positions').select('execution_mode').eq('status', 'ACTIVE');
+  const liveCount = (openPositions ?? []).filter((p: any) => p.execution_mode === 'AUTO').length;
+  const total = openPositions?.length ?? 0;
   res.status(200).json({
     ok: true,
-    message: `New entries stopped (execution_mode set to OFF).${count ? ` ${count} paper position(s) remain open — position-monitor's exit engine keeps evaluating them independently on its own 5-min cron.` : ' No open positions.'}`,
+    message: `New entries stopped (execution_mode set to OFF). This does NOT close any open position.${
+      total ? ` ${total} position(s) remain open${liveCount ? ` — ${liveCount} of them REAL, on your actual Zerodha account` : ''} — position-monitor's exit engine keeps evaluating them independently on its own cron.` : ' No open positions.'
+    }`,
   });
 }
 

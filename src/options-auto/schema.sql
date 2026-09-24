@@ -72,7 +72,16 @@ create table options_autotrade_positions (
   symbol text not null,
   strategy_label text not null,
   expiry date not null,
-  status text not null default 'ACTIVE',    -- ACTIVE | CLOSED | FAILED
+  status text not null default 'ACTIVE',    -- ACTIVE | CLOSED | FAILED | CLOSE_FAILED
+  -- Recorded once, at open, from execution_mode at that moment — a
+  -- position's own lifecycle must not silently become "live" or "paper"
+  -- retroactively just because the setting changed after it opened.
+  -- CLOSE_FAILED (status, not this column) means a real closing order for
+  -- an AUTO position didn't confirm — deliberately excluded from this
+  -- monitor's own `status = 'ACTIVE'` query so a failed unwind can never
+  -- be silently retried into double-closing a leg that already filled;
+  -- it waits for a human to reconcile against the broker directly.
+  execution_mode text not null default 'PAPER', -- PAPER | AUTO
   execution_state text not null,             -- mirrors execution/types.ts's ExecutionState
   protection text not null,                  -- mirrors execution/types.ts's ProtectionState
   lots integer not null,
@@ -109,7 +118,13 @@ create table options_autotrade_legs (
   tradingsymbol text not null,
   quantity integer not null,
   fill_price numeric not null,
-  status text not null           -- FILLED | REJECTED | CANCELLED
+  status text not null,          -- FILLED | REJECTED | CANCELLED
+  -- Null for every PAPER leg. Populated only by makeLiveOrderPlacer's real
+  -- Kite order calls — order_id at entry, exit_order_id/exit_fill_price
+  -- once a real closing order confirms FILLED (see handlePositionMonitor).
+  order_id text,
+  exit_order_id text,
+  exit_fill_price numeric
 );
 create index options_autotrade_legs_position_idx on options_autotrade_legs (position_id);
 

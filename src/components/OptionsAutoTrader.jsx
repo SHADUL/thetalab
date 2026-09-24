@@ -5,7 +5,7 @@ import { ScoreBadge } from "./ScoreWidgets.jsx";
 
 const POLL_MS = 60_000; // this dashboard only reads already-computed state (settings/positions/log) — the live chain fetch itself runs on its own 30-min cron, not on this poll
 
-const STATUS_TONE = { ACTIVE: "muted", CLOSED: "muted", FAILED: "loss" };
+const STATUS_TONE = { ACTIVE: "muted", CLOSED: "muted", FAILED: "loss", CLOSE_FAILED: "loss" };
 
 const EDITABLE_GROUPS = [
   {
@@ -583,11 +583,20 @@ export default function OptionsAutoTrader() {
       .finally(() => setSaving(false));
   };
 
-  const toggleEnabled = (enabled) => {
+  const setExecutionMode = (mode) => {
+    if (mode === "AUTO") {
+      const confirmed = window.confirm(
+        "This places REAL orders on your real Zerodha account with real money — not a simulation.\n\n" +
+        "Every future scan cycle will size and fire live BUY/SELL orders the moment a candidate clears the quality gate, with no per-trade confirmation. " +
+        "Position-monitor will also place real closing orders automatically.\n\n" +
+        "Are you sure you want to switch to AUTO?",
+      );
+      if (!confirmed) return;
+    }
     setSaving(true);
     fetch("/api/options-autotrade?resource=settings", {
       method: "PUT", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ execution_mode: enabled ? "PAPER" : "OFF" }),
+      body: JSON.stringify({ execution_mode: mode }),
     })
       .then((r) => r.json())
       .then((s) => { if (!s.error) setSettings(s); })
@@ -597,8 +606,11 @@ export default function OptionsAutoTrader() {
 
   const triggerKillSwitch = () => {
     const activeCount = positions.active.length;
+    const liveCount = positions.active.filter((p) => p.execution_mode === "AUTO").length;
     const confirmed = window.confirm(
-      `This stops new paper entries (execution_mode -> OFF).${activeCount > 0 ? ` ${activeCount} open paper position(s) will remain open — there is no exit engine yet to square them off automatically.` : ""} Continue?`,
+      `This stops new entries (execution_mode -> OFF) — it does NOT close any open position.${
+        activeCount > 0 ? ` ${activeCount} open position(s) remain open${liveCount ? `, ${liveCount} of them REAL on your Zerodha account` : ""} — position-monitor's own exit engine keeps evaluating and closing them independently on its cron, kill switch or not.` : ""
+      } Continue?`,
     );
     if (!confirmed) return;
     setKillSwitchBusy(true);
@@ -622,7 +634,13 @@ export default function OptionsAutoTrader() {
           <h1 className="text-[16px] font-bold">Options Auto-Trader</h1>
           <span
             className="text-[10px] font-semibold px-1.5 py-0.5 rounded-[5px]"
-            style={{ background: settings?.execution_mode === "PAPER" ? "var(--c-gain-soft, #16a34a22)" : "var(--c-surface-2)", color: settings?.execution_mode === "PAPER" ? "var(--c-gain)" : "var(--c-faint)" }}
+            style={
+              settings?.execution_mode === "AUTO"
+                ? { background: "var(--c-loss-soft)", color: "var(--c-loss)" }
+                : settings?.execution_mode === "PAPER"
+                ? { background: "var(--c-gain-soft, #16a34a22)", color: "var(--c-gain)" }
+                : { background: "var(--c-surface-2)", color: "var(--c-faint)" }
+            }
           >
             {settings?.execution_mode ?? "…"}
           </span>
@@ -631,7 +649,7 @@ export default function OptionsAutoTrader() {
           onClick={triggerKillSwitch} disabled={killSwitchBusy}
           className="flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1.5 rounded-[8px]"
           style={{ background: "var(--c-loss-soft, #dc262622)", color: "var(--c-loss)", border: "1px solid var(--c-loss)" }}
-          title="Stops new paper entries — cannot close positions, no exit engine exists yet"
+          title="Stops new entries only — position-monitor's own exit engine still evaluates and closes open positions independently"
         >
           <HandPalm size={13} weight="bold" />
           {killSwitchBusy ? "Stopping…" : "Kill Switch"}
@@ -674,11 +692,13 @@ export default function OptionsAutoTrader() {
 
       <div className="rounded-[12px] mb-4" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
         <button onClick={() => setSettingsOpen((v) => !v)} className="w-full flex items-center gap-3 sm:flex-wrap p-3 text-left">
-          <Wallet size={15} weight="bold" className="text-muted shrink-0" />
-          <span className="text-[11.5px] font-semibold">Paper Execution</span>
+          <Wallet size={15} weight="bold" className={settings?.execution_mode === "AUTO" ? "text-loss shrink-0" : "text-muted shrink-0"} />
+          <span className="text-[11.5px] font-semibold">{settings?.execution_mode === "AUTO" ? "Live Execution" : "Paper Execution"}</span>
           <span className="hidden sm:inline text-[10.5px] text-faint">Reserved fund {inr(settings?.reserved_fund ?? 0)}</span>
           <span className="hidden sm:inline text-[10.5px] text-faint flex-1">
-            {settings?.execution_mode === "PAPER" ? "Passing candidates auto-open paper positions on the 30-min scan." : "Scans still run and log a decision, but no paper positions are opened."}
+            {settings?.execution_mode === "AUTO"
+              ? "REAL orders are placed on your Zerodha account the moment a candidate clears the quality gate."
+              : settings?.execution_mode === "PAPER" ? "Passing candidates auto-open paper positions on the 30-min scan." : "Scans still run and log a decision, but no paper positions are opened."}
           </span>
           <span className="flex-1 sm:hidden" />
           {settingsOpen ? <CaretUp size={14} className="text-muted shrink-0" /> : <CaretDown size={14} className="text-muted shrink-0" />}
@@ -687,14 +707,26 @@ export default function OptionsAutoTrader() {
 
         {settingsOpen && (
           <div className="px-3 pb-3 pt-1" style={{ borderTop: "1px solid var(--c-line)" }}>
-            <div className="flex items-center gap-4 flex-wrap py-2.5">
-              <label className="flex items-center gap-1.5 text-[11.5px]">
-                <input type="checkbox" checked={settings?.execution_mode === "PAPER"} onChange={(e) => toggleEnabled(e.target.checked)} disabled={saving} />
-                Enabled (PAPER)
-              </label>
-              <span className="text-[10.5px] text-faint px-2 py-1 rounded-[6px]" style={{ background: "var(--c-surface-2)" }}>
-                Mode: PAPER only — ALERT_ONLY/SEMI_AUTO/AUTO aren't built yet
-              </span>
+            <div className="flex items-center gap-3 flex-wrap py-2.5">
+              <span className="text-[11px] font-semibold text-muted">Execution Mode</span>
+              <div className="seg-track">
+                {["OFF", "PAPER", "AUTO"].map((mode) => (
+                  <button key={mode} role="tab" aria-selected={settings?.execution_mode === mode} data-on={settings?.execution_mode === mode}
+                    onClick={() => setExecutionMode(mode)} disabled={saving} className="seg"
+                    style={mode === "AUTO" && settings?.execution_mode === "AUTO" ? { color: "var(--c-loss)" } : undefined}>
+                    {mode}
+                  </button>
+                ))}
+              </div>
+              {settings?.execution_mode === "AUTO" ? (
+                <span className="text-[10.5px] font-semibold px-2 py-1 rounded-[6px]" style={{ background: "var(--c-loss-soft)", color: "var(--c-loss)" }}>
+                  REAL MONEY — real orders are placed on your Zerodha account
+                </span>
+              ) : (
+                <span className="text-[10.5px] text-faint px-2 py-1 rounded-[6px]" style={{ background: "var(--c-surface-2)" }}>
+                  ALERT_ONLY/SEMI_AUTO aren't built yet
+                </span>
+              )}
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">

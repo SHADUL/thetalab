@@ -36,7 +36,8 @@ export interface PlannedLeg {
 export interface PaperFillResult {
   /** FAILED when validation didn't pass; ACTIVE when the paper structure "filled" and is now being monitored. */
   state: ExecutionState;
-  legFills: Array<LegFillState & { tradingsymbol: string; quantity: number; fillPrice: number }>;
+  /** orderId is undefined for a paper fill — populated only by liveFill.ts's real execution, which shares this exact shape so both paths persist through the same caller code. */
+  legFills: Array<LegFillState & { tradingsymbol: string; quantity: number; fillPrice: number; orderId?: string }>;
   protection: ProtectionState;
   /** Ordered, human-readable trace of every state transition — not a summary, the actual sequence. */
   log: string[];

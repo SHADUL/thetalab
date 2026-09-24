@@ -1,6 +1,10 @@
 @import "tailwindcss";
 @import "@fontsource-variable/inter";
 
+/* Options Auto-Trader's cinematic hero/headings only — see index.html
+   for the actual font load. Never applied to body/data text. */
+.font-display { font-family: "Space Grotesk", "Inter Variable", system-ui, sans-serif; }
+
 /* ─────────────────────────────────────────────────────────────
    Design tokens. Every colour, radius and elevation in the app
    resolves to one of these. Nothing is chosen per-component.

@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { motion, AnimatePresence, useMotionValue, useSpring } from "framer-motion";
 import { ChartLineUp, Info, Wallet, Gear, CaretDown, CaretUp, CaretLeft, CaretRight, HandPalm, Bell, Eye, EyeSlash, SortAscending, CalendarBlank } from "@phosphor-icons/react";
 import { inr, toneClass } from "./swingFormat.js";
 import { ScoreBadge } from "./ScoreWidgets.jsx";
+import CinematicHero from "./CinematicHero.jsx";
 
 const POLL_MS = 60_000; // this dashboard only reads already-computed state (settings/positions/log) — the live chain fetch itself runs on its own 30-min cron, not on this poll
 
@@ -253,6 +255,44 @@ function MobilePositionRow({ p, hideAmounts, isFirst }) {
  * sm breakpoint — see the "hidden sm:block" / "sm:hidden" split below.
  */
 /**
+ * Subtle mouse-tracked 3D tilt + glassmorphic surface for the dashboard's
+ * two "hero" cards (desktop holdings summary, mobile portfolio card) —
+ * the same restrained treatment (a few degrees max, spring-eased) used on
+ * the login page and the cinematic hero above, so the premium visual
+ * language is consistent top to bottom rather than confined to the intro.
+ */
+function TiltCard({ children, className = "" }) {
+  const rotateX = useMotionValue(0);
+  const rotateY = useMotionValue(0);
+  const springX = useSpring(rotateX, { stiffness: 200, damping: 22 });
+  const springY = useSpring(rotateY, { stiffness: 200, damping: 22 });
+
+  const handlePointerMove = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const px = (e.clientX - rect.left) / rect.width - 0.5;
+    const py = (e.clientY - rect.top) / rect.height - 0.5;
+    rotateY.set(px * 4);
+    rotateX.set(py * -4);
+  };
+  const handlePointerLeave = () => { rotateX.set(0); rotateY.set(0); };
+
+  return (
+    <motion.div
+      onPointerMove={handlePointerMove}
+      onPointerLeave={handlePointerLeave}
+      initial={{ opacity: 0, y: 16 }}
+      whileInView={{ opacity: 1, y: 0 }}
+      viewport={{ once: true, margin: "-40px" }}
+      transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
+      style={{ rotateX: springX, rotateY: springY, transformStyle: "preserve-3d", perspective: 1000 }}
+      className={className}
+    >
+      {children}
+    </motion.div>
+  );
+}
+
+/**
  * Desktop summary card — same real-brokerage "Holdings" visual language
  * as MobilePortfolio's mobile card below (hero number + a labeled
  * breakdown row, an eye toggle for privacy), just laid out for a wide
@@ -268,19 +308,30 @@ function DesktopHoldingsCard({ positions, settings, hideAmounts, setHideAmounts 
   const fmt = (n) => (hideAmounts ? "••••••" : inr(n));
   const isLive = settings?.execution_mode === "AUTO";
 
+  // Glassmorphism reads best over the aurora hero right above it, and
+  // still holds up as a refined "frosted" card once the hero has scrolled
+  // past — backdrop-blur degrades gracefully to a plain tinted surface
+  // where the browser has nothing behind it to blur.
+  const glassStyle = {
+    background: "linear-gradient(180deg, color-mix(in srgb, var(--c-surface) 88%, transparent), var(--c-surface))",
+    backdropFilter: "blur(18px)", WebkitBackdropFilter: "blur(18px)",
+    border: "1px solid var(--c-line)", boxShadow: "var(--e-3)",
+  };
+
   return (
-    <div className="hidden sm:block rounded-[16px] p-5 mb-4" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+    <TiltCard className="hidden sm:block rounded-[20px] mb-4">
+      <div className="p-6 rounded-[20px]" style={glassStyle}>
       <div className="flex items-center gap-2 mb-3">
         <span className="text-[11px] font-semibold text-muted tracking-wide">
           {isLive ? "LIVE" : "PAPER"} POSITIONS ({positions.active.length})
         </span>
         <span className="text-[10.5px] text-faint">/ {settings?.max_positions ?? "—"} max</span>
-        <button onClick={() => setHideAmounts((v) => !v)} className="ml-auto text-muted" aria-label="Toggle amount visibility">
+        <motion.button whileHover={{ scale: 1.12 }} whileTap={{ scale: 0.9 }} onClick={() => setHideAmounts((v) => !v)} className="ml-auto text-muted" aria-label="Toggle amount visibility">
           {hideAmounts ? <EyeSlash size={16} weight="regular" /> : <Eye size={16} weight="regular" />}
-        </button>
+        </motion.button>
       </div>
 
-      <div className={`text-[30px] font-bold n leading-none ${todaysPnl >= 0 ? "text-gain" : "text-loss"}`}>
+      <div className={`font-display text-[32px] font-bold n leading-none ${todaysPnl >= 0 ? "text-gain" : "text-loss"}`}>
         {todaysPnl >= 0 ? "+" : ""}{fmt(todaysPnl)}
       </div>
       <div className="text-[11.5px] text-muted mt-1">Today's P&L</div>
@@ -309,7 +360,8 @@ function DesktopHoldingsCard({ positions, settings, hideAmounts, setHideAmounts 
           </div>
         </div>
       </div>
-    </div>
+      </div>
+    </TiltCard>
   );
 }
 
@@ -335,17 +387,24 @@ function MobilePortfolio({ positions, hideAmounts, setHideAmounts }) {
     ? [...list].sort((a, b) => Math.abs(Number(b.status === "ACTIVE" ? b.unrealized_pnl : b.realized_pnl) || 0) - Math.abs(Number(a.status === "ACTIVE" ? a.unrealized_pnl : a.realized_pnl) || 0))
     : list;
 
+  const glassStyle = {
+    background: "linear-gradient(180deg, color-mix(in srgb, var(--c-surface) 88%, transparent), var(--c-surface))",
+    backdropFilter: "blur(18px)", WebkitBackdropFilter: "blur(18px)",
+    border: "1px solid var(--c-line)", boxShadow: "var(--e-3)",
+  };
+
   return (
     <div className="sm:hidden">
-      <div className="rounded-[16px] p-4 mb-3" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+      <TiltCard className="rounded-[20px] mb-3">
+      <div className="p-5 rounded-[20px]" style={glassStyle}>
         <div className="flex items-center gap-2 mb-3">
           <span className="text-[11px] font-semibold text-muted tracking-wide">PAPER POSITIONS ({positions.active.length})</span>
-          <button onClick={() => setHideAmounts((v) => !v)} className="ml-auto text-muted" aria-label="Toggle amount visibility">
+          <motion.button whileHover={{ scale: 1.12 }} whileTap={{ scale: 0.9 }} onClick={() => setHideAmounts((v) => !v)} className="ml-auto text-muted" aria-label="Toggle amount visibility">
             {hideAmounts ? <EyeSlash size={16} weight="regular" /> : <Eye size={16} weight="regular" />}
-          </button>
+          </motion.button>
         </div>
 
-        <div className={`text-[26px] font-bold n leading-none mb-1 ${todaysPnl >= 0 ? "text-gain" : "text-loss"}`}>
+        <div className={`font-display text-[28px] font-bold n leading-none mb-1 ${todaysPnl >= 0 ? "text-gain" : "text-loss"}`}>
           {todaysPnl >= 0 ? "+" : ""}{fmt(todaysPnl)}
         </div>
         <div className={`text-[11.5px] n mb-3 ${todaysPnl >= 0 ? "text-gain" : "text-loss"}`}>
@@ -371,6 +430,7 @@ function MobilePortfolio({ positions, hideAmounts, setHideAmounts }) {
           </div>
         </div>
       </div>
+      </TiltCard>
 
       <div className="flex items-center gap-2 mb-2">
         <div className="seg-track flex-1" role="tablist" aria-label="Filter">
@@ -771,11 +831,13 @@ export default function OptionsAutoTrader() {
   ].slice(0, 30);
 
   return (
-    <div className="p-4 pb-20 sm:pb-4 max-w-[1400px] mx-auto">
+    <>
+      <CinematicHero />
+      <div className="p-4 pb-20 sm:pb-4 max-w-[1400px] mx-auto relative">
       <div className="flex items-center justify-between mb-1 flex-wrap gap-3">
         <div className="flex items-center gap-2">
           <ChartLineUp size={16} weight="bold" className="text-accent" />
-          <h1 className="text-[16px] font-bold">Options Auto-Trader</h1>
+          <h1 className="font-display text-[19px] font-bold tracking-[-0.01em]">Options Auto-Trader</h1>
           <span
             className="text-[10px] font-semibold px-1.5 py-0.5 rounded-[5px]"
             style={
@@ -789,7 +851,9 @@ export default function OptionsAutoTrader() {
             {settings?.execution_mode ?? "…"}
           </span>
         </div>
-        <button
+        <motion.button
+          whileHover={{ scale: killSwitchBusy ? 1 : 1.035, boxShadow: "0 0 0 4px var(--c-loss-soft)" }}
+          whileTap={{ scale: killSwitchBusy ? 1 : 0.97 }}
           onClick={triggerKillSwitch} disabled={killSwitchBusy}
           className="flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1.5 rounded-[8px]"
           style={{ background: "var(--c-loss-soft, #dc262622)", color: "var(--c-loss)", border: "1px solid var(--c-loss)" }}
@@ -797,7 +861,7 @@ export default function OptionsAutoTrader() {
         >
           <HandPalm size={13} weight="bold" />
           {killSwitchBusy ? "Stopping…" : "Kill Switch"}
-        </button>
+        </motion.button>
       </div>
       <IndexTicker indices={indices} />
       <button onClick={() => setDescOpen((v) => !v)} className="flex items-center gap-1 text-[11px] text-muted mb-2">
@@ -856,11 +920,12 @@ export default function OptionsAutoTrader() {
               <span className="text-[11px] font-semibold text-muted">Execution Mode</span>
               <div className="seg-track">
                 {["OFF", "PAPER", "AUTO"].map((mode) => (
-                  <button key={mode} role="tab" aria-selected={settings?.execution_mode === mode} data-on={settings?.execution_mode === mode}
+                  <motion.button key={mode} whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+                    role="tab" aria-selected={settings?.execution_mode === mode} data-on={settings?.execution_mode === mode}
                     onClick={() => setExecutionMode(mode)} disabled={saving} className="seg"
                     style={mode === "AUTO" && settings?.execution_mode === "AUTO" ? { color: "var(--c-loss)" } : undefined}>
                     {mode}
-                  </button>
+                  </motion.button>
                 ))}
               </div>
               {settings?.execution_mode === "AUTO" ? (
@@ -935,10 +1000,18 @@ export default function OptionsAutoTrader() {
                 ? "No AUTO (real) positions yet — the 30-min scan opens one automatically once a candidate clears the quality threshold."
                 : "No paper positions yet — the 30-min scan opens one automatically once a candidate clears the quality threshold."}
             </p>
-          ) : mobileTab === "activity" ? null : mobileTab === "calendar" ? (
-            <div className="sm:hidden"><PnLCalendar positions={visiblePositions} hideAmounts={hideAmounts} /></div>
           ) : (
-            <MobilePortfolio positions={visiblePositions} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} />
+            <AnimatePresence mode="wait">
+              {mobileTab === "activity" ? null : mobileTab === "calendar" ? (
+                <motion.div key="calendar" initial={{ opacity: 0, x: 12 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -12 }} transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }} className="sm:hidden">
+                  <PnLCalendar positions={visiblePositions} hideAmounts={hideAmounts} />
+                </motion.div>
+              ) : (
+                <motion.div key="portfolio" initial={{ opacity: 0, x: -12 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 12 }} transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}>
+                  <MobilePortfolio positions={visiblePositions} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} />
+                </motion.div>
+              )}
+            </AnimatePresence>
           )}
 
           <div className="hidden sm:flex items-center gap-3 mb-2">
@@ -1015,6 +1088,7 @@ export default function OptionsAutoTrader() {
           <span className="text-[10px] font-medium">Activity</span>
         </button>
       </div>
-    </div>
+      </div>
+    </>
   );
 }

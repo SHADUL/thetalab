@@ -758,8 +758,16 @@ export default function OptionsAutoTrader() {
       .finally(() => setKillSwitchBusy(false));
   };
 
+  // Same filter as visiblePositions: an entry tagged for the OTHER mode
+  // is hidden by default once a mode is active, so old PAPER activity
+  // doesn't sit in the log looking like it's still happening under AUTO.
+  // Untagged entries (batch-level, or written before this column existed)
+  // always show — they were never claiming to be either mode.
+  const modeFiltered = showAllModes || !settings?.execution_mode || settings.execution_mode === "OFF"
+    ? logEntries
+    : logEntries.filter((e) => !e.execution_mode || e.execution_mode === settings.execution_mode);
   const timeline = [
-    ...logEntries.map((e) => ({ time: e.created_at, level: e.level, message: e.message })),
+    ...modeFiltered.map((e) => ({ time: e.created_at, level: e.level, message: e.message })),
   ].slice(0, 30);
 
   return (

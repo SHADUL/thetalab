@@ -135,6 +135,13 @@ create table options_autotrade_log (
   level text not null default 'info',
   message text not null,
   detail jsonb,
+  -- PAPER | AUTO | null. Null for batch-level messages not tied to a
+  -- single position/mode (e.g. a quote-batch failure spanning both).
+  -- Position-specific entries carry THAT position's own mode, since one
+  -- monitor run evaluates PAPER and AUTO positions side by side — lets
+  -- the dashboard filter old PAPER chatter out of the AUTO view exactly
+  -- like it already filters positions themselves.
+  execution_mode text,
   created_at timestamptz not null default now()
 );
 

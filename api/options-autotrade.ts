@@ -470,15 +470,26 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   const apiKey = process.env.KITE_API_KEY;
   if (!apiKey) { res.status(500).json({ error: 'server_misconfigured' }); return; }
 
-  const log = (level: 'info' | 'error', message: string, detail?: unknown) =>
-    supabase.from('options_autotrade_log').insert({ level, message, detail: detail ?? null });
-
   const { data: settings } = await supabase.from('options_autotrade_settings').select('*').eq('id', 1).maybeSingle();
   if (!settings) { res.status(500).json({ ok: false, error: 'settings_not_found' }); return; }
-  if (settings.execution_mode !== 'PAPER') {
-    res.status(200).json({ ok: true, skipped: `execution_mode is '${settings.execution_mode}', not PAPER` });
+  // This guard predates AUTO mode existing at all — it originally meant
+  // "only run when paper execution is turned on." AUTO must pass it too,
+  // or every scan cycle silently no-ops forever and AUTO never places a
+  // single real order despite everything downstream being wired for it.
+  if (settings.execution_mode !== 'PAPER' && settings.execution_mode !== 'AUTO') {
+    res.status(200).json({ ok: true, skipped: `execution_mode is '${settings.execution_mode}', not PAPER or AUTO` });
     return;
   }
+
+  // Computed once, up top, so every log entry this whole scan produces —
+  // not just the ones after sizing — is tagged with the mode it actually
+  // ran under. The dashboard's Activity Log filters on this exactly like
+  // it already filters positions, so old PAPER chatter doesn't sit next
+  // to real AUTO activity looking like it's still happening.
+  const isLive = settings.execution_mode === 'AUTO';
+  const modeLabel = isLive ? 'AUTO' : 'PAPER';
+  const log = (level: 'info' | 'error', message: string, detail?: unknown) =>
+    supabase.from('options_autotrade_log').insert({ level, message, detail: detail ?? null, execution_mode: modeLabel });
 
   if (!isMarketOpenIST()) { res.status(200).json({ ok: true, skipped: 'outside_market_hours' }); return; }
 
@@ -718,7 +729,7 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     evaluations: evaluations.map(serializeExpiryEvaluation),
   };
 
-  await log('info', `Paper-scan decision for ${symbol}: ${decision.action}`, { rejectedRows: rejected.length, decision: decision.explanation });
+  await log('info', `${modeLabel} scan decision for ${symbol}: ${decision.action}`, { rejectedRows: rejected.length, decision: decision.explanation });
 
   if (decision.action === 'NO_TRADE' || !decision.expiryEvaluation?.best) {
     res.status(200).json({ ok: true, action: decision.action, explanation: decision.explanation, diagnostics });
@@ -778,7 +789,6 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   // fetch refuses the trade outright rather than falling back to
   // reserved_fund, which would size a real order against a number nobody
   // has verified the account actually holds.
-  const isLive = settings.execution_mode === 'AUTO';
   const realAvailableFunds = isLive ? await fetchRealAvailableFunds(token, apiKey) : null;
   if (isLive && realAvailableFunds === null) {
     await log('error', `AUTO: could not verify real account funds for ${symbol} — refusing to size or place any order this cycle.`);
@@ -846,7 +856,6 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   const execResult = isLive
     ? await runLiveExecution(scaledLegs, validation, makeLiveOrderPlacer(token, apiKey), { exchange })
     : runPaperExecution(scaledLegs, validation);
-  const modeLabel = isLive ? 'AUTO' : 'PAPER';
 
   if (execResult.state !== 'ACTIVE') {
     await log(isLive ? 'error' : 'info', `${modeLabel} position not opened for ${symbol}`, { reason: execResult.log });
@@ -898,8 +907,13 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
   const apiKey = process.env.KITE_API_KEY;
   if (!apiKey) { res.status(500).json({ error: 'server_misconfigured' }); return; }
 
-  const log = (level: 'info' | 'error', message: string, detail?: unknown) =>
-    supabase.from('options_autotrade_log').insert({ level, message, detail: detail ?? null });
+  // Position-specific entries are tagged with THAT position's own mode
+  // (mode arg), since a single monitor run evaluates PAPER and AUTO
+  // positions side by side — one function-wide flag would mislabel
+  // whichever mode isn't currently the active setting. Batch-level
+  // messages (no single position responsible) stay untagged.
+  const log = (level: 'info' | 'error', message: string, detail?: unknown, mode?: string | null) =>
+    supabase.from('options_autotrade_log').insert({ level, message, detail: detail ?? null, execution_mode: mode ?? null });
 
   const { data: settings } = await supabase.from('options_autotrade_settings').select('*').eq('id', 1).maybeSingle();
   if (!settings) { res.status(500).json({ ok: false, error: 'settings_not_found' }); return; }
@@ -953,7 +967,7 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
       if (price == null) { missingQuote = true; continue; }
       currentCostToClose += (l.side === 'SELL' ? 1 : -1) * price * l.quantity;
     }
-    if (missingQuote) { await log('error', `Position #${p.id}: could not re-quote every leg — skipped this cycle.`); continue; }
+    if (missingQuote) { await log('error', `Position #${p.id}: could not re-quote every leg — skipped this cycle.`, undefined, p.execution_mode); continue; }
 
     // Sanity bound: for ANY defined-risk structure, maxProfit + maxLoss IS
     // the strike-width-implied theoretical ceiling on cost-to-close (it's
@@ -967,7 +981,7 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
     // generous slack for genuine extrinsic value, not a tuned threshold.
     const structureCeiling = ((Number(p.max_profit) || 0) + (Number(p.max_loss) || 0)) * 1.5;
     if (structureCeiling > 0 && (currentCostToClose < 0 || currentCostToClose > structureCeiling)) {
-      await log('error', `Position #${p.id}: re-quoted cost to close (₹${currentCostToClose.toFixed(0)}) is outside the structure's physically possible range (₹0-₹${structureCeiling.toFixed(0)}) — likely a bad/stale quote on a thin leg. Skipped this cycle without updating P&L or evaluating exit.`);
+      await log('error', `Position #${p.id}: re-quoted cost to close (₹${currentCostToClose.toFixed(0)}) is outside the structure's physically possible range (₹0-₹${structureCeiling.toFixed(0)}) — likely a bad/stale quote on a thin leg. Skipped this cycle without updating P&L or evaluating exit.`, undefined, p.execution_mode);
       continue;
     }
 
@@ -980,10 +994,10 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
     const { error: markErr } = await supabase.from('options_autotrade_positions').update({
       unrealized_pnl: unrealizedPnl, unrealized_pnl_updated_at: new Date().toISOString(),
     }).eq('id', p.id);
-    if (markErr) await log('error', `Position #${p.id}: failed to persist unrealized_pnl`, { message: markErr.message });
+    if (markErr) await log('error', `Position #${p.id}: failed to persist unrealized_pnl`, { message: markErr.message }, p.execution_mode);
 
     const underlyingPrice = quoteMap.get(indexKeys[p.symbol])?.last_price;
-    if (!(underlyingPrice > 0)) { await log('error', `Position #${p.id}: no live spot price for ${p.symbol} — skipped this cycle.`); continue; }
+    if (!(underlyingPrice > 0)) { await log('error', `Position #${p.id}: no live spot price for ${p.symbol} — skipped this cycle.`, undefined, p.execution_mode); continue; }
 
     const dte = Math.round((Date.parse(`${p.expiry}T00:00:00Z`) - Date.parse(`${todayIST}T00:00:00Z`)) / 86_400_000);
     const shortStrikes: ShortStrike[] = legs
@@ -1027,18 +1041,18 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
             await supabase.from('options_autotrade_legs').update({ exit_order_id: orderId, exit_fill_price: fill.averagePrice }).eq('id', l.id);
           } else {
             allClosed = false;
-            await log('error', `Position #${p.id}: AUTO closing order for ${l.side} ${l.tradingsymbol} ended ${fill.status} — THIS LEG MAY STILL BE OPEN AT THE BROKER. Manual check required immediately.`);
+            await log('error', `Position #${p.id}: AUTO closing order for ${l.side} ${l.tradingsymbol} ended ${fill.status} — THIS LEG MAY STILL BE OPEN AT THE BROKER. Manual check required immediately.`, undefined, p.execution_mode);
           }
         } catch (err: any) {
           allClosed = false;
-          await log('error', `Position #${p.id}: AUTO closing order request FAILED for ${l.side} ${l.tradingsymbol} — ${err.message}. THIS LEG MAY STILL BE OPEN AT THE BROKER. Manual check required immediately.`);
+          await log('error', `Position #${p.id}: AUTO closing order request FAILED for ${l.side} ${l.tradingsymbol} — ${err.message}. THIS LEG MAY STILL BE OPEN AT THE BROKER. Manual check required immediately.`, undefined, p.execution_mode);
         }
       }
       if (!allClosed) {
         await supabase.from('options_autotrade_positions').update({
           status: 'CLOSE_FAILED', exit_reason: decision.reason, updated_at: new Date().toISOString(),
         }).eq('id', p.id);
-        await log('error', `Position #${p.id}: marked CLOSE_FAILED — at least one real closing order did not confirm. This position will NOT be retried automatically; verify against the broker and resolve manually.`);
+        await log('error', `Position #${p.id}: marked CLOSE_FAILED — at least one real closing order did not confirm. This position will NOT be retried automatically; verify against the broker and resolve manually.`, undefined, p.execution_mode);
         continue;
       }
       realizedPnl = (Number(p.max_profit) || 0) - actualCostToClose;
@@ -1048,7 +1062,7 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
       status: 'CLOSED', execution_state: 'CLOSED', exit_date: todayIST, exit_reason: decision.reason,
       realized_pnl: realizedPnl, updated_at: new Date().toISOString(),
     }).eq('id', p.id);
-    if (updateErr) { await log('error', `Position #${p.id}: failed to persist close`, { message: updateErr.message }); continue; }
+    if (updateErr) { await log('error', `Position #${p.id}: failed to persist close`, { message: updateErr.message }, p.execution_mode); continue; }
 
     const { data: dailyRow } = await supabase.from('options_autotrade_daily_stats').select('realized_pnl,consecutive_losses').eq('trade_date', todayIST).maybeSingle();
     await supabase.from('options_autotrade_daily_stats').upsert({
@@ -1057,7 +1071,7 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
       consecutive_losses: realizedPnl < 0 ? (Number(dailyRow?.consecutive_losses) || 0) + 1 : 0,
     });
 
-    await log('info', `Closed ${p.execution_mode ?? 'PAPER'} position #${p.id} (${p.symbol} ${p.strategy_label}): ${decision.reason} — realized P&L ₹${realizedPnl.toFixed(0)}.`);
+    await log('info', `Closed ${p.execution_mode ?? 'PAPER'} position #${p.id} (${p.symbol} ${p.strategy_label}): ${decision.reason} — realized P&L ₹${realizedPnl.toFixed(0)}.`, undefined, p.execution_mode);
     closed.push({ positionId: p.id, symbol: p.symbol, reason: decision.reason, realizedPnl });
   }
 

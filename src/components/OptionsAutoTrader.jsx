@@ -7,6 +7,30 @@ const POLL_MS = 60_000; // this dashboard only reads already-computed state (set
 
 const STATUS_TONE = { ACTIVE: "muted", CLOSED: "muted", FAILED: "loss", CLOSE_FAILED: "loss" };
 
+const INDEX_LABEL = { NIFTY: "NIFTY 50", BANKNIFTY: "BANKNIFTY", SENSEX: "SENSEX" };
+
+/** Live index ticker strip — same visual language as a real brokerage app's top bar (NIFTY/SENSEX/BANKNIFTY with change and %). */
+function IndexTicker({ indices }) {
+  if (!indices?.length) return null;
+  return (
+    <div className="hidden sm:flex items-center gap-6 flex-wrap px-1 py-2 mb-3" style={{ borderBottom: "1px solid var(--c-line)" }}>
+      {indices.map((idx) => {
+        if (idx.lastPrice == null) return null;
+        const positive = (idx.change ?? 0) >= 0;
+        return (
+          <div key={idx.symbol} className="flex items-baseline gap-2">
+            <span className="text-[12px] font-semibold">{INDEX_LABEL[idx.symbol] ?? idx.symbol}</span>
+            <span className="text-[13px] font-bold n">{idx.lastPrice.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</span>
+            <span className={`text-[11px] font-semibold n ${positive ? "text-gain" : "text-loss"}`}>
+              {positive ? "+" : ""}{idx.change.toFixed(2)} ({positive ? "+" : ""}{idx.changePct?.toFixed(2)}%)
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 const EDITABLE_GROUPS = [
   {
     title: "Capital & Trade Risk", fields: [
@@ -228,6 +252,67 @@ function MobilePositionRow({ p, hideAmounts, isFirst }) {
  * the desktop table, which doesn't fit a phone screen. Shown only below the
  * sm breakpoint — see the "hidden sm:block" / "sm:hidden" split below.
  */
+/**
+ * Desktop summary card — same real-brokerage "Holdings" visual language
+ * as MobilePortfolio's mobile card below (hero number + a labeled
+ * breakdown row, an eye toggle for privacy), just laid out for a wide
+ * screen instead of a phone. Shares the exact same today's-P&L/margin
+ * math as the mobile card so the two never disagree.
+ */
+function DesktopHoldingsCard({ positions, settings, hideAmounts, setHideAmounts }) {
+  const todayIST = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+  const totalMargin = positions.active.reduce((s, p) => s + (Number(p.margin_required) || 0), 0);
+  const totalUnrealized = positions.active.reduce((s, p) => s + (Number(p.unrealized_pnl) || 0), 0);
+  const totalRealizedToday = positions.closed.filter((p) => p.exit_date === todayIST).reduce((s, p) => s + (Number(p.realized_pnl) || 0), 0);
+  const todaysPnl = totalUnrealized + totalRealizedToday;
+  const fmt = (n) => (hideAmounts ? "••••••" : inr(n));
+  const isLive = settings?.execution_mode === "AUTO";
+
+  return (
+    <div className="hidden sm:block rounded-[16px] p-5 mb-4" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+      <div className="flex items-center gap-2 mb-3">
+        <span className="text-[11px] font-semibold text-muted tracking-wide">
+          {isLive ? "LIVE" : "PAPER"} POSITIONS ({positions.active.length})
+        </span>
+        <span className="text-[10.5px] text-faint">/ {settings?.max_positions ?? "—"} max</span>
+        <button onClick={() => setHideAmounts((v) => !v)} className="ml-auto text-muted" aria-label="Toggle amount visibility">
+          {hideAmounts ? <EyeSlash size={16} weight="regular" /> : <Eye size={16} weight="regular" />}
+        </button>
+      </div>
+
+      <div className={`text-[30px] font-bold n leading-none ${todaysPnl >= 0 ? "text-gain" : "text-loss"}`}>
+        {todaysPnl >= 0 ? "+" : ""}{fmt(todaysPnl)}
+      </div>
+      <div className="text-[11.5px] text-muted mt-1">Today's P&L</div>
+
+      <div className="flex items-center gap-10 mt-4 pt-4" style={{ borderTop: "1px solid var(--c-line)" }}>
+        <div>
+          <div className="text-[11px] text-muted mb-0.5">Margin Committed</div>
+          <div className="text-[15px] font-bold n">{fmt(totalMargin)}</div>
+        </div>
+        <div>
+          <div className="text-[11px] text-muted mb-0.5">Unrealized P&L</div>
+          <div className={`text-[15px] font-bold n ${totalUnrealized >= 0 ? "text-gain" : "text-loss"}`}>
+            {totalUnrealized >= 0 ? "+" : ""}{fmt(totalUnrealized)}
+          </div>
+        </div>
+        <div>
+          <div className="text-[11px] text-muted mb-0.5">Realized P&L (today)</div>
+          <div className={`text-[15px] font-bold n ${totalRealizedToday >= 0 ? "text-gain" : "text-loss"}`}>
+            {totalRealizedToday >= 0 ? "+" : ""}{fmt(totalRealizedToday)}
+          </div>
+        </div>
+        <div>
+          <div className="text-[11px] text-muted mb-0.5">Max Loss at Risk</div>
+          <div className={`text-[15px] font-bold n ${positions.active.length ? "text-loss" : ""}`}>
+            {fmt(positions.active.reduce((s, p) => s + (Number(p.max_loss) || 0), 0))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function MobilePortfolio({ positions, hideAmounts, setHideAmounts }) {
   const [filter, setFilter] = useState("active"); // active | closed
   const [sortByPnl, setSortByPnl] = useState(false);
@@ -535,6 +620,7 @@ export default function OptionsAutoTrader() {
   const [hideAmounts, setHideAmounts] = useState(false);
   const [realFunds, setRealFunds] = useState(null);
   const [showAllModes, setShowAllModes] = useState(false);
+  const [indices, setIndices] = useState([]);
   const timerRef = useRef(null);
 
   const load = useCallback(() => {
@@ -544,8 +630,9 @@ export default function OptionsAutoTrader() {
       fetch("/api/options-autotrade?resource=log").then((r) => r.json()),
       fetch("/api/options-autotrade?resource=daily-stats").then((r) => r.json()),
       fetch("/api/options-autotrade?resource=real-funds").then((r) => r.json()),
+      fetch("/api/options-autotrade?resource=indices").then((r) => r.json()),
     ])
-      .then(([s, posBody, logBody, dailyBody, fundsBody]) => {
+      .then(([s, posBody, logBody, dailyBody, fundsBody, indicesBody]) => {
         if (s?.error) { setError(s.message || s.error); return; }
         setError(null);
         setSettings(s);
@@ -554,6 +641,7 @@ export default function OptionsAutoTrader() {
         setLogEntries(logBody.entries ?? []);
         setDailyStats(dailyBody);
         setRealFunds(fundsBody);
+        setIndices(indicesBody?.indices ?? []);
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
@@ -702,6 +790,7 @@ export default function OptionsAutoTrader() {
           {killSwitchBusy ? "Stopping…" : "Kill Switch"}
         </button>
       </div>
+      <IndexTicker indices={indices} />
       <button onClick={() => setDescOpen((v) => !v)} className="flex items-center gap-1 text-[11px] text-muted mb-2">
         <Info size={12} weight="regular" />
         What is this?
@@ -829,20 +918,7 @@ export default function OptionsAutoTrader() {
             </div>
           )}
 
-          <div className="hidden sm:grid grid-cols-1 sm:grid-cols-3 gap-2.5 mb-4">
-            <div className="p-3 rounded-[12px]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
-              <div className="text-[11px] text-muted mb-0.5">Open Positions</div>
-              <div className="text-[14px] font-bold n">{visiblePositions.active.length} <span className="text-faint font-normal text-[11px]">/ {settings?.max_positions ?? "—"} max</span></div>
-            </div>
-            <div className="p-3 rounded-[12px]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
-              <div className="text-[11px] text-muted mb-0.5">Margin Committed</div>
-              <div className="text-[14px] font-bold n">{inr(visiblePositions.active.reduce((s, p) => s + (Number(p.margin_required) || 0), 0))}</div>
-            </div>
-            <div className="p-3 rounded-[12px]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
-              <div className="text-[11px] text-muted mb-0.5">Max Loss at Risk</div>
-              <div className={`text-[14px] font-bold n ${visiblePositions.active.length ? "text-loss" : ""}`}>{inr(visiblePositions.active.reduce((s, p) => s + (Number(p.max_loss) || 0), 0))}</div>
-            </div>
-          </div>
+          <DesktopHoldingsCard positions={visiblePositions} settings={settings} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} />
 
           {visiblePositions.active.length === 0 && visiblePositions.closed.length === 0 ? (
             <p className="text-[12.5px] text-muted py-6 text-center">

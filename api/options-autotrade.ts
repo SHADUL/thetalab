@@ -1620,6 +1620,38 @@ async function handleVwapScalperMonitor(req: any, res: any, supabase: SupabaseCl
  * of implying reserved_fund is the account balance. Null fields mean no
  * Kite session / the fetch failed, not zero.
  */
+/**
+ * Browser-facing: live NIFTY/BANKNIFTY/SENSEX index quotes for the
+ * dashboard's own ticker strip — read-only, no shared-secret gate, same
+ * reasoning as handleSettings. Uses the same INDEX_QUOTE_KEY mapping the
+ * scan/monitor cycles already trade against, not a separate guess at the
+ * right instrument key.
+ */
+async function handleIndices(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const apiKey = process.env.KITE_API_KEY;
+  if (!apiKey) { res.status(500).json({ error: 'server_misconfigured' }); return; }
+  const { data: session } = await supabase.from('kite_session').select('access_token').eq('id', 1).maybeSingle();
+  const token = session?.access_token;
+  if (!token) { res.status(200).json({ ok: true, indices: [], skipped: 'no_kite_session' }); return; }
+
+  const entries = Object.entries(INDEX_QUOTE_KEY as Record<string, string>);
+  try {
+    const data = await kiteFetch(`/quote?${entries.map(([, key]) => `i=${encodeURIComponent(key)}`).join('&')}`, { token, apiKey });
+    const indices = entries.map(([symbol, key]) => {
+      const q = data?.[key];
+      if (!q) return { symbol, lastPrice: null, change: null, changePct: null };
+      const lastPrice = Number(q.last_price);
+      const change = Number(q.net_change);
+      const prevClose = lastPrice - change;
+      return { symbol, lastPrice, change, changePct: prevClose > 0 ? (change / prevClose) * 100 : null };
+    });
+    res.status(200).json({ ok: true, indices });
+  } catch (err: any) {
+    res.status(200).json({ ok: true, indices: [], error: err.message });
+  }
+}
+
 async function handleRealFunds(req: any, res: any, supabase: SupabaseClient) {
   if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
   const apiKey = process.env.KITE_API_KEY;
@@ -1655,6 +1687,7 @@ export default async function handler(req: any, res: any) {
   if (resource === 'settings') return handleSettings(req, res, supabase);
   if (resource === 'positions') return handlePositions(req, res, supabase);
   if (resource === 'real-funds') return handleRealFunds(req, res, supabase);
+  if (resource === 'indices') return handleIndices(req, res, supabase);
   if (resource === 'log') return handleLog(req, res, supabase);
   if (resource === 'kill-switch') return handleKillSwitch(req, res, supabase);
   if (resource === 'daily-stats') return handleDailyStats(req, res, supabase);

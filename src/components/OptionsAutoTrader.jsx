@@ -523,7 +523,8 @@ export default function OptionsAutoTrader() {
   const [killSwitchResult, setKillSwitchResult] = useState(null);
   const [dailyStats, setDailyStats] = useState(null);
   const [clearingLock, setClearingLock] = useState(false);
-  const [mobileTab, setMobileTab] = useState("portfolio"); // portfolio | calendar
+  const [mobileTab, setMobileTab] = useState("portfolio"); // portfolio | calendar | activity
+  const [descOpen, setDescOpen] = useState(false);
   const [hideAmounts, setHideAmounts] = useState(false);
   const timerRef = useRef(null);
 
@@ -636,12 +637,19 @@ export default function OptionsAutoTrader() {
           {killSwitchBusy ? "Stopping…" : "Kill Switch"}
         </button>
       </div>
-      <p className="text-[11px] text-muted mb-3 max-w-[80ch]">
-        Defined-risk options selling (Iron Condor / Bull Put Spread / Bear Call Spread), decided from a live chain: skew-based
-        strategy selection, strike optimization ranked by expected value per unit of risk, expiry selection, and a 0-100 trade
-        quality score gate. Runs on its own 30-minute cron against live Kite data — this page only displays the result, it
-        doesn't trigger a scan. PAPER mode only: no real order is ever placed.
-      </p>
+      <button onClick={() => setDescOpen((v) => !v)} className="flex items-center gap-1 text-[11px] text-muted mb-2">
+        <Info size={12} weight="regular" />
+        What is this?
+        {descOpen ? <CaretUp size={11} /> : <CaretDown size={11} />}
+      </button>
+      {descOpen && (
+        <p className="text-[11px] text-muted mb-3 max-w-[80ch]">
+          Defined-risk options selling (Iron Condor / Bull Put Spread / Bear Call Spread), decided from a live chain: skew-based
+          strategy selection, strike optimization ranked by expected value per unit of risk, expiry selection, and a 0-100 trade
+          quality score gate. Runs on its own 30-minute cron against live Kite data — this page only displays the result, it
+          doesn't trigger a scan. PAPER mode only: no real order is ever placed.
+        </p>
+      )}
 
       {killSwitchResult && (
         <div className="flex items-start gap-2.5 px-4 py-3 rounded-[12px] mb-4" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
@@ -665,13 +673,14 @@ export default function OptionsAutoTrader() {
       )}
 
       <div className="rounded-[12px] mb-4" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
-        <button onClick={() => setSettingsOpen((v) => !v)} className="w-full flex items-center gap-3 flex-wrap p-3 text-left">
+        <button onClick={() => setSettingsOpen((v) => !v)} className="w-full flex items-center gap-3 sm:flex-wrap p-3 text-left">
           <Wallet size={15} weight="bold" className="text-muted shrink-0" />
           <span className="text-[11.5px] font-semibold">Paper Execution</span>
-          <span className="text-[10.5px] text-faint">Reserved fund {inr(settings?.reserved_fund ?? 0)}</span>
-          <span className="text-[10.5px] text-faint flex-1">
+          <span className="hidden sm:inline text-[10.5px] text-faint">Reserved fund {inr(settings?.reserved_fund ?? 0)}</span>
+          <span className="hidden sm:inline text-[10.5px] text-faint flex-1">
             {settings?.execution_mode === "PAPER" ? "Passing candidates auto-open paper positions on the 30-min scan." : "Scans still run and log a decision, but no paper positions are opened."}
           </span>
+          <span className="flex-1 sm:hidden" />
           {settingsOpen ? <CaretUp size={14} className="text-muted shrink-0" /> : <CaretDown size={14} className="text-muted shrink-0" />}
           <Gear size={14} weight="bold" className="text-muted shrink-0" />
         </button>

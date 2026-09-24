@@ -1,16 +1,13 @@
 name: Options Auto-Trader Position Monitor
 
-# Every 5 minutes during market hours — the reliability floor for GitHub
-# Actions scheduled workflows (sub-5-minute schedules are documented as
-# unreliable under load) and, separately, a reasonable cadence for Kite's
-# rate limits given this batches every open position's legs into as few
-# quote calls as possible. Unlike paper-scan's 30-minute entry cadence,
-# exit conditions (profit target, stop loss, a short strike being
-# approached) genuinely benefit from checking more often once a position
-# is actually open.
+# GitHub Actions' own `schedule:` trigger was found to fire only sporadically
+# in practice (once or twice a day, sometimes hours late, instead of every
+# 5 minutes) — the same unreliability documented for VWAP scalper's cron
+# (see vwap-scalper-manual-test.yml and the cron-job.org setup notes). The
+# real recurring trigger is now an external cron-job.org pinger hitting
+# resource=position-monitor every 5 minutes during market hours; this
+# workflow is manual-dispatch only, kept for on-demand diagnosis.
 on:
-  schedule:
-    - cron: '*/5 3-10 * * 1-5'
   workflow_dispatch: {}
 
 jobs:

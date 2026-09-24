@@ -1,14 +1,13 @@
 name: Options Auto-Trader Paper Scan
 
-# Runs every 30 minutes across a window comfortably wider than NSE market
-# hours (9:15-15:30 IST = 3:45-10:00 UTC) — the endpoint itself checks the
-# real IST clock, execution_mode, and market hours, and no-ops outside
-# them. Option-selling entries are an inherently infrequent decision (not
-# a tick-driven strategy), so this is far coarser than swing's 5-minute
-# equity tick — 30 minutes is a starting cadence, not a validated one.
+# GitHub Actions' own `schedule:` trigger was found to fire only
+# sporadically in practice (once or twice a day, sometimes hours late,
+# instead of every 30 minutes) — same unreliability documented for VWAP
+# scalper's cron. The real recurring trigger is now three external
+# cron-job.org pingers (one per symbol: NIFTY, BANKNIFTY, SENSEX) hitting
+# resource=paper-scan&symbol=<X> every 30 minutes during market hours;
+# this workflow is manual-dispatch only, kept for on-demand diagnosis.
 on:
-  schedule:
-    - cron: '*/30 3-10 * * 1-5'
   workflow_dispatch:
     inputs:
       symbol:

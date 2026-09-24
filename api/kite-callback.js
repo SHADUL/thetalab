@@ -1,7 +1,16 @@
 /**
- * Where Zerodha sends the browser back to after login, with a one-time
- * request_token in the query string. Exchanges it server-side for the
- * day's access_token (api_secret never leaves this function) and hands the
+ * Two Kite OAuth steps folded into one file to stay under Vercel Hobby's
+ * 12-serverless-function-per-deployment cap (middleware.ts now also
+ * counts against that same budget): "Connect Kite" (entry, redirects to
+ * Zerodha's login page) and this callback (where Zerodha sends the
+ * browser back with a one-time request_token) used to be two separate
+ * files. api/kite-login.js is gone — kiteClient.js's kiteLoginUrl() now
+ * points straight at this function, which tells the two steps apart by
+ * whether request_token is present at all: a fresh "connect" request
+ * naturally has neither that nor `status`, only a real Kite redirect does.
+ *
+ * The callback step exchanges request_token server-side for the day's
+ * access_token (api_secret never leaves this function) and hands the
  * browser an HttpOnly cookie — so the token exists in the browser as an
  * opaque cookie a script can't read, not as something the frontend holds
  * or could leak.
@@ -33,6 +42,14 @@ export default async function handler(req, res) {
   const url = new URL(req.url, `https://${req.headers.host}`);
   const requestToken = url.searchParams.get('request_token');
   const status = url.searchParams.get('status');
+
+  // No request_token/status at all -> this is the "Connect Kite" entry
+  // step (formerly api/kite-login.js), not a real callback from Zerodha.
+  if (!requestToken && !status) {
+    res.writeHead(302, { Location: `https://kite.zerodha.com/connect/login?api_key=${apiKey}&v=3` });
+    res.end();
+    return;
+  }
 
   if (status !== 'success' || !requestToken) {
     res.writeHead(302, { Location: '/?kite=error&reason=login_failed' });

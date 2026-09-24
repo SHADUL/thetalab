@@ -1,8 +1,10 @@
 /**
- * Thin client for the Kite serverless routes (api/kite-login.js,
+ * Thin client for the Kite serverless routes (api/kite-callback.js,
  * api/kite-market-data.js). No credentials live here or anywhere else in the
  * frontend — the access token is an HttpOnly cookie this code can trigger
- * being set (by navigating to /api/kite-login) but can never read.
+ * being set (by navigating to /api/kite-callback with no request_token,
+ * which that function reads as "start a fresh login" — see its own header
+ * comment) but can never read.
  *
  * Because the token is HttpOnly, the frontend can't directly ask "are we
  * connected" — it infers a best guess from the last successful connect
@@ -15,7 +17,7 @@ const CONNECTED_AT_KEY = 'kiteConnectedAt';
 const ASSUMED_VALID_MS = 20 * 60 * 60 * 1000; // matches the callback's cookie Max-Age
 
 export function kiteLoginUrl() {
-  return '/api/kite-login';
+  return '/api/kite-callback';
 }
 
 /** Reads and clears the ?kite=connected|error redirect params, if present. */

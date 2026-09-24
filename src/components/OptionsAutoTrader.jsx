@@ -201,9 +201,15 @@ function MobilePortfolio({ positions }) {
   const [filter, setFilter] = useState("active"); // active | closed
   const [sortByPnl, setSortByPnl] = useState(false);
 
+  const todayIST = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
   const totalMargin = positions.active.reduce((s, p) => s + (Number(p.margin_required) || 0), 0);
   const totalUnrealized = positions.active.reduce((s, p) => s + (Number(p.unrealized_pnl) || 0), 0);
-  const totalRealizedToday = positions.closed.reduce((s, p) => s + (Number(p.realized_pnl) || 0), 0);
+  // positions.closed (from the API) is the 200 most recent closed rows
+  // overall, not scoped to today — filter by exit_date so this actually
+  // means what its label says, rather than quietly including older history.
+  const totalRealizedToday = positions.closed
+    .filter((p) => p.exit_date === todayIST)
+    .reduce((s, p) => s + (Number(p.realized_pnl) || 0), 0);
   const todaysPnl = totalUnrealized + totalRealizedToday;
   const fmt = (n) => (hideAmounts ? "••••••" : inr(n));
   const pctOf = (num, den) => (den > 0 ? `${((num / den) * 100).toFixed(2)}%` : null);
@@ -223,19 +229,24 @@ function MobilePortfolio({ positions }) {
           </button>
         </div>
 
-        <div className="text-[26px] font-bold n leading-none mb-3">{fmt(totalMargin + totalUnrealized)}</div>
+        <div className={`text-[26px] font-bold n leading-none mb-1 ${todaysPnl >= 0 ? "text-gain" : "text-loss"}`}>
+          {todaysPnl >= 0 ? "+" : ""}{fmt(todaysPnl)}
+        </div>
+        <div className={`text-[11.5px] n mb-3 ${todaysPnl >= 0 ? "text-gain" : "text-loss"}`}>
+          Today's P&L{pctOf(todaysPnl, totalMargin) ? ` (${pctOf(todaysPnl, totalMargin)})` : ""}
+        </div>
 
         <div className="flex flex-col gap-1.5">
-          <div className="flex items-center justify-between text-[12.5px]">
-            <span className="text-muted">Today's P&L</span>
-            <span className={`n font-semibold ${todaysPnl >= 0 ? "text-gain" : "text-loss"}`}>
-              {todaysPnl >= 0 ? "+" : ""}{fmt(todaysPnl)}{pctOf(todaysPnl, totalMargin) ? ` (${pctOf(todaysPnl, totalMargin)})` : ""}
-            </span>
-          </div>
           <div className="flex items-center justify-between text-[12.5px]">
             <span className="text-muted">Unrealized P&L</span>
             <span className={`n font-semibold ${totalUnrealized >= 0 ? "text-gain" : "text-loss"}`}>
               {totalUnrealized >= 0 ? "+" : ""}{fmt(totalUnrealized)}
+            </span>
+          </div>
+          <div className="flex items-center justify-between text-[12.5px]">
+            <span className="text-muted">Realized P&L (today)</span>
+            <span className={`n font-semibold ${totalRealizedToday >= 0 ? "text-gain" : "text-loss"}`}>
+              {totalRealizedToday >= 0 ? "+" : ""}{fmt(totalRealizedToday)}
             </span>
           </div>
           <div className="flex items-center justify-between text-[12.5px]">

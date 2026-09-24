@@ -19,6 +19,14 @@ import VwapScalper from "./components/VwapScalper.jsx";
  */
 const SECTION_KEY = "thetalabSection";
 
+const SECTIONS = [
+  { value: "options", label: "Options Desk" },
+  { value: "swing", label: "Swing Scanner" },
+  { value: "intraday", label: "Intraday Trader" },
+  { value: "options-auto", label: "Options Auto-Trader" },
+  { value: "vwap-scalper", label: "VWAP Scalper" },
+];
+
 export default function Root() {
   const [section, setSectionState] = useState(() => localStorage.getItem(SECTION_KEY) ?? "options");
   const setSection = (s) => {
@@ -33,17 +41,24 @@ export default function Root() {
         <span className="text-[12px] font-bold tracking-[-0.02em]">
           theta<span className="text-accent">lab</span>
         </span>
-        <div className="seg-track" role="tablist" aria-label="Section">
-          <button role="tab" aria-selected={section === "options"} data-on={section === "options"}
-            onClick={() => setSection("options")} className="seg">Options Desk</button>
-          <button role="tab" aria-selected={section === "swing"} data-on={section === "swing"}
-            onClick={() => setSection("swing")} className="seg">Swing Scanner</button>
-          <button role="tab" aria-selected={section === "intraday"} data-on={section === "intraday"}
-            onClick={() => setSection("intraday")} className="seg">Intraday Trader</button>
-          <button role="tab" aria-selected={section === "options-auto"} data-on={section === "options-auto"}
-            onClick={() => setSection("options-auto")} className="seg">Options Auto-Trader</button>
-          <button role="tab" aria-selected={section === "vwap-scalper"} data-on={section === "vwap-scalper"}
-            onClick={() => setSection("vwap-scalper")} className="seg">VWAP Scalper</button>
+        <select className="inst-sel n sm:hidden" aria-label="Section" value={section}
+          onChange={(e) => setSection(e.target.value)}>
+          {SECTIONS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+        </select>
+
+        {/* Wrapped in a plain div rather than putting "hidden sm:flex" directly
+            on .seg-track — that class sets its own unconditional `display:
+            flex` in index.css at equal specificity to Tailwind's `.hidden`,
+            so whichever rule loads later in the stylesheet wins regardless
+            of breakpoint. A wrapper with no competing custom class sidesteps
+            the fight entirely. */}
+        <div className="hidden sm:block">
+          <div className="seg-track" role="tablist" aria-label="Section">
+            {SECTIONS.map((s) => (
+              <button key={s.value} role="tab" aria-selected={section === s.value} data-on={section === s.value}
+                onClick={() => setSection(s.value)} className="seg">{s.label}</button>
+            ))}
+          </div>
         </div>
       </div>
       <div className="flex-1 min-h-0">

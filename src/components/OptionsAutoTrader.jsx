@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { ChartLineUp, Info, Wallet, Gear, CaretDown, CaretUp, HandPalm, Bell } from "@phosphor-icons/react";
+import { ChartLineUp, Info, Wallet, Gear, CaretDown, CaretUp, HandPalm, Bell, Eye, EyeSlash, SortAscending } from "@phosphor-icons/react";
 import { inr, toneClass } from "./swingFormat.js";
 import { ScoreBadge } from "./ScoreWidgets.jsx";
 
@@ -85,6 +85,148 @@ function formatDateTime(iso) {
   const date = d.toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short" });
   const time = d.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit" });
   return `${date} ${time}`;
+}
+
+// Decorative only — a deterministic (position-id-seeded) wiggle that drifts
+// toward the P&L's sign, NOT a real intraday price series (this app doesn't
+// log a per-position P&L history to draw a genuine one from). Mirrors the
+// reference portfolio screen's per-row trend line visually without
+// pretending to be tick data.
+function seededTrendPoints(seed, positive) {
+  let s = (seed || 1) * 7919;
+  const rand = () => { s = (s * 9301 + 49297) % 233280; return s / 233280; };
+  const pts = [50];
+  for (let i = 1; i < 6; i++) {
+    const drift = positive ? 5 : -5;
+    const next = pts[i - 1] + drift + (rand() - 0.5) * 20;
+    pts.push(Math.max(10, Math.min(90, next)));
+  }
+  return pts;
+}
+
+function Sparkline({ seed, positive }) {
+  const pts = seededTrendPoints(seed, positive);
+  const w = 64, h = 26;
+  const path = pts.map((v, i) => `${(i / (pts.length - 1)) * w},${h - (v / 100) * h}`).join(" ");
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="shrink-0">
+      <polyline points={path} fill="none" strokeWidth="1.5" stroke={positive ? "var(--c-gain)" : "var(--c-loss)"} strokeLinecap="round" strokeLinejoin="round" opacity="0.9" />
+    </svg>
+  );
+}
+
+function MobilePositionRow({ p, hideAmounts }) {
+  const isActive = p.status === "ACTIVE";
+  const pnl = isActive ? p.unrealized_pnl : p.realized_pnl;
+  const positive = (Number(pnl) || 0) >= 0;
+  const fmt = (n) => (hideAmounts ? "••••••" : inr(n));
+  return (
+    <div className="flex items-center gap-2.5 px-3 py-3" style={{ borderTop: "1px solid var(--c-line)" }}>
+      <div className="min-w-0 flex-1">
+        <div className="text-[13.5px] font-semibold truncate">{p.symbol}</div>
+        <div className="text-[11px] text-faint truncate">{p.strategy_label} · {p.lots} lot{p.lots === 1 ? "" : "s"}</div>
+        {!isActive && (
+          <div className={`text-[10px] mt-0.5 ${toneClass(STATUS_TONE[p.status] ?? "muted")}`}>{p.status}{p.exit_reason ? ` · ${p.exit_reason}` : ""}</div>
+        )}
+      </div>
+      <Sparkline seed={p.id} positive={positive} />
+      <div className="text-right shrink-0 min-w-[84px]">
+        <div className={`text-[13.5px] font-semibold n ${pnl == null ? "text-faint" : positive ? "text-gain" : "text-loss"}`}>
+          {pnl != null ? fmt(pnl) : "—"}
+        </div>
+        <div className="text-[10.5px] text-faint n">
+          ({fmt(p.margin_required)})
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Mobile portfolio-card view — deliberately modeled on a real brokerage
+ * app's Holdings screen (summary card with a hero number + return rows,
+ * then a flat list of position rows each showing name/qty, a trend
+ * sparkline, and current/reference value stacked on the right) rather than
+ * the desktop table, which doesn't fit a phone screen. Shown only below the
+ * sm breakpoint — see the "hidden sm:block" / "sm:hidden" split below.
+ */
+function MobilePortfolio({ positions }) {
+  const [hideAmounts, setHideAmounts] = useState(false);
+  const [filter, setFilter] = useState("active"); // active | closed
+  const [sortByPnl, setSortByPnl] = useState(false);
+
+  const totalMargin = positions.active.reduce((s, p) => s + (Number(p.margin_required) || 0), 0);
+  const totalUnrealized = positions.active.reduce((s, p) => s + (Number(p.unrealized_pnl) || 0), 0);
+  const totalRealizedToday = positions.closed.reduce((s, p) => s + (Number(p.realized_pnl) || 0), 0);
+  const todaysPnl = totalUnrealized + totalRealizedToday;
+  const fmt = (n) => (hideAmounts ? "••••••" : inr(n));
+  const pctOf = (num, den) => (den > 0 ? `${((num / den) * 100).toFixed(2)}%` : null);
+
+  const list = filter === "active" ? positions.active : positions.closed;
+  const sorted = sortByPnl
+    ? [...list].sort((a, b) => Math.abs(Number(b.status === "ACTIVE" ? b.unrealized_pnl : b.realized_pnl) || 0) - Math.abs(Number(a.status === "ACTIVE" ? a.unrealized_pnl : a.realized_pnl) || 0))
+    : list;
+
+  return (
+    <div className="sm:hidden">
+      <div className="rounded-[16px] p-4 mb-3" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+        <div className="flex items-center gap-2 mb-3">
+          <span className="text-[11px] font-semibold text-muted tracking-wide">PAPER POSITIONS ({positions.active.length})</span>
+          <button onClick={() => setHideAmounts((v) => !v)} className="ml-auto text-muted" aria-label="Toggle amount visibility">
+            {hideAmounts ? <EyeSlash size={16} weight="regular" /> : <Eye size={16} weight="regular" />}
+          </button>
+        </div>
+
+        <div className="text-[26px] font-bold n leading-none mb-3">{fmt(totalMargin + totalUnrealized)}</div>
+
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center justify-between text-[12.5px]">
+            <span className="text-muted">Today's P&L</span>
+            <span className={`n font-semibold ${todaysPnl >= 0 ? "text-gain" : "text-loss"}`}>
+              {todaysPnl >= 0 ? "+" : ""}{fmt(todaysPnl)}{pctOf(todaysPnl, totalMargin) ? ` (${pctOf(todaysPnl, totalMargin)})` : ""}
+            </span>
+          </div>
+          <div className="flex items-center justify-between text-[12.5px]">
+            <span className="text-muted">Unrealized P&L</span>
+            <span className={`n font-semibold ${totalUnrealized >= 0 ? "text-gain" : "text-loss"}`}>
+              {totalUnrealized >= 0 ? "+" : ""}{fmt(totalUnrealized)}
+            </span>
+          </div>
+          <div className="flex items-center justify-between text-[12.5px]">
+            <span className="text-muted">Margin Committed</span>
+            <span className="n font-semibold">{fmt(totalMargin)}</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 mb-2">
+        <div className="seg-track flex-1" role="tablist" aria-label="Filter">
+          <button role="tab" aria-selected={filter === "active"} data-on={filter === "active"} onClick={() => setFilter("active")} className="seg">
+            ACTIVE ({positions.active.length})
+          </button>
+          <button role="tab" aria-selected={filter === "closed"} data-on={filter === "closed"} onClick={() => setFilter("closed")} className="seg">
+            CLOSED ({positions.closed.length})
+          </button>
+        </div>
+        <button onClick={() => setSortByPnl((v) => !v)} className="topstep" title="Sort by |P&L|">
+          <SortAscending size={12} weight="bold" />
+          {sortByPnl ? "By P&L" : "Newest"}
+        </button>
+      </div>
+
+      <div className="rounded-[14px] overflow-hidden" style={{ border: "1px solid var(--c-line)" }}>
+        {sorted.length === 0 ? (
+          <p className="text-[12px] text-muted py-6 text-center">No {filter} positions.</p>
+        ) : (
+          sorted.map((p, i) => (
+            <div key={p.id} style={{ borderTop: i > 0 ? undefined : "none" }}>
+              <MobilePositionRow p={p} hideAmounts={hideAmounts} />
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
 }
 
 function PositionRow({ p }) {
@@ -381,7 +523,7 @@ export default function OptionsAutoTrader() {
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 mb-4">
+          <div className="hidden sm:grid grid-cols-1 sm:grid-cols-3 gap-2.5 mb-4">
             <div className="p-3 rounded-[12px]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
               <div className="text-[11px] text-muted mb-0.5">Open Positions</div>
               <div className="text-[14px] font-bold n">{positions.active.length} <span className="text-faint font-normal text-[11px]">/ {settings?.max_positions ?? "—"} max</span></div>
@@ -396,11 +538,15 @@ export default function OptionsAutoTrader() {
             </div>
           </div>
 
-          <h2 className="text-[13px] font-bold mb-2">Paper Positions {positions.active.length > 0 ? <span className="font-normal text-muted">({positions.active.length} open)</span> : null}</h2>
           {positions.active.length === 0 && positions.closed.length === 0 ? (
             <p className="text-[12.5px] text-muted py-6 text-center">No paper positions yet — the 30-min scan opens one automatically once a candidate clears the quality threshold.</p>
           ) : (
-            <div className="overflow-x-auto rounded-[14px]" style={{ border: "1px solid var(--c-line)" }}>
+            <MobilePortfolio positions={positions} />
+          )}
+
+          <h2 className="hidden sm:block text-[13px] font-bold mb-2">Paper Positions {positions.active.length > 0 ? <span className="font-normal text-muted">({positions.active.length} open)</span> : null}</h2>
+          {positions.active.length === 0 && positions.closed.length === 0 ? null : (
+            <div className="hidden sm:block overflow-x-auto rounded-[14px]" style={{ border: "1px solid var(--c-line)" }}>
               <table className="w-full text-[12px]">
                 <thead>
                   <tr className="text-muted text-left" style={{ background: "var(--c-surface-2)" }}>

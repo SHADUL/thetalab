@@ -87,6 +87,34 @@ function formatDateTime(iso) {
   return `${date} ${time}`;
 }
 
+function ActivityLog({ timeline }) {
+  return (
+    <>
+      <h2 className="text-[13px] font-bold mt-5 mb-2">Activity Log</h2>
+      {timeline.length === 0 ? (
+        <p className="text-[12.5px] text-muted py-6 text-center">No activity yet.</p>
+      ) : (
+        <div className="rounded-[14px] overflow-hidden" style={{ border: "1px solid var(--c-line)" }}>
+          {timeline.map((e, i) => {
+            const isError = e.level === "error";
+            return (
+              <div
+                key={i}
+                className="flex items-start gap-2.5 px-3 py-2"
+                style={{ borderTop: i > 0 ? "1px solid var(--c-line)" : "none", background: "var(--c-surface)" }}
+              >
+                {isError ? <Info size={13} weight="bold" className="shrink-0 mt-px text-loss" /> : <Bell size={13} weight="bold" className="shrink-0 mt-px text-muted" />}
+                <span className="text-[11px] text-faint n shrink-0 w-[62px]">{new Date(e.time).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</span>
+                <span className={`text-[11.5px] ${isError ? "text-loss" : "text-ink2"}`}>{e.message}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </>
+  );
+}
+
 // Decorative only — a deterministic (position-id-seeded) wiggle that drifts
 // toward the P&L's sign, NOT a real intraday price series (this app doesn't
 // log a per-position P&L history to draw a genuine one from). Mirrors the
@@ -716,7 +744,7 @@ export default function OptionsAutoTrader() {
 
           {positions.active.length === 0 && positions.closed.length === 0 ? (
             <p className="text-[12.5px] text-muted py-6 text-center">No paper positions yet — the 30-min scan opens one automatically once a candidate clears the quality threshold.</p>
-          ) : mobileTab === "calendar" ? (
+          ) : mobileTab === "activity" ? null : mobileTab === "calendar" ? (
             <PnLCalendar positions={positions} hideAmounts={hideAmounts} />
           ) : (
             <MobilePortfolio positions={positions} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} />
@@ -750,25 +778,16 @@ export default function OptionsAutoTrader() {
             </div>
           )}
 
-          <h2 className="text-[13px] font-bold mt-5 mb-2">Activity Log</h2>
-          {timeline.length === 0 ? (
-            <p className="text-[12.5px] text-muted py-6 text-center">No activity yet.</p>
-          ) : (
-            <div className="rounded-[14px] overflow-hidden" style={{ border: "1px solid var(--c-line)" }}>
-              {timeline.map((e, i) => {
-                const isError = e.level === "error";
-                return (
-                  <div
-                    key={i}
-                    className="flex items-start gap-2.5 px-3 py-2"
-                    style={{ borderTop: i > 0 ? "1px solid var(--c-line)" : "none", background: "var(--c-surface)" }}
-                  >
-                    {isError ? <Info size={13} weight="bold" className="shrink-0 mt-px text-loss" /> : <Bell size={13} weight="bold" className="shrink-0 mt-px text-muted" />}
-                    <span className="text-[11px] text-faint n shrink-0 w-[62px]">{new Date(e.time).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</span>
-                    <span className={`text-[11.5px] ${isError ? "text-loss" : "text-ink2"}`}>{e.message}</span>
-                  </div>
-                );
-              })}
+          {/* Desktop always shows the log inline; on mobile it moved to its
+              own bottom-nav tab (see mobileTab === "activity" below), since
+              there's no room to show portfolio/calendar AND a log at once
+              on a phone screen. */}
+          <div className="hidden sm:block">
+            <ActivityLog timeline={timeline} />
+          </div>
+          {mobileTab === "activity" && (
+            <div className="sm:hidden">
+              <ActivityLog timeline={timeline} />
             </div>
           )}
         </>
@@ -784,6 +803,11 @@ export default function OptionsAutoTrader() {
           style={{ color: mobileTab === "calendar" ? "var(--c-accent)" : "var(--c-muted)" }}>
           <CalendarBlank size={18} weight={mobileTab === "calendar" ? "fill" : "regular"} />
           <span className="text-[10px] font-medium">Calendar</span>
+        </button>
+        <button onClick={() => setMobileTab("activity")} className="flex-1 flex flex-col items-center gap-0.5 py-2"
+          style={{ color: mobileTab === "activity" ? "var(--c-accent)" : "var(--c-muted)" }}>
+          <Bell size={18} weight={mobileTab === "activity" ? "fill" : "regular"} />
+          <span className="text-[10px] font-medium">Activity</span>
         </button>
       </div>
     </div>

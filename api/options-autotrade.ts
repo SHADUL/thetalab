@@ -787,6 +787,22 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
     }
     if (missingQuote) { await log('error', `Position #${p.id}: could not re-quote every leg — skipped this cycle.`); continue; }
 
+    // Sanity bound: for ANY defined-risk structure, maxProfit + maxLoss IS
+    // the strike-width-implied theoretical ceiling on cost-to-close (it's
+    // just intrinsic value at the extreme, which is all a bounded vertical
+    // can ever cost) — currentCostToClose can never legitimately exceed it
+    // by more than a modest time-value margin. A poor-liquidity leg (thin
+    // BFO chains especially) can occasionally print a stale/erroneous
+    // last_price; trusting that blindly can trigger a stop-loss exit at an
+    // impossible cost-to-close (seen live: a POOR-liquidity SENSEX spread
+    // whose booked loss was 4.77x its own defined max loss). 1.5x is
+    // generous slack for genuine extrinsic value, not a tuned threshold.
+    const structureCeiling = ((Number(p.max_profit) || 0) + (Number(p.max_loss) || 0)) * 1.5;
+    if (structureCeiling > 0 && (currentCostToClose < 0 || currentCostToClose > structureCeiling)) {
+      await log('error', `Position #${p.id}: re-quoted cost to close (₹${currentCostToClose.toFixed(0)}) is outside the structure's physically possible range (₹0-₹${structureCeiling.toFixed(0)}) — likely a bad/stale quote on a thin leg. Skipped this cycle without updating P&L or evaluating exit.`);
+      continue;
+    }
+
     // Live mark-to-market P&L — persisted for EVERY position re-quoted this
     // cycle, independent of whether it also triggers an exit below. Same
     // formula the exit engine itself uses (maxProfit - currentCostToClose);

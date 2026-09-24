@@ -1,54 +1,54 @@
 /**
- * Project-wide access gate — HTTP Basic Auth in front of EVERY request
- * (the static SPA and every /api/* route), via Vercel Edge Middleware.
+ * Project-wide access gate — runs on every request (the static SPA and
+ * every /api/* route) before anything else, via Vercel Routing
+ * Middleware. See src/lib/session.ts for the signed-cookie mechanics and
+ * api/auth.ts for how the cookie gets issued.
  *
  * This app was built with no per-user concept at all: one global
  * settings row, one Kite session, one set of positions — "browser-facing,
- * no shared-secret gate" was a deliberate simplification everywhere,
- * on the assumption only the one operator would ever have the URL. Now
- * that AUTO places real orders against a real account, anyone who gets
- * this link can see the real Kite balance/positions and even change
+ * no shared-secret gate" was a deliberate simplification everywhere, on
+ * the assumption only the one operator would ever have the URL. Now that
+ * AUTO places real orders against a real account, anyone who gets this
+ * link could see the real Kite balance/positions and even change
  * settings (including flipping execution_mode to AUTO) with zero
- * authentication. This middleware is the fix: nothing in the app is
- * reachable at all without the credentials below.
+ * authentication. This middleware is the fix.
  *
- * SITE_BASIC_AUTH_USER / SITE_BASIC_AUTH_PASS must be set as Vercel
- * environment variables — there is no fallback/bypass if they're
- * missing, the whole site 401s instead (fail closed, not open).
+ * Fails closed: if SESSION_SECRET is missing for any reason, every
+ * request is refused rather than silently allowed through.
  */
+import { verifySessionToken, readCookie, sessionCookieName } from './src/lib/session.ts';
 
-// No matcher — Routing Middleware runs on every request by default, which
-// is exactly what a project-wide gate needs. A matcher pattern here would
-// be one more place to get subtly wrong and accidentally leave a path
-// unprotected.
+const STATIC_EXTENSIONS = /\.(js|mjs|css|map|woff2?|ttf|eot|png|jpe?g|gif|svg|ico|webp|avif|json|txt|webmanifest)$/i;
 
-function unauthorized(): Response {
-  return new Response('Authentication required.', {
-    status: 401,
-    headers: { 'WWW-Authenticate': 'Basic realm="thetalab", charset="UTF-8"' },
-  });
+function isPubliclyReachable(pathname: string): boolean {
+  if (pathname === '/login') return true;
+  if (pathname.startsWith('/api/auth')) return true;
+  if (pathname.startsWith('/assets/')) return true;
+  if (STATIC_EXTENSIONS.test(pathname)) return true;
+  return false;
 }
 
-export default function middleware(request: Request): Response | undefined {
-  const expectedUser = process.env.SITE_BASIC_AUTH_USER;
-  const expectedPass = process.env.SITE_BASIC_AUTH_PASS;
-  if (!expectedUser || !expectedPass) return unauthorized();
+export default async function middleware(request: Request): Promise<Response | undefined> {
+  const url = new URL(request.url);
+  if (isPubliclyReachable(url.pathname)) return undefined;
 
-  const authHeader = request.headers.get('authorization');
-  if (!authHeader?.startsWith('Basic ')) return unauthorized();
-
-  let decoded: string;
-  try {
-    decoded = atob(authHeader.slice(6));
-  } catch {
-    return unauthorized();
+  const secret = process.env.SESSION_SECRET;
+  if (!secret) {
+    return new Response('Server misconfigured.', { status: 500 });
   }
-  const separatorIdx = decoded.indexOf(':');
-  if (separatorIdx === -1) return unauthorized();
-  const user = decoded.slice(0, separatorIdx);
-  const pass = decoded.slice(separatorIdx + 1);
 
-  if (user !== expectedUser || pass !== expectedPass) return unauthorized();
+  const token = readCookie(request.headers.get('cookie'), sessionCookieName());
+  const username = await verifySessionToken(token, secret);
+  if (username) return undefined; // authenticated — let the request through
 
-  return undefined; // authenticated — let the request through
+  if (url.pathname.startsWith('/api/')) {
+    return new Response(JSON.stringify({ error: 'unauthenticated' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const loginUrl = new URL('/login', url.origin);
+  if (url.pathname !== '/' ) loginUrl.searchParams.set('next', url.pathname + url.search);
+  return Response.redirect(loginUrl.toString(), 302);
 }

@@ -4,6 +4,7 @@ import SwingScanner from "./components/SwingScanner.jsx";
 import IntradayTrader from "./components/IntradayTrader.jsx";
 import OptionsAutoTrader from "./components/OptionsAutoTrader.jsx";
 import VwapScalper from "./components/VwapScalper.jsx";
+import Login from "./components/Login.jsx";
 
 /**
  * Options Desk and Swing Scanner are two genuinely separate products that
@@ -33,6 +34,17 @@ export default function Root() {
     setSectionState(s);
     try { localStorage.setItem(SECTION_KEY, s); } catch { /* private browsing, etc. — just won't persist */ }
   };
+
+  // middleware.ts redirects any unauthenticated request straight to
+  // /login server-side, before the SPA even loads — this client-side
+  // check only decides which component THIS page load renders once
+  // we're already here (either freshly redirected while unauthenticated,
+  // or navigating to /login directly). It is not itself the security
+  // boundary; the middleware/session-cookie check is. Kept below every
+  // hook call so Root's hook order never depends on which path this is.
+  if (typeof window !== "undefined" && window.location.pathname === "/login") {
+    return <Login />;
+  }
 
   return (
     <div className="flex flex-col min-h-screen">

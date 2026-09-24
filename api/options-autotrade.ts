@@ -793,7 +793,14 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
       underlyingGroup: candidateSymbolGroup,
     },
     {
-      equity: Number(settings.reserved_fund) || 0,
+      // AUTO bases every %-of-equity risk cap (max risk/trade, daily/weekly
+      // loss, portfolio risk, correlated-group risk) on the REAL account
+      // balance too — reserved_fund is a self-declared number a human
+      // typed in, and letting real risk limits key off it would let those
+      // caps drift arbitrarily far from what the account can actually
+      // absorb. PAPER keeps using reserved_fund, since there's no real
+      // balance to check it against.
+      equity: isLive ? (realAvailableFunds ?? 0) : Number(settings.reserved_fund) || 0,
       availableFunds: isLive ? (realAvailableFunds ?? 0) : Number(settings.reserved_fund) || 0,
     },
     portfolio,
@@ -1605,6 +1612,36 @@ async function handleVwapScalperMonitor(req: any, res: any, supabase: SupabaseCl
   res.status(200).json({ ok: true, checked: positions.length, closed });
 }
 
+/**
+ * Browser-facing: the actual, real Kite account balance — not
+ * settings.reserved_fund, which is a self-declared risk-budget allocation
+ * a human typed in, not a live pull of the broker. Exists so the
+ * dashboard can show genuine real-money figures once AUTO is on, instead
+ * of implying reserved_fund is the account balance. Null fields mean no
+ * Kite session / the fetch failed, not zero.
+ */
+async function handleRealFunds(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const apiKey = process.env.KITE_API_KEY;
+  if (!apiKey) { res.status(500).json({ error: 'server_misconfigured' }); return; }
+  const { data: session } = await supabase.from('kite_session').select('access_token').eq('id', 1).maybeSingle();
+  const token = session?.access_token;
+  if (!token) { res.status(200).json({ ok: true, availableFunds: null, skipped: 'no_kite_session' }); return; }
+
+  try {
+    const data = await kiteFetch('/user/margins/equity', { token, apiKey });
+    const availableFunds = Number(data?.available?.live_balance ?? data?.net);
+    const utilised = Number(data?.utilised?.debits);
+    res.status(200).json({
+      ok: true,
+      availableFunds: availableFunds > 0 ? availableFunds : 0,
+      utilised: Number.isFinite(utilised) ? utilised : null,
+    });
+  } catch (err: any) {
+    res.status(200).json({ ok: true, availableFunds: null, error: err.message });
+  }
+}
+
 export default async function handler(req: any, res: any) {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -1617,6 +1654,7 @@ export default async function handler(req: any, res: any) {
   // api/intraday.js's settings/positions convention).
   if (resource === 'settings') return handleSettings(req, res, supabase);
   if (resource === 'positions') return handlePositions(req, res, supabase);
+  if (resource === 'real-funds') return handleRealFunds(req, res, supabase);
   if (resource === 'log') return handleLog(req, res, supabase);
   if (resource === 'kill-switch') return handleKillSwitch(req, res, supabase);
   if (resource === 'daily-stats') return handleDailyStats(req, res, supabase);

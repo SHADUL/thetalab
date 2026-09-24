@@ -155,7 +155,11 @@ function MobilePositionRow({ p, hideAmounts, isFirst }) {
       <button onClick={() => setExpanded((v) => !v)} className="w-full flex items-center gap-2.5 px-3 py-3 text-left">
         <div className="min-w-0 flex-1">
           <div className="text-[13.5px] font-semibold truncate flex items-center gap-1">
-            {p.symbol} {expanded ? <CaretUp size={11} className="text-faint shrink-0" /> : <CaretDown size={11} className="text-faint shrink-0" />}
+            {p.symbol}
+            {p.execution_mode === "AUTO" && (
+              <span className="text-[8.5px] font-bold px-1 rounded-[3px]" style={{ background: "var(--c-loss-soft)", color: "var(--c-loss)" }}>LIVE</span>
+            )}
+            {expanded ? <CaretUp size={11} className="text-faint shrink-0" /> : <CaretDown size={11} className="text-faint shrink-0" />}
           </div>
           <div className="text-[11px] text-faint truncate">{p.strategy_label} · {p.lots} lot{p.lots === 1 ? "" : "s"}</div>
           {!isActive && (
@@ -443,6 +447,9 @@ function PositionRow({ p }) {
           </button>
           <div className="text-[10.5px] text-faint">{p.strategy_label}</div>
         </td>
+        <td className="py-2 pr-2 text-[10.5px] font-semibold" style={{ color: p.execution_mode === "AUTO" ? "var(--c-loss)" : "var(--c-faint)" }}>
+          {p.execution_mode === "AUTO" ? "LIVE" : "PAPER"}
+        </td>
         <td className="py-2 pr-2 text-[11px]">{p.expiry}</td>
         <td className="py-2 pr-2 text-[11px] n">{formatDateTime(p.created_at) ?? "—"}</td>
         <td className="py-2 pr-2 text-[11px] n">{p.status !== "ACTIVE" ? (formatDateTime(p.updated_at) ?? "—") : "—"}</td>
@@ -469,7 +476,7 @@ function PositionRow({ p }) {
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={13} className="px-3 pb-3" style={{ background: "var(--c-surface-2)" }}>
+          <td colSpan={14} className="px-3 pb-3" style={{ background: "var(--c-surface-2)" }}>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
               <div>
                 <div className="text-[10.5px] font-semibold text-muted mb-1">Legs</div>
@@ -526,6 +533,8 @@ export default function OptionsAutoTrader() {
   const [mobileTab, setMobileTab] = useState("portfolio"); // portfolio | calendar | activity
   const [descOpen, setDescOpen] = useState(false);
   const [hideAmounts, setHideAmounts] = useState(false);
+  const [realFunds, setRealFunds] = useState(null);
+  const [showAllModes, setShowAllModes] = useState(false);
   const timerRef = useRef(null);
 
   const load = useCallback(() => {
@@ -534,8 +543,9 @@ export default function OptionsAutoTrader() {
       fetch("/api/options-autotrade?resource=positions").then((r) => r.json()),
       fetch("/api/options-autotrade?resource=log").then((r) => r.json()),
       fetch("/api/options-autotrade?resource=daily-stats").then((r) => r.json()),
+      fetch("/api/options-autotrade?resource=real-funds").then((r) => r.json()),
     ])
-      .then(([s, posBody, logBody, dailyBody]) => {
+      .then(([s, posBody, logBody, dailyBody, fundsBody]) => {
         if (s?.error) { setError(s.message || s.error); return; }
         setError(null);
         setSettings(s);
@@ -543,10 +553,24 @@ export default function OptionsAutoTrader() {
         setPositions({ active: posBody.active ?? [], closed: posBody.closed ?? [] });
         setLogEntries(logBody.entries ?? []);
         setDailyStats(dailyBody);
+        setRealFunds(fundsBody);
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
+
+  // A position's execution_mode is fixed at the moment it opened — a
+  // PAPER position stays PAPER even after the switch is later moved to
+  // AUTO. Once AUTO is active, PAPER history sitting in the same list as
+  // real positions is actively misleading (it looks like real money that
+  // isn't), so the default view filters to whichever mode is currently
+  // selected; showAllModes opts back into seeing everything together.
+  const visiblePositions = showAllModes || !settings?.execution_mode || settings.execution_mode === "OFF"
+    ? positions
+    : {
+        active: positions.active.filter((p) => (p.execution_mode ?? "PAPER") === settings.execution_mode),
+        closed: positions.closed.filter((p) => (p.execution_mode ?? "PAPER") === settings.execution_mode),
+      };
 
   const clearDailyLock = () => {
     setClearingLock(true);
@@ -768,36 +792,57 @@ export default function OptionsAutoTrader() {
         </div>
       ) : (
         <>
+          {settings?.execution_mode === "AUTO" && (
+            <div className="flex items-center gap-3 flex-wrap mb-3 p-3 rounded-[12px]" style={{ border: "1px solid var(--c-loss)", background: "var(--c-loss-soft)" }}>
+              <span className="text-[11px] font-semibold text-loss">REAL ACCOUNT BALANCE</span>
+              <span className="text-[15px] font-bold n text-loss">
+                {realFunds?.availableFunds != null ? inr(realFunds.availableFunds) : realFunds?.skipped === "no_kite_session" ? "No Kite session" : "—"}
+              </span>
+              {realFunds?.utilised != null && <span className="text-[10.5px] text-ink2">({inr(realFunds.utilised)} utilised)</span>}
+              <label className="flex items-center gap-1.5 text-[10.5px] text-ink2 ml-auto">
+                <input type="checkbox" checked={showAllModes} onChange={(e) => setShowAllModes(e.target.checked)} />
+                Show PAPER history too
+              </label>
+            </div>
+          )}
+
           <div className="hidden sm:grid grid-cols-1 sm:grid-cols-3 gap-2.5 mb-4">
             <div className="p-3 rounded-[12px]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
               <div className="text-[11px] text-muted mb-0.5">Open Positions</div>
-              <div className="text-[14px] font-bold n">{positions.active.length} <span className="text-faint font-normal text-[11px]">/ {settings?.max_positions ?? "—"} max</span></div>
+              <div className="text-[14px] font-bold n">{visiblePositions.active.length} <span className="text-faint font-normal text-[11px]">/ {settings?.max_positions ?? "—"} max</span></div>
             </div>
             <div className="p-3 rounded-[12px]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
               <div className="text-[11px] text-muted mb-0.5">Margin Committed</div>
-              <div className="text-[14px] font-bold n">{inr(positions.active.reduce((s, p) => s + (Number(p.margin_required) || 0), 0))}</div>
+              <div className="text-[14px] font-bold n">{inr(visiblePositions.active.reduce((s, p) => s + (Number(p.margin_required) || 0), 0))}</div>
             </div>
             <div className="p-3 rounded-[12px]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
               <div className="text-[11px] text-muted mb-0.5">Max Loss at Risk</div>
-              <div className={`text-[14px] font-bold n ${positions.active.length ? "text-loss" : ""}`}>{inr(positions.active.reduce((s, p) => s + (Number(p.max_loss) || 0), 0))}</div>
+              <div className={`text-[14px] font-bold n ${visiblePositions.active.length ? "text-loss" : ""}`}>{inr(visiblePositions.active.reduce((s, p) => s + (Number(p.max_loss) || 0), 0))}</div>
             </div>
           </div>
 
-          {positions.active.length === 0 && positions.closed.length === 0 ? (
-            <p className="text-[12.5px] text-muted py-6 text-center">No paper positions yet — the 30-min scan opens one automatically once a candidate clears the quality threshold.</p>
+          {visiblePositions.active.length === 0 && visiblePositions.closed.length === 0 ? (
+            <p className="text-[12.5px] text-muted py-6 text-center">
+              {settings?.execution_mode === "AUTO" && !showAllModes
+                ? "No AUTO (real) positions yet — the 30-min scan opens one automatically once a candidate clears the quality threshold."
+                : "No paper positions yet — the 30-min scan opens one automatically once a candidate clears the quality threshold."}
+            </p>
           ) : mobileTab === "activity" ? null : mobileTab === "calendar" ? (
-            <PnLCalendar positions={positions} hideAmounts={hideAmounts} />
+            <PnLCalendar positions={visiblePositions} hideAmounts={hideAmounts} />
           ) : (
-            <MobilePortfolio positions={positions} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} />
+            <MobilePortfolio positions={visiblePositions} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} />
           )}
 
-          <h2 className="hidden sm:block text-[13px] font-bold mb-2">Paper Positions {positions.active.length > 0 ? <span className="font-normal text-muted">({positions.active.length} open)</span> : null}</h2>
-          {positions.active.length === 0 && positions.closed.length === 0 ? null : (
+          <h2 className="hidden sm:block text-[13px] font-bold mb-2">
+            {settings?.execution_mode === "AUTO" ? "Live Positions" : "Paper Positions"} {visiblePositions.active.length > 0 ? <span className="font-normal text-muted">({visiblePositions.active.length} open)</span> : null}
+          </h2>
+          {visiblePositions.active.length === 0 && visiblePositions.closed.length === 0 ? null : (
             <div className="hidden sm:block overflow-x-auto rounded-[14px]" style={{ border: "1px solid var(--c-line)" }}>
               <table className="w-full text-[12px]">
                 <thead>
                   <tr className="text-muted text-left" style={{ background: "var(--c-surface-2)" }}>
                     <th className="font-medium py-2 pl-3 pr-2">Symbol / Strategy</th>
+                    <th className="font-medium py-2 pr-2">Mode</th>
                     <th className="font-medium py-2 pr-2">Expiry</th>
                     <th className="font-medium py-2 pr-2">Entry</th>
                     <th className="font-medium py-2 pr-2">Exit</th>
@@ -813,7 +858,7 @@ export default function OptionsAutoTrader() {
                   </tr>
                 </thead>
                 <tbody>
-                  {[...positions.active, ...positions.closed].map((p) => <PositionRow key={p.id} p={p} />)}
+                  {[...visiblePositions.active, ...visiblePositions.closed].map((p) => <PositionRow key={p.id} p={p} />)}
                 </tbody>
               </table>
             </div>

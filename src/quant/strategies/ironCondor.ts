@@ -152,6 +152,16 @@ export function buildIronCondor(
   const putWidth = shortPut.quote.strike - longPutStrike;
   const maxLossPerUnit = Math.max(callWidth - callCredit, putWidth - putCredit);
 
+  // Array order is SELL/BUY/SELL/BUY, which is fine for paper mode
+  // (paperFill.ts fills every leg simultaneously, ignoring array order
+  // entirely — there's no real broker call to sequence). It would be the
+  // WRONG order for real order placement: firing a naked SELL leg before
+  // its hedge makes Zerodha demand full standalone margin (~₹1.5L/lot)
+  // before it can see the hedge is coming, versus firing every BUY first,
+  // waiting for a COMPLETE fill on each, then the SELLs, which gets
+  // recognized as a hedged structure immediately (~₹30-45k/lot). Whoever
+  // builds real execution needs to explicitly reorder legs BUY-first
+  // rather than assuming this array's order is already correct.
   const legQuotes: Array<{ side: IronCondorLeg['side']; q: EnrichedQuote; dir: 1 | -1; price: number }> = [
     { side: 'SELL', q: shortPut, dir: -1, price: spPrice },
     { side: 'BUY', q: longPut, dir: 1, price: lpPrice },

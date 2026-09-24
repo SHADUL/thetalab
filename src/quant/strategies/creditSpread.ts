@@ -120,6 +120,15 @@ export function buildCreditSpread(
   const maxLossPerUnit = width - netCredit;
   const breakeven = isPut ? short.quote.strike - netCredit : short.quote.strike + netCredit;
 
+  // Array order is SELL-then-BUY, which is fine for paper mode (paperFill.ts
+  // fills every leg simultaneously, ignoring array order entirely — there's
+  // no real broker call to sequence). It would be the WRONG order for real
+  // order placement: firing the naked SELL leg first makes Zerodha demand
+  // full standalone margin (~₹1.5L/lot) before it can see the hedge is
+  // coming, versus firing BUY first, waiting for a COMPLETE fill, then
+  // SELL, which gets recognized as a hedged spread immediately (~₹30-45k/
+  // lot). Whoever builds real execution needs to explicitly reorder legs
+  // BUY-first rather than assuming this array's order is already correct.
   const legQuotes: Array<{ side: CreditSpreadLeg['side']; q: EnrichedQuote; dir: 1 | -1; price: number }> = [
     { side: 'SELL', q: short, dir: -1, price: shortPrice },
     { side: 'BUY', q: long, dir: 1, price: longPrice },

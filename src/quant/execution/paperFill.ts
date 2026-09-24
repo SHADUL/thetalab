@@ -57,6 +57,16 @@ export function runPaperExecution(legs: PlannedLeg[], validation: ValidationResu
   }
   log.push('VALIDATING -> SUBMITTING: all pre-trade checks passed.');
 
+  // Every leg fills at once here, in whatever order `legs` was given —
+  // fine for paper mode, since there's no real broker call for order to
+  // matter to. Real order placement (not built yet) must NOT copy this:
+  // fire every BUY (hedge) leg first, wait for a COMPLETE fill on each,
+  // THEN fire the SELL (short) legs. Firing a naked SELL first makes
+  // Zerodha demand full standalone margin (~₹1.5L/lot) before it can see
+  // the hedge coming; BUY-first gets the hedged-structure margin rate
+  // (~₹30-45k/lot) instead. See creditSpread.ts/ironCondor.ts's own leg
+  // array comments — their SELL-then-BUY construction order is likewise
+  // harmless here but backwards for that future real-execution path.
   const legFills = legs.map((l) => ({ ...l, status: 'FILLED' as const }));
   const submissionState = afterSubmission(legFills);
   log.push(`SUBMITTING -> ${submissionState}: every leg filled at its quoted price (paper — no partial fills modeled).`);

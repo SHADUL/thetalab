@@ -587,14 +587,17 @@ export default function OptionsAutoTrader() {
     return () => clearInterval(timerRef.current);
   }, [load]);
 
-  // Covers a page load/refresh landing directly on an already-AUTO
-  // account, not just the moment the switch is flipped from here.
+  // Covers a page load/refresh landing directly on an already-AUTO (or
+  // already-back-to-PAPER/OFF) account, not just the moment the switch is
+  // flipped from here — dark exactly while AUTO is active, light the
+  // moment it isn't, no manual refresh needed either direction.
   useEffect(() => {
-    if (settings?.execution_mode !== "AUTO") return;
+    if (!settings?.execution_mode) return;
+    const wantTheme = settings.execution_mode === "AUTO" ? "dark" : "light";
     try {
-      if (document.documentElement.getAttribute("data-theme") !== "dark") {
-        document.documentElement.setAttribute("data-theme", "dark");
-        localStorage.setItem("thetalab-theme", "dark");
+      if (document.documentElement.getAttribute("data-theme") !== wantTheme) {
+        document.documentElement.setAttribute("data-theme", wantTheme);
+        localStorage.setItem("thetalab-theme", wantTheme);
       }
     } catch { /* private browsing, etc. */ }
   }, [settings?.execution_mode]);

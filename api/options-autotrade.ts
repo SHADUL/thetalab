@@ -604,12 +604,21 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     await log('error', `No instrument_token in quote response for ${indexKey} — premiumEdge will be excluded, not fabricated`);
   }
 
-  // 3. Build the live chain: for each eligible expiry, select strikes near
-  // spot from the synced instruments, batch-fetch quotes, map into rows.
+  // 3. Build the live chain: select strikes near spot for EVERY eligible
+  // expiry first, then batch-fetch quotes ONCE across all of them
+  // combined (chunked at Kite's own documented /quote cap, 500
+  // instruments — see MAX_QUOTE_INSTRUMENTS), instead of one separate
+  // quote call per expiry. A symbol can have 8-9 eligible expiries;
+  // firing that many full-depth quote calls back-to-back risks Kite's
+  // "1 request/sec for /quote" limit on its own, independent of how
+  // often this scan itself runs. Combining first cuts a typical scan
+  // from ~8-9 quote calls down to 1-2.
   const lotSize = instrumentRows.find((r: any) => r.expiry === eligibleExpiries[0])?.lot_size ?? null;
   const rows: any[] = [];
   const now = Date.now();
 
+  const allKeys: string[] = [];
+  const metaByKey = new Map<string, { strike: number; right: 'CE' | 'PE'; expiryEpochMs: number }>();
   for (const expiry of eligibleExpiries) {
     const forExpiry = instrumentRows.filter((r: any) => r.expiry === expiry);
     const availableStrikes = forExpiry.map((r: any) => Number(r.strike));
@@ -622,21 +631,26 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
       exchange,
     );
     const expiryEpochMs = Date.parse(`${expiry}T15:30:00+05:30`);
+    for (const key of keys) {
+      allKeys.push(key);
+      const meta = byKey.get(key);
+      if (meta) metaByKey.set(key, { strike: meta.strike, right: meta.right, expiryEpochMs });
+    }
+  }
 
-    for (const batch of chunk(keys, MAX_QUOTE_INSTRUMENTS)) {
-      let quoteData: any;
-      try {
-        quoteData = await kiteFetch(`/quote?${batch.map((k: string) => `i=${encodeURIComponent(k)}`).join('&')}`, { token, apiKey });
-      } catch (err: any) {
-        await log('error', 'Live quote batch failed during paper-scan', { symbol, expiry, message: err.message });
-        continue;
-      }
-      for (const key of batch) {
-        const meta = byKey.get(key);
-        const quote = quoteData?.[key];
-        if (!meta || !quote) continue;
-        rows.push(kiteQuoteToOptionRow({ strike: meta.strike, right: meta.right, expiryEpochMs, asOfEpochMs: now, quote }));
-      }
+  for (const batch of chunk(allKeys, MAX_QUOTE_INSTRUMENTS)) {
+    let quoteData: any;
+    try {
+      quoteData = await kiteFetch(`/quote?${batch.map((k: string) => `i=${encodeURIComponent(k)}`).join('&')}`, { token, apiKey });
+    } catch (err: any) {
+      await log('error', 'Live quote batch failed during paper-scan', { symbol, message: err.message });
+      continue;
+    }
+    for (const key of batch) {
+      const meta = metaByKey.get(key);
+      const quote = quoteData?.[key];
+      if (!meta || !quote) continue;
+      rows.push(kiteQuoteToOptionRow({ strike: meta.strike, right: meta.right, expiryEpochMs: meta.expiryEpochMs, asOfEpochMs: now, quote }));
     }
   }
 

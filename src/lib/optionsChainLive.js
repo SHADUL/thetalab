@@ -14,7 +14,12 @@
  */
 
 /** Kite's /quote endpoint accepts at most this many instruments per call (same limit api/kite-market-data.js's quote handler already enforces). */
-export const MAX_QUOTE_INSTRUMENTS = 50;
+// Kite's own documented cap for the /quote (full-detail, depth+OI+volume)
+// endpoint — https://kite.trade/docs/connect/v3/market-quotes/. Every
+// caller of this constant hits /quote specifically (never the lighter
+// /quote/ohlc or /quote/ltp, which cap at 1000 but drop OI/depth this
+// codebase's liquidity scoring needs) — see kiteQuoteToOptionRow below.
+export const MAX_QUOTE_INSTRUMENTS = 500;
 
 /** Strikes on the given expiry within +/- widthPct of spot, sorted ascending. Bounds how many instruments get fetched per expiry. */
 export function selectStrikesNearSpot(availableStrikes, spot, widthPct = 0.08) {

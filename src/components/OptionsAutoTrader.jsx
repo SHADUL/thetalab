@@ -115,29 +115,75 @@ function Sparkline({ seed, positive }) {
   );
 }
 
-function MobilePositionRow({ p, hideAmounts }) {
+function MobilePositionRow({ p, hideAmounts, isFirst }) {
+  const [expanded, setExpanded] = useState(false);
   const isActive = p.status === "ACTIVE";
   const pnl = isActive ? p.unrealized_pnl : p.realized_pnl;
   const positive = (Number(pnl) || 0) >= 0;
   const fmt = (n) => (hideAmounts ? "••••••" : inr(n));
+  const legs = p.options_autotrade_legs ?? [];
   return (
-    <div className="flex items-center gap-2.5 px-3 py-3" style={{ borderTop: "1px solid var(--c-line)" }}>
-      <div className="min-w-0 flex-1">
-        <div className="text-[13.5px] font-semibold truncate">{p.symbol}</div>
-        <div className="text-[11px] text-faint truncate">{p.strategy_label} · {p.lots} lot{p.lots === 1 ? "" : "s"}</div>
-        {!isActive && (
-          <div className={`text-[10px] mt-0.5 ${toneClass(STATUS_TONE[p.status] ?? "muted")}`}>{p.status}{p.exit_reason ? ` · ${p.exit_reason}` : ""}</div>
-        )}
-      </div>
-      <Sparkline seed={p.id} positive={positive} />
-      <div className="text-right shrink-0 min-w-[84px]">
-        <div className={`text-[13.5px] font-semibold n ${pnl == null ? "text-faint" : positive ? "text-gain" : "text-loss"}`}>
-          {pnl != null ? fmt(pnl) : "—"}
+    <div style={{ borderTop: isFirst ? "none" : "1px solid var(--c-line)" }}>
+      <button onClick={() => setExpanded((v) => !v)} className="w-full flex items-center gap-2.5 px-3 py-3 text-left">
+        <div className="min-w-0 flex-1">
+          <div className="text-[13.5px] font-semibold truncate flex items-center gap-1">
+            {p.symbol} {expanded ? <CaretUp size={11} className="text-faint shrink-0" /> : <CaretDown size={11} className="text-faint shrink-0" />}
+          </div>
+          <div className="text-[11px] text-faint truncate">{p.strategy_label} · {p.lots} lot{p.lots === 1 ? "" : "s"}</div>
+          {!isActive && (
+            <div className={`text-[10px] mt-0.5 ${toneClass(STATUS_TONE[p.status] ?? "muted")}`}>{p.status}{p.exit_reason ? ` · ${p.exit_reason}` : ""}</div>
+          )}
         </div>
-        <div className="text-[10.5px] text-faint n">
-          ({fmt(p.margin_required)})
+        <Sparkline seed={p.id} positive={positive} />
+        <div className="text-right shrink-0 min-w-[84px]">
+          <div className={`text-[13.5px] font-semibold n ${pnl == null ? "text-faint" : positive ? "text-gain" : "text-loss"}`}>
+            {pnl != null ? fmt(pnl) : "—"}
+          </div>
+          <div className="text-[10.5px] text-faint n">
+            ({fmt(p.margin_required)})
+          </div>
         </div>
-      </div>
+      </button>
+
+      {expanded && (
+        <div className="px-3 pb-3" style={{ background: "var(--c-surface-2)" }}>
+          <div className="grid grid-cols-2 gap-2 pt-2 pb-3 text-[11px]">
+            <div><span className="text-faint">Expiry</span><div className="n font-medium">{p.expiry ?? "—"}</div></div>
+            <div><span className="text-faint">Score</span><div className="font-medium">{Math.round(p.quality_score ?? 0)}/100</div></div>
+            <div><span className="text-faint">Net Credit</span><div className="n font-medium">{fmt(p.net_credit)}</div></div>
+            <div><span className="text-faint">Margin</span><div className="n font-medium">{p.margin_required != null ? fmt(p.margin_required) : "—"}</div></div>
+            <div><span className="text-faint">Max Profit</span><div className="n font-medium text-gain">{fmt(p.max_profit)}</div></div>
+            <div><span className="text-faint">Max Loss</span><div className="n font-medium text-loss">{fmt(p.max_loss)}</div></div>
+            <div><span className="text-faint">Entry</span><div className="n font-medium">{formatDateTime(p.created_at) ?? "—"}</div></div>
+            <div><span className="text-faint">Exit</span><div className="n font-medium">{!isActive ? (formatDateTime(p.updated_at) ?? "—") : "—"}</div></div>
+          </div>
+
+          {legs.length > 0 && (
+            <div className="mb-3">
+              <div className="text-[10.5px] font-semibold text-muted mb-1">Legs</div>
+              <table className="w-full text-[11px]">
+                <tbody>
+                  {legs.map((l) => (
+                    <tr key={l.id} style={{ borderTop: "1px solid var(--c-line)" }}>
+                      <td className="py-1 pr-2 font-medium">{l.side}</td>
+                      <td className="py-1 pr-2">{l.strike}{l.option_right}</td>
+                      <td className="py-1 pr-2 text-right n">{l.quantity}</td>
+                      <td className="py-1 text-right n">{fmt(l.fill_price)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {p.decision_explanation && (
+            <div>
+              <div className="text-[10.5px] font-semibold text-muted mb-1">Decision Explanation</div>
+              <pre className="text-[10.5px] text-ink2 whitespace-pre-wrap font-sans">{p.decision_explanation}</pre>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -219,9 +265,7 @@ function MobilePortfolio({ positions }) {
           <p className="text-[12px] text-muted py-6 text-center">No {filter} positions.</p>
         ) : (
           sorted.map((p, i) => (
-            <div key={p.id} style={{ borderTop: i > 0 ? undefined : "none" }}>
-              <MobilePositionRow p={p} hideAmounts={hideAmounts} />
-            </div>
+            <MobilePositionRow key={p.id} p={p} hideAmounts={hideAmounts} isFirst={i === 0} />
           ))
         )}
       </div>

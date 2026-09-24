@@ -587,6 +587,18 @@ export default function OptionsAutoTrader() {
     return () => clearInterval(timerRef.current);
   }, [load]);
 
+  // Covers a page load/refresh landing directly on an already-AUTO
+  // account, not just the moment the switch is flipped from here.
+  useEffect(() => {
+    if (settings?.execution_mode !== "AUTO") return;
+    try {
+      if (document.documentElement.getAttribute("data-theme") !== "dark") {
+        document.documentElement.setAttribute("data-theme", "dark");
+        localStorage.setItem("thetalab-theme", "dark");
+      }
+    } catch { /* private browsing, etc. */ }
+  }, [settings?.execution_mode]);
+
   const setField = (key, value) => setDraft((d) => ({ ...d, [key]: value }));
 
   const saveSettings = () => {
@@ -616,6 +628,14 @@ export default function OptionsAutoTrader() {
         "Are you sure you want to switch to AUTO?",
       );
       if (!confirmed) return;
+      // Real money gets a visually distinct app-wide theme, not just this
+      // page's own badges — same data-theme/localStorage mechanism App.jsx
+      // itself uses, so it sticks across section switches and reloads
+      // exactly like a manual toggle would.
+      try {
+        document.documentElement.setAttribute("data-theme", "dark");
+        localStorage.setItem("thetalab-theme", "dark");
+      } catch { /* private browsing, etc. */ }
     }
     setSaving(true);
     fetch("/api/options-autotrade?resource=settings", {

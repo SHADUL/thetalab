@@ -83,7 +83,7 @@ export default function Login() {
     if (submitting) return;
     setSubmitting(true);
     setError(null);
-    fetch("/api/auth?resource=login", {
+    fetch("/api/options-autotrade?resource=login", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username, password }),
     })

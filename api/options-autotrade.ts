@@ -91,6 +91,7 @@ import { computeVwapScalperPositionSize, computeFixedCapitalPositionSize } from 
 import { NIFTY_50_UNIVERSE } from '../src/vwap-scalper/nifty50Universe.ts';
 import { computeEffectiveTarget } from '../src/vwap-scalper/targetAndStop.ts';
 import type { Bar as VwapBar, VwapScalperParams } from '../src/vwap-scalper/types.ts';
+import { createSessionToken, buildSetCookieHeader, buildClearCookieHeader, readCookie, verifySessionToken, sessionCookieName } from '../src/lib/session.ts';
 
 const KITE_BASE = 'https://api.kite.trade';
 
@@ -1723,13 +1724,63 @@ async function handleRealFunds(req: any, res: any, supabase: SupabaseClient) {
   }
 }
 
+/**
+ * Login/logout/session-check for the custom login page — folded in here
+ * (rather than its own api/auth.ts) purely to stay under Vercel Hobby's
+ * 12-serverless-function-per-deployment cap, same reasoning the vwap-
+ * scalper resources were folded into this file for. Needs no Supabase
+ * client at all, so it's routed before that's even created. Deliberately
+ * the only resources middleware.ts lets through unauthenticated — every
+ * other resource in this file requires the session cookie this issues.
+ * See src/lib/session.ts for the signing mechanics.
+ */
+async function handleAuth(req: any, res: any, resource: string): Promise<boolean> {
+  if (resource !== 'login' && resource !== 'logout' && resource !== 'me') return false;
+
+  const expectedUser = process.env.SITE_BASIC_AUTH_USER;
+  const expectedPass = process.env.SITE_BASIC_AUTH_PASS;
+  const secret = process.env.SESSION_SECRET;
+  if (!expectedUser || !expectedPass || !secret) {
+    res.status(500).json({ error: 'server_misconfigured' });
+    return true;
+  }
+
+  if (resource === 'login') {
+    if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return true; }
+    const { username, password } = req.body ?? {};
+    if (username !== expectedUser || password !== expectedPass) {
+      res.status(401).json({ ok: false, error: 'invalid_credentials' });
+      return true;
+    }
+    const token = await createSessionToken(username, secret);
+    res.setHeader('Set-Cookie', buildSetCookieHeader(token));
+    res.status(200).json({ ok: true });
+    return true;
+  }
+
+  if (resource === 'logout') {
+    if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return true; }
+    res.setHeader('Set-Cookie', buildClearCookieHeader());
+    res.status(200).json({ ok: true });
+    return true;
+  }
+
+  // resource === 'me'
+  if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return true; }
+  const token = readCookie(req.headers?.cookie, sessionCookieName());
+  const username = await verifySessionToken(token, secret);
+  res.status(200).json({ authenticated: username !== null });
+  return true;
+}
+
 export default async function handler(req: any, res: any) {
+  const resource = req.query?.resource;
+  if (await handleAuth(req, res, resource)) return;
+
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) { res.status(500).json({ error: 'server_misconfigured' }); return; }
   const supabase = createClient(url, key, { auth: { persistSession: false } });
-
-  const resource = req.query?.resource;
 
   // Browser-facing resources — no shared-secret gate (matching
   // api/intraday.js's settings/positions convention).

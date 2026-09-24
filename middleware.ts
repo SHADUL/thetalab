@@ -15,14 +15,25 @@
  *
  * Fails closed: if SESSION_SECRET is missing for any reason, every
  * request is refused rather than silently allowed through.
+ *
+ * login/logout/me are handled inside api/options-autotrade.ts's own
+ * resource dispatch, not a separate api/auth.ts file — Vercel Hobby caps
+ * a deployment at 12 serverless functions, and this project was already
+ * at that cap.
  */
 import { verifySessionToken, readCookie, sessionCookieName } from './src/lib/session.ts';
 
-const STATIC_EXTENSIONS = /\.(js|mjs|css|map|woff2?|ttf|eot|png|jpe?g|gif|svg|ico|webp|avif|json|txt|webmanifest)$/i;
+// Node.js over the default Edge runtime, per Vercel's own recommendation —
+// everything this file uses (Web Crypto's crypto.subtle, atob/btoa,
+// process.env) is available on both, so there's no behavior difference.
+export const config = { runtime: 'nodejs' };
 
-function isPubliclyReachable(pathname: string): boolean {
+const STATIC_EXTENSIONS = /\.(js|mjs|css|map|woff2?|ttf|eot|png|jpe?g|gif|svg|ico|webp|avif|json|txt|webmanifest)$/i;
+const AUTH_RESOURCES = new Set(['login', 'logout', 'me']);
+
+function isPubliclyReachable(pathname: string, searchParams: URLSearchParams): boolean {
   if (pathname === '/login') return true;
-  if (pathname.startsWith('/api/auth')) return true;
+  if (pathname === '/api/options-autotrade' && AUTH_RESOURCES.has(searchParams.get('resource') ?? '')) return true;
   if (pathname.startsWith('/assets/')) return true;
   if (STATIC_EXTENSIONS.test(pathname)) return true;
   return false;
@@ -30,7 +41,7 @@ function isPubliclyReachable(pathname: string): boolean {
 
 export default async function middleware(request: Request): Promise<Response | undefined> {
   const url = new URL(request.url);
-  if (isPubliclyReachable(url.pathname)) return undefined;
+  if (isPubliclyReachable(url.pathname, url.searchParams)) return undefined;
 
   const secret = process.env.SESSION_SECRET;
   if (!secret) {

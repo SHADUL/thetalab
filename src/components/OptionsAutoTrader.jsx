@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { ChartLineUp, Info, Wallet, Gear, CaretDown, CaretUp, HandPalm, Bell, Eye, EyeSlash, SortAscending } from "@phosphor-icons/react";
+import { ChartLineUp, Info, Wallet, Gear, CaretDown, CaretUp, CaretLeft, CaretRight, HandPalm, Bell, Eye, EyeSlash, SortAscending, CalendarBlank } from "@phosphor-icons/react";
 import { inr, toneClass } from "./swingFormat.js";
 import { ScoreBadge } from "./ScoreWidgets.jsx";
 
@@ -196,8 +196,7 @@ function MobilePositionRow({ p, hideAmounts, isFirst }) {
  * the desktop table, which doesn't fit a phone screen. Shown only below the
  * sm breakpoint — see the "hidden sm:block" / "sm:hidden" split below.
  */
-function MobilePortfolio({ positions }) {
-  const [hideAmounts, setHideAmounts] = useState(false);
+function MobilePortfolio({ positions, hideAmounts, setHideAmounts }) {
   const [filter, setFilter] = useState("active"); // active | closed
   const [sortByPnl, setSortByPnl] = useState(false);
 
@@ -278,6 +277,126 @@ function MobilePortfolio({ positions }) {
           sorted.map((p, i) => (
             <MobilePositionRow key={p.id} p={p} hideAmounts={hideAmounts} isFirst={i === 0} />
           ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+const WEEKDAYS = ["S", "M", "T", "W", "T", "F", "S"];
+const isoDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const monthKeyOf = (s) => s.slice(0, 7);
+
+/**
+ * P&L calendar — a Kite-style month grid, each day tinted green/red by that
+ * day's net realized P&L, tap any day to see its total and the trades that
+ * closed on it. Built from positions.closed alone, which is the ONLY
+ * history this component has: /api/options-autotrade?resource=positions
+ * caps at the 200 most recent closed rows overall, so a month far enough
+ * back to fall outside that window will read empty here even if trades
+ * happened — a real limitation, not a rendering bug, worth revisiting with
+ * a dedicated date-ranged endpoint if history grows past that cap.
+ */
+function PnLCalendar({ positions, hideAmounts }) {
+  const todayIso = isoDate(new Date());
+  const [month, setMonth] = useState(() => monthKeyOf(todayIso));
+  const [selected, setSelected] = useState(todayIso);
+  const fmt = (n) => (hideAmounts ? "••••••" : inr(n));
+
+  const byDay = {};
+  for (const p of positions.closed) {
+    if (!p.exit_date) continue;
+    (byDay[p.exit_date] ??= []).push(p);
+  }
+
+  const grid = (() => {
+    const [y, m] = month.split("-").map(Number);
+    const start = new Date(y, m - 1, 1);
+    start.setDate(start.getDate() - start.getDay());
+    return Array.from({ length: 42 }, (_, i) => {
+      const d = new Date(start);
+      d.setDate(start.getDate() + i);
+      const key = isoDate(d);
+      const trades = byDay[key] ?? [];
+      const pnl = trades.reduce((s, p) => s + (Number(p.realized_pnl) || 0), 0);
+      return { key, day: d.getDate(), inMonth: d.getMonth() === m - 1, trades, pnl };
+    });
+  })();
+
+  const shiftMonth = (n) => {
+    const [y, m] = month.split("-").map(Number);
+    setMonth(monthKeyOf(isoDate(new Date(y, m - 1 + n, 1))));
+  };
+  const monthTitle = new Date(month + "-01T00:00:00").toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+
+  const selectedCell = grid.find((c) => c.key === selected) ?? { key: selected, trades: byDay[selected] ?? [], pnl: (byDay[selected] ?? []).reduce((s, p) => s + (Number(p.realized_pnl) || 0), 0) };
+  const selectedLabel = new Date(selected + "T00:00:00").toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "short", year: "numeric" });
+
+  return (
+    <div className="sm:hidden">
+      <div className="rounded-[16px] p-4 mb-3" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+        <div className="flex items-center gap-1 mb-3">
+          <button onClick={() => shiftMonth(-1)} className="topstep !px-2" aria-label="Previous month"><CaretLeft size={12} weight="bold" /></button>
+          <span className="text-[13px] font-semibold flex-1 text-center n">{monthTitle}</span>
+          <button onClick={() => shiftMonth(1)} className="topstep !px-2" aria-label="Next month"><CaretRight size={12} weight="bold" /></button>
+        </div>
+
+        <div className="grid grid-cols-7 gap-1">
+          {WEEKDAYS.map((w, i) => (
+            <div key={i} className="text-[10px] font-semibold text-faint text-center py-1">{w}</div>
+          ))}
+          {grid.map((c) => {
+            const hasTrades = c.trades.length > 0;
+            const positive = c.pnl >= 0;
+            const isSelected = c.key === selected;
+            const isToday = c.key === todayIso;
+            return (
+              <button
+                key={c.key}
+                onClick={() => setSelected(c.key)}
+                className="rounded-[8px] py-1 flex flex-col items-center justify-center gap-0.5"
+                style={{
+                  minHeight: 42,
+                  opacity: c.inMonth ? 1 : 0.35,
+                  background: isSelected ? "var(--c-accent-soft)" : hasTrades ? (positive ? "var(--c-gain-soft)" : "var(--c-loss-soft)") : "transparent",
+                  border: isSelected ? "1px solid var(--c-accent)" : isToday ? "1px solid var(--c-line-2)" : "1px solid transparent",
+                }}
+              >
+                <span className="text-[11px] n font-medium">{c.day}</span>
+                {hasTrades && (
+                  <span className={`text-[8.5px] n font-semibold ${positive ? "text-gain" : "text-loss"}`}>
+                    {hideAmounts ? "••" : Math.abs(c.pnl) >= 1000 ? `${positive ? "+" : "-"}${(Math.abs(c.pnl) / 1000).toFixed(1)}k` : `${positive ? "+" : "-"}${Math.round(Math.abs(c.pnl))}`}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="rounded-[16px] p-4" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-[12.5px] font-semibold">{selectedLabel}</span>
+          <span className={`text-[13px] font-bold n ${selectedCell.pnl >= 0 ? "text-gain" : "text-loss"}`}>
+            {selectedCell.trades.length > 0 ? `${selectedCell.pnl >= 0 ? "+" : ""}${fmt(selectedCell.pnl)}` : "—"}
+          </span>
+        </div>
+        {selectedCell.trades.length === 0 ? (
+          <p className="text-[11.5px] text-muted py-3 text-center">No trades closed this day.</p>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {selectedCell.trades.map((p) => (
+              <div key={p.id} className="flex items-center justify-between text-[12px]" style={{ borderTop: "1px solid var(--c-line)", paddingTop: 6 }}>
+                <div className="min-w-0">
+                  <div className="font-medium">{p.symbol} <span className="text-faint font-normal">· {p.strategy_label}</span></div>
+                  <div className="text-[10px] text-faint">{p.exit_reason ?? "—"}</div>
+                </div>
+                <span className={`n font-semibold shrink-0 ${(Number(p.realized_pnl) || 0) >= 0 ? "text-gain" : "text-loss"}`}>
+                  {fmt(p.realized_pnl)}
+                </span>
+              </div>
+            ))}
+          </div>
         )}
       </div>
     </div>
@@ -376,6 +495,8 @@ export default function OptionsAutoTrader() {
   const [killSwitchResult, setKillSwitchResult] = useState(null);
   const [dailyStats, setDailyStats] = useState(null);
   const [clearingLock, setClearingLock] = useState(false);
+  const [mobileTab, setMobileTab] = useState("portfolio"); // portfolio | calendar
+  const [hideAmounts, setHideAmounts] = useState(false);
   const timerRef = useRef(null);
 
   const load = useCallback(() => {
@@ -465,7 +586,7 @@ export default function OptionsAutoTrader() {
   ].slice(0, 30);
 
   return (
-    <div className="p-4 max-w-[1400px] mx-auto">
+    <div className="p-4 pb-20 sm:pb-4 max-w-[1400px] mx-auto">
       <div className="flex items-center justify-between mb-1 flex-wrap gap-3">
         <div className="flex items-center gap-2">
           <ChartLineUp size={16} weight="bold" className="text-accent" />
@@ -595,8 +716,10 @@ export default function OptionsAutoTrader() {
 
           {positions.active.length === 0 && positions.closed.length === 0 ? (
             <p className="text-[12.5px] text-muted py-6 text-center">No paper positions yet — the 30-min scan opens one automatically once a candidate clears the quality threshold.</p>
+          ) : mobileTab === "calendar" ? (
+            <PnLCalendar positions={positions} hideAmounts={hideAmounts} />
           ) : (
-            <MobilePortfolio positions={positions} />
+            <MobilePortfolio positions={positions} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} />
           )}
 
           <h2 className="hidden sm:block text-[13px] font-bold mb-2">Paper Positions {positions.active.length > 0 ? <span className="font-normal text-muted">({positions.active.length} open)</span> : null}</h2>
@@ -650,6 +773,19 @@ export default function OptionsAutoTrader() {
           )}
         </>
       )}
+
+      <div className="sm:hidden fixed bottom-0 inset-x-0 z-40 flex" style={{ borderTop: "1px solid var(--c-line)", background: "var(--c-surface)", paddingBottom: "env(safe-area-inset-bottom, 0px)" }}>
+        <button onClick={() => setMobileTab("portfolio")} className="flex-1 flex flex-col items-center gap-0.5 py-2"
+          style={{ color: mobileTab === "portfolio" ? "var(--c-accent)" : "var(--c-muted)" }}>
+          <Wallet size={18} weight={mobileTab === "portfolio" ? "fill" : "regular"} />
+          <span className="text-[10px] font-medium">Portfolio</span>
+        </button>
+        <button onClick={() => setMobileTab("calendar")} className="flex-1 flex flex-col items-center gap-0.5 py-2"
+          style={{ color: mobileTab === "calendar" ? "var(--c-accent)" : "var(--c-muted)" }}>
+          <CalendarBlank size={18} weight={mobileTab === "calendar" ? "fill" : "regular"} />
+          <span className="text-[10px] font-medium">Calendar</span>
+        </button>
+      </div>
     </div>
   );
 }

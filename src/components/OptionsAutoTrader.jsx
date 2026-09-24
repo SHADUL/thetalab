@@ -450,8 +450,8 @@ function PnLCalendar({ positions, hideAmounts }) {
   const selectedLabel = new Date(selected + "T00:00:00").toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "short", year: "numeric" });
 
   return (
-    <div className="sm:hidden">
-      <div className="rounded-[16px] p-4 mb-3" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+    <div className="sm:flex sm:gap-4 sm:items-start">
+      <div className="sm:w-[360px] sm:shrink-0 rounded-[16px] p-4 mb-3 sm:mb-0" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
         <div className="flex items-center gap-1 mb-3">
           <button onClick={() => shiftMonth(-1)} className="topstep !px-2" aria-label="Previous month"><CaretLeft size={12} weight="bold" /></button>
           <span className="text-[13px] font-semibold flex-1 text-center n">{monthTitle}</span>
@@ -491,7 +491,7 @@ function PnLCalendar({ positions, hideAmounts }) {
         </div>
       </div>
 
-      <div className="rounded-[16px] p-4" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+      <div className="flex-1 rounded-[16px] p-4" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
         <div className="flex items-center justify-between mb-2">
           <span className="text-[12.5px] font-semibold">{selectedLabel}</span>
           <span className={`text-[13px] font-bold n ${selectedCell.pnl >= 0 ? "text-gain" : "text-loss"}`}>
@@ -621,6 +621,7 @@ export default function OptionsAutoTrader() {
   const [realFunds, setRealFunds] = useState(null);
   const [showAllModes, setShowAllModes] = useState(false);
   const [indices, setIndices] = useState([]);
+  const [showDesktopCalendar, setShowDesktopCalendar] = useState(false);
   const timerRef = useRef(null);
 
   const load = useCallback(() => {
@@ -927,14 +928,25 @@ export default function OptionsAutoTrader() {
                 : "No paper positions yet — the 30-min scan opens one automatically once a candidate clears the quality threshold."}
             </p>
           ) : mobileTab === "activity" ? null : mobileTab === "calendar" ? (
-            <PnLCalendar positions={visiblePositions} hideAmounts={hideAmounts} />
+            <div className="sm:hidden"><PnLCalendar positions={visiblePositions} hideAmounts={hideAmounts} /></div>
           ) : (
             <MobilePortfolio positions={visiblePositions} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} />
           )}
 
-          <h2 className="hidden sm:block text-[13px] font-bold mb-2">
-            {settings?.execution_mode === "AUTO" ? "Live Positions" : "Paper Positions"} {visiblePositions.active.length > 0 ? <span className="font-normal text-muted">({visiblePositions.active.length} open)</span> : null}
-          </h2>
+          <div className="hidden sm:flex items-center gap-3 mb-2">
+            <h2 className="text-[13px] font-bold">
+              {settings?.execution_mode === "AUTO" ? "Live Positions" : "Paper Positions"} {visiblePositions.active.length > 0 ? <span className="font-normal text-muted">({visiblePositions.active.length} open)</span> : null}
+            </h2>
+            <button onClick={() => setShowDesktopCalendar((v) => !v)} className="topstep text-[11px] ml-auto">
+              <CalendarBlank size={12} weight="bold" />
+              {showDesktopCalendar ? "Hide Calendar" : "Show Calendar"}
+            </button>
+          </div>
+          {showDesktopCalendar && (
+            <div className="hidden sm:block mb-4">
+              <PnLCalendar positions={visiblePositions} hideAmounts={hideAmounts} />
+            </div>
+          )}
           {visiblePositions.active.length === 0 && visiblePositions.closed.length === 0 ? null : (
             <div className="hidden sm:block overflow-x-auto rounded-[14px]" style={{ border: "1px solid var(--c-line)" }}>
               <table className="w-full text-[12px]">

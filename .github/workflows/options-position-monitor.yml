@@ -5,8 +5,12 @@ name: Options Auto-Trader Position Monitor
 # 5 minutes) — the same unreliability documented for VWAP scalper's cron
 # (see vwap-scalper-manual-test.yml and the cron-job.org setup notes). The
 # real recurring trigger is now an external cron-job.org pinger hitting
-# resource=position-monitor every 5 minutes during market hours; this
-# workflow is manual-dispatch only, kept for on-demand diagnosis.
+# resource=position-monitor every 1 minute during market hours (tightened
+# from 5 minutes to bound stop-loss/target slippage between checks — this
+# endpoint doesn't place a real broker stop order, it only polls and
+# closes at whatever the live re-quote is when a check catches the
+# condition); this workflow is manual-dispatch only, kept for on-demand
+# diagnosis.
 on:
   workflow_dispatch: {}
 

@@ -16,6 +16,13 @@ create table vwap_scalper_settings (
   max_daily_loss_pct numeric not null default 3,
   max_open_positions integer not null default 3,
   max_consecutive_losses integer not null default 3,
+  -- Two sizing philosophies, not two variants of one: RISK_BASED derives
+  -- quantity from the stop distance (max_risk_per_trade_pct of equity);
+  -- FIXED_CAPITAL allocates a fixed rupee amount per trade regardless of
+  -- stop distance (capital_per_trade / entryPrice) — see
+  -- positionSizing.ts's computeFixedCapitalPositionSize.
+  sizing_mode text not null default 'RISK_BASED',  -- RISK_BASED | FIXED_CAPITAL
+  capital_per_trade numeric not null default 20000,
 
   -- Strategy parameters — see src/vwap-scalper/types.ts's VwapScalperParams,
   -- which these map onto directly.

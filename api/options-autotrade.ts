@@ -86,7 +86,7 @@ import { evaluateExit, type ShortStrike } from '../src/quant/execution/exitEngin
 import { checkDailyRiskLock } from '../src/quant/execution/dailyRiskLock.ts';
 import { computeVwapBands } from '../src/vwap-scalper/vwapBands.ts';
 import { detectVwapScalperSignals } from '../src/vwap-scalper/signals.ts';
-import { computeVwapScalperPositionSize } from '../src/vwap-scalper/positionSizing.ts';
+import { computeVwapScalperPositionSize, computeFixedCapitalPositionSize } from '../src/vwap-scalper/positionSizing.ts';
 import { NIFTY_50_UNIVERSE } from '../src/vwap-scalper/nifty50Universe.ts';
 import { computeEffectiveTarget } from '../src/vwap-scalper/targetAndStop.ts';
 import type { Bar as VwapBar, VwapScalperParams } from '../src/vwap-scalper/types.ts';
@@ -968,8 +968,8 @@ async function handleClearDailyLock(req: any, res: any, supabase: SupabaseClient
 
 const VWAP_SCALPER_EDITABLE_NUMERIC_FIELDS = [
   'account_equity', 'max_risk_per_trade_pct', 'max_daily_loss_pct', 'max_open_positions', 'max_consecutive_losses',
-  'stdev_multiplier', 'min_reward_risk_multiple', 'slope_filter_lookback_bars', 'slope_filter_threshold_sigma', 'trend_filter_ema_length',
-  'stop_loss_percent', 'stop_loss_sigma_buffer',
+  'capital_per_trade', 'stdev_multiplier', 'min_reward_risk_multiple', 'slope_filter_lookback_bars', 'slope_filter_threshold_sigma',
+  'trend_filter_ema_length', 'stop_loss_percent', 'stop_loss_sigma_buffer',
 ];
 const VWAP_SCALPER_EDITABLE_BOOL_FIELDS = ['slope_filter_enabled', 'trend_filter_enabled', 'stop_loss_enabled'];
 
@@ -994,10 +994,15 @@ async function handleVwapScalperSettings(req: any, res: any, supabase: SupabaseC
       res.status(400).json({ error: 'bad_request', message: 'stop_loss_mode must be PERCENTAGE or BEYOND_3SIGMA.' });
       return;
     }
+    if (body.sizing_mode !== undefined && !['RISK_BASED', 'FIXED_CAPITAL'].includes(body.sizing_mode)) {
+      res.status(400).json({ error: 'bad_request', message: 'sizing_mode must be RISK_BASED or FIXED_CAPITAL.' });
+      return;
+    }
     const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (body.execution_mode !== undefined) update.execution_mode = body.execution_mode;
     if (body.entry_mode !== undefined) update.entry_mode = body.entry_mode;
     if (body.stop_loss_mode !== undefined) update.stop_loss_mode = body.stop_loss_mode;
+    if (body.sizing_mode !== undefined) update.sizing_mode = body.sizing_mode;
     for (const key of VWAP_SCALPER_EDITABLE_NUMERIC_FIELDS) {
       if (body[key] !== undefined) {
         const n = Number(body[key]);
@@ -1219,17 +1224,27 @@ async function handleVwapScalperScan(req: any, res: any, supabase: SupabaseClien
     if (!freshSignal) continue;
     signalsFired++;
 
-    if (freshSignal.stopPrice === null) {
+    const sizingMode = settings.sizing_mode === 'FIXED_CAPITAL' ? 'FIXED_CAPITAL' : 'RISK_BASED';
+
+    // RISK_BASED needs a real stop to size against (no stop = no risk-per-
+    // unit to measure); FIXED_CAPITAL doesn't (quantity = capital / price
+    // regardless of stop distance) — see positionSizing.ts's own header.
+    if (sizingMode === 'RISK_BASED' && freshSignal.stopPrice === null) {
       rejectedNoStop.push(symbol);
       continue;
     }
-    const sizing = computeVwapScalperPositionSize({
-      accountEquity: Number(settings.account_equity) || 0,
-      maxRiskPerTradePct: Number(settings.max_risk_per_trade_pct) || 0,
-      entryPrice: freshSignal.entryPrice, stopPrice: freshSignal.stopPrice,
-    });
+    const sizing = sizingMode === 'FIXED_CAPITAL'
+      ? computeFixedCapitalPositionSize({
+          capitalPerTrade: Number(settings.capital_per_trade) || 0,
+          entryPrice: freshSignal.entryPrice, stopPrice: freshSignal.stopPrice,
+        })
+      : computeVwapScalperPositionSize({
+          accountEquity: Number(settings.account_equity) || 0,
+          maxRiskPerTradePct: Number(settings.max_risk_per_trade_pct) || 0,
+          entryPrice: freshSignal.entryPrice, stopPrice: freshSignal.stopPrice!,
+        });
     if (!sizing) {
-      await log('info', `${symbol}: ${freshSignal.direction} signal fired but could not be sized (budget too small for even 1 share).`);
+      await log('info', `${symbol}: ${freshSignal.direction} signal fired but could not be sized (${sizingMode === 'FIXED_CAPITAL' ? 'capital_per_trade too small for even 1 share' : 'budget too small for even 1 share'}).`);
       continue;
     }
 
@@ -1241,7 +1256,8 @@ async function handleVwapScalperScan(req: any, res: any, supabase: SupabaseClien
     });
     if (insertErr) { await log('error', `Failed to open PAPER position for ${symbol}`, { message: insertErr.message }); continue; }
 
-    await log('info', `Opened PAPER position: ${symbol} ${freshSignal.direction} x${sizing.quantity} @ ₹${freshSignal.entryPrice.toFixed(2)} (stop ₹${freshSignal.stopPrice.toFixed(2)}) — ${freshSignal.reason}`);
+    const stopLabel = freshSignal.stopPrice !== null ? `stop ₹${freshSignal.stopPrice.toFixed(2)}` : 'no stop';
+    await log('info', `Opened PAPER position: ${symbol} ${freshSignal.direction} x${sizing.quantity} @ ₹${freshSignal.entryPrice.toFixed(2)} (${stopLabel}) — ${freshSignal.reason}`);
     opened.push({ symbol, direction: freshSignal.direction, quantity: sizing.quantity });
 
     await supabase.from('vwap_scalper_daily_stats').upsert({ trade_date: todayIST, trades_taken: (Number(dailyRow?.trades_taken) || 0) + opened.length });

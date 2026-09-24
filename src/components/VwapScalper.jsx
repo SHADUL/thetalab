@@ -14,6 +14,7 @@ const NUMERIC_GROUPS = [
       { key: "max_risk_per_trade_pct", label: "Max risk / trade %", step: 0.1, min: 0 },
       { key: "max_open_positions", label: "Max open positions", step: 1, min: 1 },
       { key: "max_consecutive_losses", label: "Max consecutive losses", step: 1, min: 1 },
+      { key: "capital_per_trade", label: "Capital / trade (₹, FIXED_CAPITAL)", step: 1000, min: 0 },
     ],
   },
   {
@@ -31,7 +32,8 @@ const NUMERIC_GROUPS = [
 
 const DEFAULT_DRAFT = {
   account_equity: 0, max_risk_per_trade_pct: 1, max_daily_loss_pct: 3, max_open_positions: 3,
-  max_consecutive_losses: 3, stdev_multiplier: 1.0, min_reward_risk_multiple: 2, entry_mode: "REJECTION",
+  max_consecutive_losses: 3, sizing_mode: "RISK_BASED", capital_per_trade: 20000,
+  stdev_multiplier: 1.0, min_reward_risk_multiple: 2, entry_mode: "REJECTION",
   slope_filter_enabled: false, slope_filter_lookback_bars: 10, slope_filter_threshold_sigma: 1.0,
   trend_filter_enabled: false, trend_filter_ema_length: 200,
   stop_loss_enabled: false, stop_loss_mode: "BEYOND_3SIGMA", stop_loss_percent: 0.5, stop_loss_sigma_buffer: 0.5,
@@ -137,7 +139,7 @@ export default function VwapScalper() {
 
   const saveSettings = () => {
     setSaving(true);
-    const body = { entry_mode: draft.entry_mode, stop_loss_mode: draft.stop_loss_mode };
+    const body = { entry_mode: draft.entry_mode, stop_loss_mode: draft.stop_loss_mode, sizing_mode: draft.sizing_mode };
     for (const group of NUMERIC_GROUPS) {
       for (const f of group.fields) {
         const n = Number(draft[f.key]);
@@ -285,6 +287,18 @@ export default function VwapScalper() {
                   </div>
                 </div>
               ))}
+
+              <div className="p-2.5 rounded-[10px]" style={{ background: "var(--c-surface-2)" }}>
+                <div className="text-[10.5px] font-semibold text-muted mb-1.5">Sizing Mode</div>
+                <select
+                  value={draft.sizing_mode} onChange={(e) => setField("sizing_mode", e.target.value)}
+                  className="w-full px-1.5 py-1 rounded-[6px] text-[11px]"
+                  style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}
+                >
+                  <option value="RISK_BASED">Risk-based (% of equity per stop distance)</option>
+                  <option value="FIXED_CAPITAL">Fixed capital (₹ per trade, needs no stop)</option>
+                </select>
+              </div>
 
               <div className="p-2.5 rounded-[10px]" style={{ background: "var(--c-surface-2)" }}>
                 <div className="text-[10.5px] font-semibold text-muted mb-1.5">Entry Mode</div>

@@ -41,3 +41,51 @@ export function computeVwapScalperPositionSize(params: PositionSizingParams): Po
     budgetAtRisk,
   };
 }
+
+/**
+ * An alternative sizing philosophy: allocate a FIXED amount of capital
+ * per trade (e.g. "₹20,000 per position, so I can run 5 at once out of
+ * ₹1,00,000") rather than sizing off the stop distance. Quantity is
+ * purely capital / entryPrice — genuinely different from risk-based
+ * sizing, not a variant of it: two trades of the same capital allocation
+ * can carry very different rupee risk if their stop distances differ.
+ *
+ * Unlike computeVwapScalperPositionSize, this does NOT require a stop to
+ * size — capital allocation doesn't need one to compute quantity. When a
+ * stop IS supplied, the resulting risk figures are still reported (for
+ * visibility/logging), just never used to derive the quantity itself.
+ */
+export interface FixedCapitalSizingParams {
+  capitalPerTrade: number;
+  entryPrice: number;
+  /** Optional — reported for transparency only, never used to size. */
+  stopPrice?: number | null;
+  lotSize?: number;
+}
+
+export interface FixedCapitalSizingResult {
+  quantity: number;
+  capitalDeployed: number;
+  /** null when no stop was supplied — sizing itself never needed one. */
+  riskPerShare: number | null;
+  totalRiskAtStop: number | null;
+}
+
+export function computeFixedCapitalPositionSize(params: FixedCapitalSizingParams): FixedCapitalSizingResult | null {
+  const { capitalPerTrade, entryPrice } = params;
+  const lotSize = params.lotSize ?? 1;
+  if (!(capitalPerTrade > 0) || !(entryPrice > 0) || !(lotSize > 0)) return null;
+
+  const rawQuantity = Math.floor(capitalPerTrade / entryPrice / lotSize) * lotSize;
+  if (rawQuantity <= 0) return null;
+
+  const stopPrice = params.stopPrice ?? null;
+  const riskPerShare = stopPrice !== null ? Math.abs(entryPrice - stopPrice) : null;
+
+  return {
+    quantity: rawQuantity,
+    capitalDeployed: rawQuantity * entryPrice,
+    riskPerShare,
+    totalRiskAtStop: riskPerShare !== null ? riskPerShare * rawQuantity : null,
+  };
+}

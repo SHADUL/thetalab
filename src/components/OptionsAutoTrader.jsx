@@ -73,6 +73,20 @@ function agoLabel(iso) {
   return `${Math.round(mins / 60)}h ago`;
 }
 
+// entry_date/exit_date on the row are DATE-only (no time-of-day); created_at
+// is stamped once, at insert, and updated_at on options_autotrade_positions
+// is ONLY ever touched at close (the mark-to-market write in position-monitor
+// updates unrealized_pnl_updated_at, not updated_at) — so these two
+// timestamptz columns double as genuine entry/exit moments without needing
+// new columns.
+function formatDateTime(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  const date = d.toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short" });
+  const time = d.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit" });
+  return `${date} ${time}`;
+}
+
 function PositionRow({ p }) {
   const [expanded, setExpanded] = useState(false);
   const legs = p.options_autotrade_legs ?? [];
@@ -86,6 +100,8 @@ function PositionRow({ p }) {
           <div className="text-[10.5px] text-faint">{p.strategy_label}</div>
         </td>
         <td className="py-2 pr-2 text-[11px]">{p.expiry}</td>
+        <td className="py-2 pr-2 text-[11px] n">{formatDateTime(p.created_at) ?? "—"}</td>
+        <td className="py-2 pr-2 text-[11px] n">{p.status !== "ACTIVE" ? (formatDateTime(p.updated_at) ?? "—") : "—"}</td>
         <td className="py-2 pr-2 text-right n">{p.lots}</td>
         <td className="py-2 pr-2 text-right n">{inr(p.net_credit)}</td>
         <td className="py-2 pr-2 text-right n text-gain">{inr(p.max_profit)}</td>
@@ -109,7 +125,7 @@ function PositionRow({ p }) {
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={11} className="px-3 pb-3" style={{ background: "var(--c-surface-2)" }}>
+          <td colSpan={13} className="px-3 pb-3" style={{ background: "var(--c-surface-2)" }}>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
               <div>
                 <div className="text-[10.5px] font-semibold text-muted mb-1">Legs</div>
@@ -390,6 +406,8 @@ export default function OptionsAutoTrader() {
                   <tr className="text-muted text-left" style={{ background: "var(--c-surface-2)" }}>
                     <th className="font-medium py-2 pl-3 pr-2">Symbol / Strategy</th>
                     <th className="font-medium py-2 pr-2">Expiry</th>
+                    <th className="font-medium py-2 pr-2">Entry</th>
+                    <th className="font-medium py-2 pr-2">Exit</th>
                     <th className="font-medium py-2 pr-2 text-right">Lots</th>
                     <th className="font-medium py-2 pr-2 text-right">Net Credit</th>
                     <th className="font-medium py-2 pr-2 text-right">Max Profit</th>

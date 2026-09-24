@@ -142,6 +142,27 @@ async function kiteFetch(path: string, opts: { method?: string; token: string; a
 }
 
 /**
+ * Mid-price of the live bid/ask depth, falling back to last_price only
+ * when depth is unavailable — matches enrich.ts's own markPricePreference
+ * (['mid', 'settle', 'last']), the same convention entry pricing already
+ * uses (creditSpread.ts/ironCondor.ts price every leg off markPrice).
+ * position-monitor used to re-quote off last_price alone, which on a
+ * thin/POOR-liquidity leg can print far to one side of a wide bid/ask
+ * spread — comparing that against a mid-based entry price manufactures
+ * an instant "profit" or "loss" purely from which side the last trade
+ * happened to print on, not from any real price movement. Keeping both
+ * ends of the same position on the same pricing convention removes that
+ * artifact.
+ */
+function midOrLastPrice(quote: any): number | null {
+  const bid = Number(quote?.depth?.buy?.[0]?.price);
+  const ask = Number(quote?.depth?.sell?.[0]?.price);
+  if (bid > 0 && ask > 0) return (bid + ask) / 2;
+  const last = Number(quote?.last_price);
+  return last > 0 ? last : null;
+}
+
+/**
  * Order placement/modification on Kite Connect uses
  * application/x-www-form-urlencoded bodies, NOT JSON — unlike every other
  * endpoint this file talks to (margins/basket, quotes, historical data all
@@ -977,7 +998,7 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
     let currentCostToClose = 0;
     let missingQuote = false;
     for (const l of legs) {
-      const price = quoteMap.get(`${exchange}:${l.tradingsymbol}`)?.last_price;
+      const price = midOrLastPrice(quoteMap.get(`${exchange}:${l.tradingsymbol}`));
       if (price == null) { missingQuote = true; continue; }
       currentCostToClose += (l.side === 'SELL' ? 1 : -1) * price * l.quantity;
     }

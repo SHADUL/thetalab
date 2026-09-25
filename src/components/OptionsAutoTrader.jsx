@@ -184,6 +184,9 @@ function MobilePositionRow({ p, hideAmounts, isFirst }) {
             {p.execution_mode === "AUTO" && (
               <span className="text-[8.5px] font-bold px-1 rounded-[3px]" style={{ background: "var(--c-loss-soft)", color: "var(--c-loss)" }}>LIVE</span>
             )}
+            {p.execution_mode === "SHADOW" && (
+              <span className="text-[8.5px] font-bold px-1 rounded-[3px]" style={{ background: "var(--c-accent-soft)", color: "var(--c-accent)" }}>SHADOW</span>
+            )}
             {expanded ? <CaretUp size={11} className="text-faint shrink-0" /> : <CaretDown size={11} className="text-faint shrink-0" />}
           </div>
           <div className="text-[11px] text-faint truncate">{p.strategy_label} · {p.lots} lot{p.lots === 1 ? "" : "s"}</div>
@@ -306,6 +309,7 @@ function DesktopHoldingsCard({ positions, settings, hideAmounts, setHideAmounts 
   const todaysPnl = totalUnrealized + totalRealizedToday;
   const fmt = (n) => (hideAmounts ? "••••••" : inr(n));
   const isLive = settings?.execution_mode === "AUTO";
+  const isShadow = settings?.execution_mode === "SHADOW";
 
   // Glassmorphism reads best over the aurora hero right above it, and
   // still holds up as a refined "frosted" card once the hero has scrolled
@@ -322,7 +326,7 @@ function DesktopHoldingsCard({ positions, settings, hideAmounts, setHideAmounts 
       <div className="p-6 rounded-[20px]" style={glassStyle}>
       <div className="flex items-center gap-2 mb-3">
         <span className="text-[11px] font-semibold text-muted tracking-wide">
-          {isLive ? "LIVE" : "PAPER"} POSITIONS ({positions.active.length})
+          {isLive ? "LIVE" : isShadow ? "SHADOW" : "PAPER"} POSITIONS ({positions.active.length})
         </span>
         <span className="text-[10.5px] text-faint">/ {settings?.max_positions ?? "—"} max</span>
         <motion.button whileHover={{ scale: 1.12 }} whileTap={{ scale: 0.9 }} onClick={() => setHideAmounts((v) => !v)} className="ml-auto text-muted" aria-label="Toggle amount visibility">
@@ -591,8 +595,8 @@ function PositionRow({ p }) {
           </button>
           <div className="text-[10.5px] text-faint">{p.strategy_label}</div>
         </td>
-        <td className="py-2 pr-2 text-[10.5px] font-semibold" style={{ color: p.execution_mode === "AUTO" ? "var(--c-loss)" : "var(--c-faint)" }}>
-          {p.execution_mode === "AUTO" ? "LIVE" : "PAPER"}
+        <td className="py-2 pr-2 text-[10.5px] font-semibold" style={{ color: p.execution_mode === "AUTO" ? "var(--c-loss)" : p.execution_mode === "SHADOW" ? "var(--c-accent)" : "var(--c-faint)" }}>
+          {p.execution_mode === "AUTO" ? "LIVE" : p.execution_mode === "SHADOW" ? "SHADOW" : "PAPER"}
         </td>
         <td className="py-2 pr-2 text-[11px]">{p.expiry}</td>
         <td className="py-2 pr-2 text-[11px] n">{formatDateTime(p.created_at) ?? "—"}</td>
@@ -840,6 +844,8 @@ export default function OptionsAutoTrader() {
             style={
               settings?.execution_mode === "AUTO"
                 ? { background: "var(--c-loss-soft)", color: "var(--c-loss)" }
+                : settings?.execution_mode === "SHADOW"
+                ? { background: "var(--c-accent-soft, #6366f122)", color: "var(--c-accent, #6366f1)" }
                 : settings?.execution_mode === "PAPER"
                 ? { background: "var(--c-gain-soft, #16a34a22)", color: "var(--c-gain)" }
                 : { background: "var(--c-surface-2)", color: "var(--c-faint)" }
@@ -871,7 +877,7 @@ export default function OptionsAutoTrader() {
           Defined-risk options selling (Iron Condor / Bull Put Spread / Bear Call Spread), decided from a live chain: skew-based
           strategy selection, strike optimization ranked by expected value per unit of risk, expiry selection, and a 0-100 trade
           quality score gate. Runs on its own 30-minute cron against live Kite data — this page only displays the result, it
-          doesn't trigger a scan. PAPER mode only: no real order is ever placed.
+          doesn't trigger a scan. PAPER and SHADOW modes: no real order is ever placed.
         </p>
       )}
 
@@ -898,12 +904,20 @@ export default function OptionsAutoTrader() {
 
       <div className="rounded-[12px] mb-4" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
         <button onClick={() => setSettingsOpen((v) => !v)} className="w-full flex items-center gap-3 sm:flex-wrap p-3 text-left">
-          <Wallet size={15} weight="bold" className={settings?.execution_mode === "AUTO" ? "text-loss shrink-0" : "text-muted shrink-0"} />
-          <span className="text-[11.5px] font-semibold">{settings?.execution_mode === "AUTO" ? "Live Execution" : "Paper Execution"}</span>
+          <Wallet
+            size={15} weight="bold"
+            className={settings?.execution_mode === "AUTO" ? "text-loss shrink-0" : settings?.execution_mode === "SHADOW" ? "shrink-0" : "text-muted shrink-0"}
+            style={settings?.execution_mode === "SHADOW" ? { color: "var(--c-accent)" } : undefined}
+          />
+          <span className="text-[11.5px] font-semibold">
+            {settings?.execution_mode === "AUTO" ? "Live Execution" : settings?.execution_mode === "SHADOW" ? "Shadow Execution" : "Paper Execution"}
+          </span>
           <span className="hidden sm:inline text-[10.5px] text-faint">Reserved fund {inr(settings?.reserved_fund ?? 0)}</span>
           <span className="hidden sm:inline text-[10.5px] text-faint flex-1">
             {settings?.execution_mode === "AUTO"
               ? "REAL orders are placed on your Zerodha account the moment a candidate clears the quality gate."
+              : settings?.execution_mode === "SHADOW"
+              ? "Runs the full live decision pipeline using live Kite market data and real bid/ask simulation, but places zero broker orders."
               : settings?.execution_mode === "PAPER" ? "Passing candidates auto-open paper positions on the 30-min scan." : "Scans still run and log a decision, but no paper positions are opened."}
           </span>
           <span className="flex-1 sm:hidden" />
@@ -916,11 +930,15 @@ export default function OptionsAutoTrader() {
             <div className="flex items-center gap-3 flex-wrap py-2.5">
               <span className="text-[11px] font-semibold text-muted">Execution Mode</span>
               <div className="seg-track">
-                {["OFF", "PAPER", "AUTO"].map((mode) => (
+                {["OFF", "PAPER", "SHADOW", "AUTO"].map((mode) => (
                   <motion.button key={mode} whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
                     role="tab" aria-selected={settings?.execution_mode === mode} data-on={settings?.execution_mode === mode}
                     onClick={() => setExecutionMode(mode)} disabled={saving} className="seg"
-                    style={mode === "AUTO" && settings?.execution_mode === "AUTO" ? { color: "var(--c-loss)" } : undefined}>
+                    style={
+                      mode === "AUTO" && settings?.execution_mode === "AUTO" ? { color: "var(--c-loss)" }
+                      : mode === "SHADOW" && settings?.execution_mode === "SHADOW" ? { color: "var(--c-accent)" }
+                      : undefined
+                    }>
                     {mode}
                   </motion.button>
                 ))}
@@ -928,6 +946,10 @@ export default function OptionsAutoTrader() {
               {settings?.execution_mode === "AUTO" ? (
                 <span className="text-[10.5px] font-semibold px-2 py-1 rounded-[6px]" style={{ background: "var(--c-loss-soft)", color: "var(--c-loss)" }}>
                   REAL MONEY — real orders are placed on your Zerodha account
+                </span>
+              ) : settings?.execution_mode === "SHADOW" ? (
+                <span className="text-[10.5px] font-semibold px-2 py-1 rounded-[6px]" style={{ background: "var(--c-accent-soft)", color: "var(--c-accent)" }}>
+                  SHADOW — live decisions, simulated fills, zero broker orders
                 </span>
               ) : (
                 <span className="text-[10.5px] text-faint px-2 py-1 rounded-[6px]" style={{ background: "var(--c-surface-2)" }}>
@@ -995,6 +1017,8 @@ export default function OptionsAutoTrader() {
             <p className="text-[12.5px] text-muted py-6 text-center">
               {settings?.execution_mode === "AUTO" && !showAllModes
                 ? "No AUTO (real) positions yet — the 30-min scan opens one automatically once a candidate clears the quality threshold."
+                : settings?.execution_mode === "SHADOW" && !showAllModes
+                ? "No SHADOW positions yet — the 30-min scan opens one automatically once a candidate clears the quality threshold."
                 : "No paper positions yet — the 30-min scan opens one automatically once a candidate clears the quality threshold."}
             </p>
           ) : (
@@ -1013,7 +1037,7 @@ export default function OptionsAutoTrader() {
 
           <div className="hidden sm:flex items-center gap-3 mb-2">
             <h2 className="text-[13px] font-bold">
-              {settings?.execution_mode === "AUTO" ? "Live Positions" : "Paper Positions"} {visiblePositions.active.length > 0 ? <span className="font-normal text-muted">({visiblePositions.active.length} open)</span> : null}
+              {settings?.execution_mode === "AUTO" ? "Live Positions" : settings?.execution_mode === "SHADOW" ? "Shadow Positions" : "Paper Positions"} {visiblePositions.active.length > 0 ? <span className="font-normal text-muted">({visiblePositions.active.length} open)</span> : null}
             </h2>
             <button onClick={() => setShowDesktopCalendar((v) => !v)} className="topstep text-[11px] ml-auto">
               <CalendarBlank size={12} weight="bold" />

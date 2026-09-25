@@ -2087,8 +2087,14 @@ async function handleSettings(req: any, res: any, supabase: SupabaseClient) {
     // aren't implemented, but AUTO now is. There is no separate
     // confirmation step here; the UI itself is responsible for a strong
     // real-money warning before ever sending execution_mode: 'AUTO'.
-    if (body.execution_mode !== undefined && !['OFF', 'PAPER', 'AUTO'].includes(body.execution_mode)) {
-      res.status(400).json({ error: 'bad_request', message: `execution_mode must be OFF, PAPER, or AUTO — ALERT_ONLY/SEMI_AUTO aren't implemented yet.` });
+    // SHADOW (forward-validation readiness phase) runs the exact live
+    // decision pipeline but places zero broker orders — see
+    // handlePaperScan's own isShadow branch. This validator previously
+    // only allowed OFF/PAPER/AUTO, which meant Save Settings silently
+    // rejected SHADOW even though the scan/monitor pipeline already
+    // supported it end-to-end.
+    if (body.execution_mode !== undefined && !['OFF', 'PAPER', 'SHADOW', 'AUTO'].includes(body.execution_mode)) {
+      res.status(400).json({ error: 'bad_request', message: `execution_mode must be OFF, PAPER, SHADOW, or AUTO — ALERT_ONLY/SEMI_AUTO aren't implemented yet.` });
       return;
     }
     const update: Record<string, unknown> = { updated_at: new Date().toISOString() };

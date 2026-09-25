@@ -21,7 +21,16 @@ export type ExecutionState =
   | 'FAILED'
   | 'RECONCILIATION_REQUIRED';
 
-export type LegFillStatus = 'PENDING' | 'SUBMITTED' | 'FILLED' | 'REJECTED' | 'CANCELLED';
+/**
+ * AMBIGUOUS: a submission timed out and a follow-up broker status query
+ * still couldn't determine whether the order actually filled — "network
+ * timeout != broker rejection" (QUANT_AUDIT.md Task 4). Never safe to
+ * retry (the original order may already be filled at the broker) and
+ * never safe to silently treat as unfilled either — see liveFill.ts's
+ * handling, which routes any AMBIGUOUS leg straight to
+ * RECONCILIATION_REQUIRED rather than through the normal retry/close path.
+ */
+export type LegFillStatus = 'PENDING' | 'SUBMITTED' | 'FILLED' | 'REJECTED' | 'CANCELLED' | 'AMBIGUOUS';
 
 export interface LegFillState {
   side: 'BUY' | 'SELL';

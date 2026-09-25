@@ -41,7 +41,7 @@ export function computeRealizedVolatility(closes: HistoricalClose[], lookbackDay
 }
 
 export interface ExpectedRealizedMoveResult {
-  /** Median absolute horizonDays-forward log return across all historical overlapping windows, converted to points at currentSpot. */
+  /** Median absolute horizonSessions-forward log return across all historical overlapping windows, converted to points at currentSpot. */
   points: number;
   pct: number;
   sampleCount: number;
@@ -52,16 +52,22 @@ export interface ExpectedRealizedMoveResult {
  * this long" — directly comparable (same horizon, same units) to the
  * option's own implied expected move, rather than needing an
  * annualize-then-de-annualize round trip through a fixed-window RV
- * number. Uses the MEDIAN of overlapping horizon-day windows, not the
+ * number. Uses the MEDIAN of overlapping horizon windows, not the
  * mean, so one historical outlier (a single crash day) doesn't dominate
  * the read the way a mean would.
+ *
+ * @param horizonSessions Trading SESSIONS, not calendar days — `closes` has
+ *   one row per real trading session (see distributionModel.ts's
+ *   buildEmpiricalReturns for the full rationale; the same fix applies
+ *   here). A caller holding a calendar DTE must convert first via
+ *   analytics/timeConventions.ts.
  */
-export function computeExpectedRealizedMove(closes: HistoricalClose[], horizonDays: number, currentSpot: number): ExpectedRealizedMoveResult | null {
-  if (!(horizonDays > 0) || !(currentSpot > 0)) return null;
+export function computeExpectedRealizedMove(closes: HistoricalClose[], horizonSessions: number, currentSpot: number): ExpectedRealizedMoveResult | null {
+  if (!(horizonSessions > 0) || !(currentSpot > 0)) return null;
   const sorted = closes.slice().sort((a, b) => a.date.localeCompare(b.date));
   const absReturns: number[] = [];
-  for (let i = 0; i + horizonDays < sorted.length; i++) {
-    const a = sorted[i].close, b = sorted[i + horizonDays].close;
+  for (let i = 0; i + horizonSessions < sorted.length; i++) {
+    const a = sorted[i].close, b = sorted[i + horizonSessions].close;
     if (a > 0 && b > 0) absReturns.push(Math.abs(Math.log(b / a)));
   }
   if (absReturns.length < MIN_RETURNS_FOR_RV) return null;

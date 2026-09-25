@@ -25,11 +25,27 @@ import type { PlannedLeg, PaperFillResult } from './paperFill.ts';
 
 export type TerminalOrderStatus = 'COMPLETE' | 'REJECTED' | 'CANCELLED' | 'TIMEOUT';
 
+/** Kite's own real order-book statuses this system can observe on a direct
+    status query — distinct from TerminalOrderStatus, which is awaitFill's
+    own OUTCOME classification (COMPLETE/REJECTED/CANCELLED/TIMEOUT). */
+export type BrokerOrderQueryStatus = 'COMPLETE' | 'REJECTED' | 'CANCELLED' | 'OPEN' | 'TRIGGER PENDING' | 'UNKNOWN';
+
 export interface LiveOrderPlacer {
   /** Places a single order at the given limit price. Returns Kite's order_id. Throws only on a request-level failure (network, bad params) — a broker-side rejection is a normal outcome, not an exception. */
   placeOrder(leg: PlannedLeg, exchange: string, transactionType: 'BUY' | 'SELL', limitPrice: number): Promise<string>;
   /** Polls until the order reaches a terminal state or timeoutMs elapses. averagePrice is populated only when status is COMPLETE. */
   awaitFill(orderId: string, timeoutMs: number): Promise<{ status: TerminalOrderStatus; averagePrice: number | null }>;
+  /**
+   * A single, direct order-status query — used ONLY to resolve a TIMEOUT
+   * from awaitFill (never called for its own sake elsewhere). A network
+   * timeout on our side is NOT the same fact as a broker-side rejection —
+   * the order may well have completed; this is what actually finds out,
+   * rather than assuming either way. If this query itself fails or returns
+   * an in-flight status (OPEN/TRIGGER PENDING), the leg's true state is
+   * genuinely unknown and must not be retried or assumed — see this
+   * file's TIMEOUT handling in attemptPass().
+   */
+  getOrderStatus(orderId: string): Promise<{ status: BrokerOrderQueryStatus; averagePrice: number | null }>;
   /** A FRESH quote at execution time — never the stale quote the candidate was originally priced from. Null when the quote couldn't be fetched at all. */
   getQuote(tradingsymbol: string, exchange: string): Promise<{ bid: number; ask: number; lastPrice: number } | null>;
   /** Best-effort market order to flatten an already-filled leg during an unwind. Failures are caught by the caller, not thrown past it. */
@@ -72,9 +88,10 @@ async function attemptPass(
   maxPriceDeviationFraction: number,
   log: string[],
   fills: Map<string, { orderId: string; avgPrice: number }>,
-): Promise<LegFillState[]> {
+): Promise<{ legs: LegFillState[]; ambiguous: boolean }> {
   const results: LegFillState[] = [];
   let blocked = false;
+  let ambiguous = false;
 
   for (const leg of pending) {
     const key = legKey(leg);
@@ -114,6 +131,40 @@ async function attemptPass(
       fills.set(key, { orderId, avgPrice: outcome.averagePrice });
       log.push(`${leg.side} ${leg.tradingsymbol}: FILLED at ₹${outcome.averagePrice.toFixed(2)} (order ${orderId}).`);
       results.push({ side: leg.side, right: leg.right, strike: leg.strike, status: 'FILLED' });
+    } else if (outcome.status === 'TIMEOUT') {
+      // Our own poll timed out — that is a fact about OUR network/wait
+      // budget, not about what the broker actually did with the order.
+      // Query once, directly, before drawing any conclusion: retrying
+      // blindly here risks placing a SECOND real order for a leg that may
+      // already be filled at the broker.
+      log.push(`${leg.side} ${leg.tradingsymbol}: order ${orderId} timed out waiting for a fill — querying the broker directly before deciding anything.`);
+      let queried: { status: BrokerOrderQueryStatus; averagePrice: number | null } | null = null;
+      try {
+        queried = await orders.getOrderStatus(orderId);
+      } catch (err: any) {
+        log.push(`${leg.side} ${leg.tradingsymbol}: order-status query for ${orderId} itself FAILED (${err.message}) — true broker state is unknown.`);
+      }
+
+      if (queried?.status === 'COMPLETE' && queried.averagePrice != null) {
+        fills.set(key, { orderId, avgPrice: queried.averagePrice });
+        log.push(`${leg.side} ${leg.tradingsymbol}: broker confirms order ${orderId} actually FILLED at ₹${queried.averagePrice.toFixed(2)} despite the local timeout.`);
+        results.push({ side: leg.side, right: leg.right, strike: leg.strike, status: 'FILLED' });
+      } else if (queried?.status === 'REJECTED' || queried?.status === 'CANCELLED') {
+        log.push(`${leg.side} ${leg.tradingsymbol}: broker confirms order ${orderId} ended ${queried.status} — safe to treat as not filled.`);
+        results.push({ side: leg.side, right: leg.right, strike: leg.strike, status: queried.status === 'CANCELLED' ? 'CANCELLED' : 'REJECTED' });
+        blocked = true;
+      } else {
+        // OPEN / TRIGGER PENDING / UNKNOWN / the query itself failed — the
+        // order's true fate cannot be determined right now. This is
+        // NEVER retried and never assumed either way; the whole execution
+        // attempt escalates straight to RECONCILIATION_REQUIRED (see
+        // runLiveExecution) rather than continuing through the normal
+        // retry/close-filled-legs path.
+        log.push(`${leg.side} ${leg.tradingsymbol}: order ${orderId}'s true status is still ${queried?.status ?? 'unresolvable'} — this leg is AMBIGUOUS, not retried, not assumed.`);
+        results.push({ side: leg.side, right: leg.right, strike: leg.strike, status: 'AMBIGUOUS' });
+        blocked = true;
+        ambiguous = true;
+      }
     } else {
       log.push(`${leg.side} ${leg.tradingsymbol}: order ${orderId} ended ${outcome.status} — not filled.`);
       results.push({ side: leg.side, right: leg.right, strike: leg.strike, status: outcome.status === 'CANCELLED' ? 'CANCELLED' : 'REJECTED' });
@@ -121,7 +172,7 @@ async function attemptPass(
     }
   }
 
-  return results;
+  return { legs: results, ambiguous };
 }
 
 export async function runLiveExecution(
@@ -160,16 +211,37 @@ export async function runLiveExecution(
     // fire a short ahead of its still-pending hedge.
     const ordered = [...remaining.filter((l) => l.side === 'BUY'), ...remaining.filter((l) => l.side === 'SELL')];
 
-    const passResults = await attemptPass(ordered, orders, opts.exchange, fillTimeoutMs, maxPriceDeviationFraction, log, fills);
-    const passByKey = new Map(passResults.map((r) => [legKey(r), r]));
+    const passResult = await attemptPass(ordered, orders, opts.exchange, fillTimeoutMs, maxPriceDeviationFraction, log, fills);
+    const passByKey = new Map(passResult.legs.map((r) => [legKey(r), r]));
     legStates = legs.map((l) => {
       const key = legKey(l);
       if (filledKeys.has(key)) return legStates.find((s) => legKey(s) === key)!;
       return passByKey.get(key) ?? { side: l.side, right: l.right, strike: l.strike, status: 'PENDING' as const };
     });
-
-    const decision = decideLegFailureAction(legStates, attempts, maxRetries);
     attempts++;
+
+    // An AMBIGUOUS leg (network timeout, and the follow-up broker query
+    // couldn't resolve it either) NEVER goes through the normal retry/
+    // close-filled-legs decision below — "network timeout != broker
+    // rejection" means this system must not guess, retry, or unwind based
+    // on an assumption. Escalate immediately and stop touching this
+    // position entirely until a human/reconciliation pass resolves it.
+    if (passResult.ambiguous) {
+      log.push('SUBMITTING -> RECONCILIATION_REQUIRED: at least one leg\'s true broker status is unknown after a timeout — no further orders will be placed for this position. Manual verification against the broker is required.');
+      const legFills = legs.map((l) => {
+        const fill = fills.get(legKey(l));
+        const legState = legStates.find((s) => legKey(s) === legKey(l));
+        if (fill) return { ...l, fillPrice: fill.avgPrice, status: 'FILLED' as const, orderId: fill.orderId };
+        // AMBIGUOUS is preserved as-is (not masked as REJECTED) — this is
+        // exactly the case where the leg's real status is genuinely
+        // unknown, and the position record should say so plainly rather
+        // than implying a conclusion that was never actually reached.
+        return { ...l, status: legState?.status ?? 'REJECTED' };
+      });
+      return { state: 'RECONCILIATION_REQUIRED', legFills, protection: deriveProtectionState(legStates), log, attempts };
+    }
+
+    const decision = decideLegFailureAction(legStates, attempts - 1, maxRetries);
 
     if (decision.action === 'NONE_NEEDED') {
       const protection = deriveProtectionState(legStates);

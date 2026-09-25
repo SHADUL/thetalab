@@ -39,13 +39,26 @@ export interface BreachProbability {
   sampleCount: number | null;
 }
 
-/** Signed horizonDays-forward log returns from every overlapping historical window — the raw material for an empirical read. Unlike computeExpectedRealizedMove, this keeps sign and every observation, not just the median absolute value. */
-export function buildEmpiricalReturns(closes: HistoricalClose[], horizonDays: number): number[] | null {
-  if (!(horizonDays > 0)) return null;
+/**
+ * Signed horizonSessions-forward log returns from every overlapping
+ * historical window — the raw material for an empirical read. Unlike
+ * computeExpectedRealizedMove, this keeps sign and every observation, not
+ * just the median absolute value.
+ *
+ * @param horizonSessions Trading SESSIONS, not calendar days — this steps
+ *   `horizonSessions` ROWS forward in `closes`, and `closes` has one row
+ *   per real trading session (no row at all for a weekend/holiday). A
+ *   caller holding a calendar DTE must convert first (see
+ *   analytics/timeConventions.ts) — this was the exact bug
+ *   VOLATILITY_TIME_CONVENTION.md documents: passing a calendar-day count
+ *   straight through silently measured a longer real window than intended.
+ */
+export function buildEmpiricalReturns(closes: HistoricalClose[], horizonSessions: number): number[] | null {
+  if (!(horizonSessions > 0)) return null;
   const sorted = closes.slice().sort((a, b) => a.date.localeCompare(b.date));
   const returns: number[] = [];
-  for (let i = 0; i + horizonDays < sorted.length; i++) {
-    const a = sorted[i].close, b = sorted[i + horizonDays].close;
+  for (let i = 0; i + horizonSessions < sorted.length; i++) {
+    const a = sorted[i].close, b = sorted[i + horizonSessions].close;
     if (a > 0 && b > 0) returns.push(Math.log(b / a));
   }
   return returns.length >= MIN_RETURNS_FOR_RV ? returns : null;
@@ -66,16 +79,31 @@ export function empiricalBreachProbability(
   return { probability: breaches / returns.length, method: 'empirical', sampleCount: returns.length };
 }
 
-/** Lognormal approximation using REALIZED (not implied) volatility — a fallback/comparison point when there isn't enough history for an empirical read. */
+/**
+ * Lognormal approximation using REALIZED (not implied) volatility — a
+ * fallback/comparison point when there isn't enough history for an
+ * empirical read.
+ *
+ * @param horizonSessions Trading SESSIONS (not calendar days) — must match
+ *   realizedVolatility.ts's own sqrt(252) trading-time annualization
+ *   convention (VOLATILITY_TIME_CONVENTION.md, Option B). Callers holding
+ *   only a calendar DTE must convert first, e.g. via
+ *   approxTradingSessionsFromCalendarDays() — passing a raw calendar-day
+ *   count here mixes two different clocks in the same de-annualization and
+ *   was the exact historical bug this fix corrects.
+ */
 export function normalBreachProbability(
   realizedVol: RealizedVolatilityResult,
-  horizonDays: number,
+  horizonSessions: number,
   currentSpot: number,
   strike: number,
   side: 'upper' | 'lower',
 ): BreachProbability | null {
-  if (!(realizedVol.annualizedVol > 0) || !(horizonDays > 0) || !(currentSpot > 0) || !(strike > 0)) return null;
-  const sigmaHorizon = realizedVol.annualizedVol * Math.sqrt(horizonDays / 365);
+  if (!(realizedVol.annualizedVol > 0) || !(horizonSessions > 0) || !(currentSpot > 0) || !(strike > 0)) return null;
+  // 252, not 365: realizedVol.annualizedVol is itself sqrt(252)-annualized
+  // (trading-time) — de-annualizing it with a calendar-day divisor here
+  // would silently switch clocks mid-formula.
+  const sigmaHorizon = realizedVol.annualizedVol * Math.sqrt(horizonSessions / 252);
   if (!(sigmaHorizon > 0)) return null;
   const threshold = Math.log(strike / currentSpot);
   const z = threshold / sigmaHorizon;
@@ -105,22 +133,26 @@ export interface IndependentPopResult {
  * simplification also made by strikeOptimizer.ts's own two-outcome EV —
  * not double-counting tail overlap, since a single expiry cannot close
  * both far above AND far below).
+ *
+ * @param horizonSessions Trading SESSIONS, not calendar days — see
+ *   buildEmpiricalReturns's own doc for why this distinction is load-
+ *   bearing, not cosmetic.
  */
 export function computeIndependentPop(
   historicalCloses: HistoricalClose[],
   currentSpot: number,
-  horizonDays: number,
+  horizonSessions: number,
   shortStrikes: ShortStrike[],
 ): IndependentPopResult | null {
   if (shortStrikes.length === 0) return null;
-  const returns = buildEmpiricalReturns(historicalCloses, horizonDays);
+  const returns = buildEmpiricalReturns(historicalCloses, horizonSessions);
   const realizedVol = computeRealizedVolatility(historicalCloses);
 
   const empiricalBreaches = returns
     ? shortStrikes.map((s) => empiricalBreachProbability(returns, currentSpot, s.strike, s.side))
     : null;
   const normalBreaches = realizedVol
-    ? shortStrikes.map((s) => normalBreachProbability(realizedVol, horizonDays, currentSpot, s.strike, s.side))
+    ? shortStrikes.map((s) => normalBreachProbability(realizedVol, horizonSessions, currentSpot, s.strike, s.side))
     : null;
 
   const empiricalOk = empiricalBreaches?.every((b): b is BreachProbability => b !== null) ? empiricalBreaches : null;
@@ -153,20 +185,29 @@ export interface IndependentExpectedValue {
   pop: IndependentPopResult;
 }
 
-/** Mirrors strikeOptimizer.ts's own scoreExpectedValue formula shape exactly — the only change is WHERE the probability comes from. */
+/**
+ * Mirrors strikeOptimizer.ts's own scoreExpectedValue formula shape exactly
+ * — the only change is WHERE the probability comes from.
+ *
+ * @param horizonSessions Trading SESSIONS, not calendar days (see
+ *   computeIndependentPop). Callers holding a calendar DTE (e.g.
+ *   expirySelector.ts) must convert via
+ *   analytics/timeConventions.ts's approxTradingSessionsFromCalendarDays()
+ *   or countTradingSessions() before calling this.
+ */
 export function computeIndependentExpectedValue(
   legs: Array<{ side: 'BUY' | 'SELL'; right: 'CE' | 'PE'; strike: number }>,
   maxProfit: number,
   maxLoss: number,
   historicalCloses: HistoricalClose[],
   currentSpot: number,
-  horizonDays: number,
+  horizonSessions: number,
 ): IndependentExpectedValue | null {
   if (!(maxLoss > 0)) return null;
   const shortStrikes: ShortStrike[] = legs
     .filter((l) => l.side === 'SELL')
     .map((l) => ({ strike: l.strike, side: l.right === 'CE' ? 'upper' as const : 'lower' as const }));
-  const pop = computeIndependentPop(historicalCloses, currentSpot, horizonDays, shortStrikes);
+  const pop = computeIndependentPop(historicalCloses, currentSpot, horizonSessions, shortStrikes);
   if (!pop) return null;
   const expectedValue = pop.probability * maxProfit - (1 - pop.probability) * maxLoss;
   return { expectedValue, evPerUnitRisk: expectedValue / maxLoss, pop };

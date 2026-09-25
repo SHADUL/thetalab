@@ -150,7 +150,39 @@ export function buildIronCondor(
 
   const callWidth = longCallStrike - shortCall.quote.strike;
   const putWidth = shortPut.quote.strike - longPutStrike;
-  const maxLossPerUnit = Math.max(callWidth - callCredit, putWidth - putCredit);
+
+  // Structural sanity, checked BEFORE trusting either width for the max-loss
+  // formula below. Both wings must be strictly positive width (a wingWidth of
+  // 0 or less collapses or inverts a wing) and finite.
+  if (!(callWidth > 0) || !(putWidth > 0) || !Number.isFinite(callWidth) || !Number.isFinite(putWidth)) {
+    return { reason: `Non-positive or non-finite wing width (call=${callWidth}, put=${putWidth}).` };
+  }
+  // A conventional, non-overlapping condor requires
+  // longPut < shortPut < shortCall < longCall. shortPut < shortCall is
+  // already guaranteed above (puts are OTM below forward, calls OTM above
+  // it), so this is purely defensive against a future change to strike
+  // selection — but cheap to check explicitly rather than silently
+  // mis-pricing a malformed structure if that guarantee ever breaks.
+  if (!(longPutStrike < shortPut.quote.strike) || !(shortPut.quote.strike < shortCall.quote.strike) ||
+      !(shortCall.quote.strike < longCallStrike)) {
+    return {
+      reason: `Malformed strike ordering — expected longPut < shortPut < shortCall < longCall, got ` +
+        `${longPutStrike} < ${shortPut.quote.strike} < ${shortCall.quote.strike} < ${longCallStrike}.`,
+    };
+  }
+  if (!Number.isFinite(netCredit)) {
+    return { reason: `Non-finite net credit (${netCredit}).` };
+  }
+
+  // For a conventional, non-overlapping condor, only ONE side can ever be
+  // breached at expiry — the other spread always expires worthless and its
+  // FULL credit is retained regardless of which side breaches. Max loss on a
+  // breach of side X is therefore (width_X - netCredit), not
+  // (width_X - credit_X): subtracting only that side's own credit ignores
+  // the credit banked on the untested side, and overstates max loss on both
+  // sides by the other side's credit. See QUANT_AUDIT.md ("Iron Condor
+  // max-loss formula") for the full derivation and a worked numeric example.
+  const maxLossPerUnit = Math.max(callWidth, putWidth) - netCredit;
 
   // Array order is SELL/BUY/SELL/BUY, which is fine for paper mode
   // (paperFill.ts fills every leg simultaneously, ignoring array order

@@ -34,6 +34,7 @@ import {
   type IvRvEdge,
 } from '../analytics/realizedVolatility.ts';
 import { computeIndependentExpectedValue } from '../analytics/distributionModel.ts';
+import { approxTradingSessionsFromCalendarDays } from '../analytics/timeConventions.ts';
 import { classifyBias, type Bias } from './regimeSelect.ts';
 import {
   generateCandidates,
@@ -154,10 +155,21 @@ function evaluateOne(slice: EnrichedSlice, params: ExpirySelectorParams): Expiry
   // as a whole) — computed only once the top candidate is known, from the
   // same real historicalCloses, never from the candidate's own
   // Black-76-derived POP (see distributionModel.ts's header).
+  // VOLATILITY_TIME_CONVENTION.md, Option B (implemented): historicalCloses
+  // is one row per real TRADING session (Kite's daily candle feed has no
+  // row at all for a weekend/holiday) — buildEmpiricalReturns/
+  // computeIndependentPop step through it by ARRAY INDEX, i.e. in trading
+  // sessions, not calendar days. `dte` is a CALENDAR-day count. Passing it
+  // straight through (the pre-fix behavior) silently asked "what happened
+  // over N trading sessions" while believing it was asking about N
+  // calendar days — for a 30-calendar-day DTE that is a ~43-calendar-day
+  // trading window, a real, systematic bias on both of the two highest-
+  // weighted score components. Converted once, here, at the boundary.
+  const tradingSessionHorizon = approxTradingSessionsFromCalendarDays(dte);
   const independentEv = params.historicalCloses && params.historicalCloses.length > 0
     ? computeIndependentExpectedValue(
         top.result.legs, top.result.maxProfit, top.result.maxLoss,
-        params.historicalCloses, slice.forward, dte,
+        params.historicalCloses, slice.forward, tradingSessionHorizon,
       )
     : null;
   const qualityScore = scoreTradeQuality(
@@ -185,10 +197,16 @@ function computePremiumEdgeForExpiry(
   historicalCloses: HistoricalClose[] | undefined,
 ): IvRvEdge | null {
   if (!historicalCloses || historicalCloses.length === 0 || atmIv === null) return null;
+  // impliedMove is genuinely a CALENDAR-time question ("how far can the
+  // underlying move by this calendar expiry date") — dte/365 here is
+  // correct and unrelated to the trading-session fix below.
   const impliedMove = expectedMove(slice.forward, atmIv, dte / 365);
   if (!impliedMove) return null;
   const realizedVol = computeRealizedVolatility(historicalCloses);
-  const expectedRealizedMove = computeExpectedRealizedMove(historicalCloses, dte, slice.forward);
+  // computeExpectedRealizedMove steps through historicalCloses by TRADING
+  // session (see the tradingSessionHorizon comment in evaluateOne above)
+  // — convert dte (calendar) before this call, not after.
+  const expectedRealizedMove = computeExpectedRealizedMove(historicalCloses, approxTradingSessionsFromCalendarDays(dte), slice.forward);
   if (!realizedVol || !expectedRealizedMove) return null;
   return computeIvRvEdge(atmIv, realizedVol, impliedMove.pct * 100, expectedRealizedMove);
 }

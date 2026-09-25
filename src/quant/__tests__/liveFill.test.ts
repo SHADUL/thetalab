@@ -29,11 +29,28 @@ function quoteAt(price: number) {
   return { bid: price, ask: price, lastPrice: price };
 }
 
-/** Fill outcomes are scripted per tradingsymbol, one outcome consumed per placeOrder call on that symbol (so retries can differ from the first attempt). */
-function scriptedPlacer(fillScript: Record<string, Array<{ status: 'COMPLETE' | 'REJECTED' | 'CANCELLED' | 'TIMEOUT'; averagePrice: number | null }>>, quotes?: Record<string, ReturnType<typeof quoteAt> | null>) {
+type ScriptedOutcome = { status: 'COMPLETE' | 'REJECTED' | 'CANCELLED' | 'TIMEOUT'; averagePrice: number | null };
+type QueryOutcome = { status: 'COMPLETE' | 'REJECTED' | 'CANCELLED' | 'OPEN' | 'TRIGGER PENDING' | 'UNKNOWN'; averagePrice: number | null };
+
+/**
+ * Fill outcomes are scripted per tradingsymbol, one outcome consumed per
+ * placeOrder call on that symbol (so retries can differ from the first
+ * attempt). `queryScript` optionally scripts getOrderStatus's response,
+ * consumed only when a TIMEOUT actually triggers a follow-up query — used
+ * to test the "network timeout != broker rejection" resolution path.
+ */
+/** `queryScript` is keyed by the exact orderId string it resolves (e.g.
+    'order-1'), since a timeout-follow-up query is inherently about one
+    specific placed order, not a symbol in general. */
+function scriptedPlacer(
+  fillScript: Record<string, ScriptedOutcome[]>,
+  quotes?: Record<string, ReturnType<typeof quoteAt> | null>,
+  queryScript?: Record<string, QueryOutcome[]>,
+) {
   const calls: string[] = [];
   const orderSymbol = new Map<string, string>();
   const attemptIndex: Record<string, number> = {};
+  const queryIndex: Record<string, number> = {};
   let orderCounter = 0;
 
   const placer: LiveOrderPlacer = {
@@ -56,6 +73,13 @@ function scriptedPlacer(fillScript: Record<string, Array<{ status: 'COMPLETE' | 
       attemptIndex[symbol] = idx + 1;
       const script = fillScript[symbol] ?? [];
       return script[idx] ?? script[script.length - 1] ?? { status: 'COMPLETE', averagePrice: 100 };
+    },
+    async getOrderStatus(orderId) {
+      calls.push(`query:${orderId}`);
+      const idx = queryIndex[orderId] ?? 0;
+      queryIndex[orderId] = idx + 1;
+      const script = (queryScript ?? {})[orderId] ?? [];
+      return script[idx] ?? script[script.length - 1] ?? { status: 'UNKNOWN', averagePrice: null };
     },
     async closeLeg(leg) {
       calls.push(`close:${leg.tradingsymbol}`);
@@ -182,4 +206,81 @@ test('a missing quote (getQuote returns null) blocks that leg without throwing',
   const result = await runLiveExecution(LEGS, passingValidation(), placer, { exchange: 'NFO' });
   assert.equal(result.state, 'FAILED');
   assert.ok(result.log.some((l) => l.includes('no live quote available')));
+});
+
+/* ------------------------------------------------------------------ *
+ * TASK 4 / INVARIANT C: "network timeout != broker rejection" — a
+ * timed-out awaitFill must never be treated as a safe-to-retry rejection.
+ * These tests exercise every branch of the follow-up getOrderStatus query.
+ * ------------------------------------------------------------------ */
+
+test('TIMEOUT resolved as actually-COMPLETE by a follow-up query: treated as FILLED, never retried, never double-ordered', async () => {
+  const { placer, calls } = scriptedPlacer(
+    {
+      'NIFTY26SEP24500PE': [{ status: 'TIMEOUT', averagePrice: null }],
+      'NIFTY26SEP24600PE': [{ status: 'COMPLETE', averagePrice: 119 }],
+    },
+    undefined,
+    { 'order-1': [{ status: 'COMPLETE', averagePrice: 81 }] },
+  );
+  const result = await runLiveExecution(LEGS, passingValidation(), placer, { exchange: 'NFO' });
+  assert.equal(result.state, 'ACTIVE');
+  assert.equal(result.protection, 'FULL');
+  const buyFill = result.legFills.find((l) => l.side === 'BUY')!;
+  assert.equal(buyFill.fillPrice, 81, 'must use the price the broker actually confirmed, not a guess');
+  // Exactly ONE placeOrder for the BUY leg — the timeout must not have
+  // triggered a second, duplicate order.
+  assert.equal(calls.filter((c) => c === 'place:BUY:NIFTY26SEP24500PE').length, 1);
+  assert.ok(calls.includes('query:order-1'), 'the follow-up status query must actually have been made');
+});
+
+test('TIMEOUT resolved as REJECTED by a follow-up query: safe to retry normally (broker confirms nothing happened)', async () => {
+  // BUY leg fills cleanly first (order-1), so the SELL leg's timeout is a
+  // genuinely PARTIAL state (legFailureHandler.ts only offers a retry once
+  // at least one leg has actually filled — verified pre-existing behavior,
+  // exercised the same way by this file's own "genuinely partial fill" test).
+  const { placer, calls } = scriptedPlacer(
+    {
+      'NIFTY26SEP24500PE': [{ status: 'COMPLETE', averagePrice: 80 }],
+      'NIFTY26SEP24600PE': [
+        { status: 'TIMEOUT', averagePrice: null },
+        { status: 'COMPLETE', averagePrice: 119 }, // retry succeeds
+      ],
+    },
+    undefined,
+    { 'order-2': [{ status: 'REJECTED', averagePrice: null }] },
+  );
+  const result = await runLiveExecution(LEGS, passingValidation(), placer, { exchange: 'NFO', maxRetries: 2 });
+  assert.equal(result.state, 'ACTIVE');
+  // A genuine retry DID place a second order for the SELL leg — correct
+  // here, since the broker explicitly confirmed the first one never filled.
+  assert.equal(calls.filter((c) => c === 'place:SELL:NIFTY26SEP24600PE').length, 2);
+});
+
+test('TIMEOUT that stays ambiguous (broker reports still OPEN): RECONCILIATION_REQUIRED, zero further orders for any leg', async () => {
+  const { placer, calls } = scriptedPlacer(
+    { 'NIFTY26SEP24500PE': [{ status: 'TIMEOUT', averagePrice: null }] },
+    undefined,
+    { 'order-1': [{ status: 'OPEN', averagePrice: null }] },
+  );
+  const result = await runLiveExecution(LEGS, passingValidation(), placer, { exchange: 'NFO', maxRetries: 2 });
+  assert.equal(result.state, 'RECONCILIATION_REQUIRED');
+  // The SELL leg must never be touched — this pass never reaches it, and
+  // no retry loop for the BUY leg is entered either.
+  assert.ok(!calls.some((c) => c.includes('NIFTY26SEP24600PE')));
+  assert.equal(calls.filter((c) => c === 'place:BUY:NIFTY26SEP24500PE').length, 1, 'exactly one order was placed — the ambiguous one — and nothing more');
+  assert.ok(!calls.some((c) => c.startsWith('close:')), 'an ambiguous leg must not be blindly closed either');
+});
+
+test('TIMEOUT where the follow-up query itself throws: also RECONCILIATION_REQUIRED, never retried', async () => {
+  const throwingPlacer: LiveOrderPlacer = {
+    async getQuote() { return quoteAt(100); },
+    async placeOrder() { return 'order-1'; },
+    async awaitFill() { return { status: 'TIMEOUT', averagePrice: null }; },
+    async getOrderStatus() { throw new Error('network unreachable'); },
+    async closeLeg() { return 'close-1'; },
+  };
+  const result = await runLiveExecution(LEGS, passingValidation(), throwingPlacer, { exchange: 'NFO' });
+  assert.equal(result.state, 'RECONCILIATION_REQUIRED');
+  assert.ok(result.log.some((l) => l.includes('itself FAILED')));
 });

@@ -78,6 +78,7 @@ import { atmIvOf } from '../src/quant/analytics/atmIv.ts';
 import { classifyMarketRegime, type MarketRegimeResult } from '../src/quant/analytics/marketRegime.ts';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { decideTrade, type DecisionThresholds } from '../src/quant/strategies/decisionGate.ts';
 import { computePositionSize, type PortfolioState, type OpenPositionSummary } from '../src/quant/strategies/positionSizing.ts';
 import { runPreTradeValidation } from '../src/quant/execution/preTradeValidation.ts';
@@ -85,6 +86,22 @@ import { runPaperExecution, type PlannedLeg } from '../src/quant/execution/paper
 import { runLiveExecution, type LiveOrderPlacer } from '../src/quant/execution/liveFill.ts';
 import { evaluateExit, type ShortStrike } from '../src/quant/execution/exitEngine.ts';
 import { checkDailyRiskLock } from '../src/quant/execution/dailyRiskLock.ts';
+import { claimOrderIntent, supabaseOrderIntentStore } from '../src/quant/execution/orderIntent.ts';
+import { runShadowExecutionForLegs, isEligibleForForwardValidation } from '../src/quant/execution/shadowExecution.ts';
+import { supabaseShadowRepository, dedupeIvHistoryRows, type OptionChainSnapshotRow, type IvHistoryRow, type ExecutionQualityRow } from '../src/quant/execution/shadowRepository.ts';
+import { recordSignal, recordOutcome, supabaseForwardLedgerStore, type ForwardSignal } from '../src/quant/execution/forwardLedger.ts';
+import { BASELINE_VERSION } from '../src/options-auto/backtest/baselineV1.ts';
+import { approxTradingSessionsFromCalendarDays } from '../src/quant/analytics/timeConventions.ts';
+import { isCompletedTradeEligibleForForwardValidation, buildLegQuoteFromRawKiteQuote, type RawKiteQuote } from '../src/quant/execution/shadowExecution.ts';
+import { simulateShadowExitFills } from '../src/quant/execution/shadowScan.ts';
+import { simulateStructureFill, SHADOW_EXECUTION_V1 } from '../src/quant/execution/fillSimulator.ts';
+import { computeExecutionCostBreakdown, computeCanonicalForwardPnl, estimateTransactionCharges, EXECUTION_COST_MODEL_VERSION } from '../src/quant/execution/executionCost.ts';
+import { computeShadowHealthReport, type ShadowHealthCounts } from '../src/quant/analytics/shadowHealth.ts';
+import { evaluateForwardValidationReadiness } from '../src/quant/execution/readiness.ts';
+import { runForwardValidationSelfTest } from '../src/quant/execution/selfTest.ts';
+import { classifyShadowConsistency, buildShadowRecoveryFinalizationPlan, hasOrphanedExitTelemetry } from '../src/quant/execution/shadowConsistency.ts';
+import { evaluateProtocolTimingEligibility } from '../src/quant/execution/protocolTiming.ts';
+import { reconcile, type DbPositionSummary, type BrokerPosition, type BrokerOrder } from '../src/quant/execution/brokerReconciliation.ts';
 import { computeVwapBands } from '../src/vwap-scalper/vwapBands.ts';
 import { detectVwapScalperSignals } from '../src/vwap-scalper/signals.ts';
 import { computeVwapScalperPositionSize, computeFixedCapitalPositionSize } from '../src/vwap-scalper/positionSizing.ts';
@@ -270,6 +287,31 @@ function makeLiveOrderPlacer(token: string, apiKey: string): LiveOrderPlacer {
         await new Promise((r) => setTimeout(r, 1000));
       }
     },
+
+    // A single, direct order-status query — used only to resolve an
+    // awaitFill TIMEOUT (see liveFill.ts's header on this method). A
+    // failure here is reported as UNKNOWN rather than thrown, so the
+    // caller's "never retry/never assume on ambiguity" handling always
+    // gets a definite (if unhelpful) answer rather than an exception to
+    // separately guard against.
+    async getOrderStatus(orderId) {
+      try {
+        const history = await kiteFetch(`/orders/${orderId}`, { token, apiKey });
+        const last = Array.isArray(history) ? history[history.length - 1] : null;
+        const status = last?.status as string | undefined;
+        if (status === 'COMPLETE') {
+          const avg = Number(last?.average_price);
+          return { status: 'COMPLETE' as const, averagePrice: avg > 0 ? avg : null };
+        }
+        if (status === 'REJECTED') return { status: 'REJECTED' as const, averagePrice: null };
+        if (status === 'CANCELLED') return { status: 'CANCELLED' as const, averagePrice: null };
+        if (status === 'OPEN') return { status: 'OPEN' as const, averagePrice: null };
+        if (status === 'TRIGGER PENDING') return { status: 'TRIGGER PENDING' as const, averagePrice: null };
+        return { status: 'UNKNOWN' as const, averagePrice: null };
+      } catch {
+        return { status: 'UNKNOWN' as const, averagePrice: null };
+      }
+    },
   };
 }
 
@@ -288,6 +330,94 @@ async function fetchRealAvailableFunds(token: string, apiKey: string): Promise<n
   } catch {
     return null;
   }
+}
+
+/**
+ * Broker-side state for pre-entry reconciliation (QUANT_AUDIT.md Task 3).
+ * Both functions return `null` on any failure — the caller (handlePaperScan)
+ * treats that identically to a genuine RECONCILIATION_REQUIRED finding
+ * (broker state that cannot currently be verified must block new AUTO
+ * entries exactly like broker state that actively disagrees), never as
+ * "assume nothing's open."
+ */
+async function fetchBrokerPositions(token: string, apiKey: string): Promise<BrokerPosition[] | null> {
+  try {
+    const data = await kiteFetch('/positions', { token, apiKey });
+    const net: any[] = data?.net ?? [];
+    return net
+      .filter((p) => (p.exchange === 'NFO' || p.exchange === 'BFO') && Number(p.quantity) !== 0)
+      .map((p) => ({ tradingsymbol: String(p.tradingsymbol), quantity: Number(p.quantity) }));
+  } catch {
+    return null;
+  }
+}
+
+function mapKiteOrderStatus(status: string | undefined): BrokerOrder['status'] {
+  switch (status) {
+    case 'COMPLETE': return 'COMPLETE';
+    case 'REJECTED': return 'REJECTED';
+    case 'CANCELLED': return 'CANCELLED';
+    case 'OPEN': return 'OPEN';
+    case 'TRIGGER PENDING': return 'TRIGGER PENDING';
+    default: return 'UNKNOWN';
+  }
+}
+
+async function fetchBrokerOrdersToday(token: string, apiKey: string): Promise<BrokerOrder[] | null> {
+  try {
+    const data = await kiteFetch('/orders', { token, apiKey });
+    const orders: any[] = Array.isArray(data) ? data : [];
+    return orders
+      .filter((o) => o.exchange === 'NFO' || o.exchange === 'BFO')
+      .map((o) => ({
+        orderId: String(o.order_id), tradingsymbol: String(o.tradingsymbol),
+        status: mapKiteOrderStatus(o.status), transactionType: o.transaction_type === 'SELL' ? 'SELL' as const : 'BUY' as const,
+        quantity: Number(o.quantity) || 0, filledQuantity: Number(o.filled_quantity) || 0,
+      }));
+  } catch {
+    return null;
+  }
+}
+
+/** DB-side inputs for reconciliation — active positions (mapped to their
+    legs), positions already flagged elsewhere as needing manual reconciliation,
+    and any still-open (non-terminal) order intents, ALL account-wide (not
+    scoped to one symbol) — a broker-state disagreement on ANY symbol blocks
+    ALL new AUTO entries, per Task 3's "BLOCK ALL NEW AUTO ENTRIES". */
+async function fetchDbReconciliationInputs(supabase: SupabaseClient): Promise<{
+  dbActivePositions: DbPositionSummary[]; dbPendingReconciliation: DbPositionSummary[];
+  openIntents: Array<{ id: string; symbol: string; status: 'CLAIMED' | 'EXECUTING' | 'ABANDONED'; intentKey: string; ageMs: number }>;
+}> {
+  const toSummaries = async (statuses: string[]): Promise<DbPositionSummary[]> => {
+    const { data: positions } = await supabase.from('options_autotrade_positions')
+      .select('id,symbol,expiry').in('status', statuses).eq('execution_mode', 'AUTO');
+    const rows = positions ?? [];
+    if (!rows.length) return [];
+    const ids = rows.map((p: any) => p.id);
+    const { data: legs } = await supabase.from('options_autotrade_legs')
+      .select('position_id,tradingsymbol,side,quantity,strike,option_right').in('position_id', ids);
+    const legsByPosition = new Map<number, DbPositionSummary['legs']>();
+    for (const l of legs ?? []) {
+      const list = legsByPosition.get(l.position_id) ?? [];
+      list.push({ tradingsymbol: l.tradingsymbol, side: l.side, quantity: l.quantity, strike: Number(l.strike), right: l.option_right });
+      legsByPosition.set(l.position_id, list);
+    }
+    return rows.map((p: any) => ({ id: p.id, symbol: p.symbol, expiry: p.expiry, legs: legsByPosition.get(p.id) ?? [] }));
+  };
+
+  const [dbActivePositions, dbPendingReconciliation, intentRows] = await Promise.all([
+    toSummaries(['ACTIVE']),
+    toSummaries(['CLOSE_FAILED', 'RECONCILIATION_REQUIRED', 'PARTIALLY_FILLED']),
+    supabase.from('options_autotrade_order_intents').select('id,symbol,status,intent_key,created_at')
+      .in('status', ['CLAIMED', 'EXECUTING', 'ABANDONED']).eq('execution_mode', 'AUTO'),
+  ]);
+
+  const openIntents = (intentRows.data ?? []).map((r: any) => ({
+    id: r.id, symbol: r.symbol, status: r.status as 'CLAIMED' | 'EXECUTING' | 'ABANDONED',
+    intentKey: r.intent_key, ageMs: Date.now() - Date.parse(r.created_at),
+  }));
+
+  return { dbActivePositions, dbPendingReconciliation, openIntents };
 }
 
 /**
@@ -498,8 +628,8 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   // "only run when paper execution is turned on." AUTO must pass it too,
   // or every scan cycle silently no-ops forever and AUTO never places a
   // single real order despite everything downstream being wired for it.
-  if (settings.execution_mode !== 'PAPER' && settings.execution_mode !== 'AUTO') {
-    res.status(200).json({ ok: true, skipped: `execution_mode is '${settings.execution_mode}', not PAPER or AUTO` });
+  if (settings.execution_mode !== 'PAPER' && settings.execution_mode !== 'AUTO' && settings.execution_mode !== 'SHADOW') {
+    res.status(200).json({ ok: true, skipped: `execution_mode is '${settings.execution_mode}', not PAPER, SHADOW or AUTO` });
     return;
   }
 
@@ -509,9 +639,28 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   // it already filters positions, so old PAPER chatter doesn't sit next
   // to real AUTO activity looking like it's still happening.
   const isLive = settings.execution_mode === 'AUTO';
-  const modeLabel = isLive ? 'AUTO' : 'PAPER';
+  // SHADOW runs the exact same decision pipeline AUTO does — including
+  // real-funds-based sizing, so the hypothetical order intent it records
+  // is what AUTO would ACTUALLY have sized, not a reserved_fund guess —
+  // but places zero broker orders (FORWARD_VALIDATION_PROTOCOL.md). It
+  // deliberately does NOT go through the broker-reconciliation gate below:
+  // that gate exists specifically to protect against a REAL duplicate
+  // order, which cannot happen here regardless.
+  const isShadow = settings.execution_mode === 'SHADOW';
+  const modeLabel = isLive ? 'AUTO' : isShadow ? 'SHADOW' : 'PAPER';
   const log = (level: 'info' | 'error', message: string, detail?: unknown) =>
     supabase.from('options_autotrade_log').insert({ level, message, detail: detail ?? null, execution_mode: modeLabel });
+
+  // Observability (QUANT_AUDIT.md Task 9): a traceable lifecycle for every
+  // AUTO attempt — a stable scanId ties every event this one invocation
+  // produces together, so a human reading the log can reconstruct exactly
+  // what happened for one specific scan without guessing which log lines
+  // belong together. Never logs secrets/tokens — `detail` here is always a
+  // plain object of IDs, symbols, and human-readable strings.
+  const scanId = randomUUID();
+  const event = (name: string, detail?: Record<string, unknown>) =>
+    log('info', `[${name}] ${symbol}`, { event: name, scanId, symbol, ...detail });
+  await event('SCAN_STARTED', { executionMode: modeLabel });
 
   if (!isMarketOpenIST()) { res.status(200).json({ ok: true, skipped: 'outside_market_hours' }); return; }
 
@@ -771,6 +920,9 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     res.status(200).json({ ok: true, action: decision.action, explanation: decision.explanation, diagnostics });
     return;
   }
+  await event('CANDIDATE_SELECTED', {
+    strategyLabel: decision.expiryEvaluation.strategyLabel, qualityScore: decision.expiryEvaluation.best.qualityScore.score,
+  });
 
   const best = decision.expiryEvaluation.best;
   const candidateSymbolGroup = symbol;
@@ -824,12 +976,49 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   // allocation a human typed in, not a live account balance. A failed
   // fetch refuses the trade outright rather than falling back to
   // reserved_fund, which would size a real order against a number nobody
-  // has verified the account actually holds.
-  const realAvailableFunds = isLive ? await fetchRealAvailableFunds(token, apiKey) : null;
-  if (isLive && realAvailableFunds === null) {
-    await log('error', `AUTO: could not verify real account funds for ${symbol} — refusing to size or place any order this cycle.`);
+  // has verified the account actually holds. SHADOW sizes against the SAME
+  // real balance (never reserved_fund either) so its recorded hypothetical
+  // intent reflects what AUTO would actually have sized — see this file's
+  // header note on isShadow above.
+  const usesRealFunds = isLive || isShadow;
+  const realAvailableFunds = usesRealFunds ? await fetchRealAvailableFunds(token, apiKey) : null;
+  if (usesRealFunds && realAvailableFunds === null) {
+    await log('error', `${modeLabel}: could not verify real account funds for ${symbol} — refusing to size or record any intent this cycle.`);
     res.status(200).json({ ok: true, action: decision.action, opened: false, skipped: 'real_funds_unavailable', diagnostics });
     return;
+  }
+
+  // Broker reconciliation gate (QUANT_AUDIT.md Task 3) — AUTO only, and
+  // account-wide (not scoped to this one symbol): a disagreement between
+  // this system's own records and Kite's actual order/position book on
+  // ANY symbol blocks EVERY new AUTO entry this cycle, regardless of
+  // which symbol is being scanned right now. This never touches an
+  // existing position — it only refuses to add MORE exposure while the
+  // broker's true state is uncertain.
+  if (isLive) {
+    const [brokerPositions, brokerOrders] = await Promise.all([
+      fetchBrokerPositions(token, apiKey),
+      fetchBrokerOrdersToday(token, apiKey),
+    ]);
+    if (brokerPositions === null || brokerOrders === null) {
+      await event('BROKER_STATE_AMBIGUOUS', { reason: 'fetch_failed' });
+      await log('error', `AUTO: could not verify broker positions/orders for reconciliation — refusing all new AUTO entries this cycle.`);
+      res.status(200).json({ ok: true, action: decision.action, opened: false, skipped: 'broker_state_unavailable', diagnostics });
+      return;
+    }
+    const { dbActivePositions, dbPendingReconciliation, openIntents } = await fetchDbReconciliationInputs(supabase);
+    const reconciliation = reconcile({ dbActivePositions, dbPendingReconciliation, openIntents, brokerPositions, brokerOrders });
+    if (reconciliation.status === 'MISMATCH' || reconciliation.status === 'RECONCILIATION_REQUIRED') {
+      await event('RECONCILIATION_REQUIRED', { reconciliationStatus: reconciliation.status, findingCount: reconciliation.findings.length });
+      await log('error', `AUTO: broker reconciliation is ${reconciliation.status} — BLOCKING all new AUTO entries until resolved.`,
+        { findings: reconciliation.findings });
+      res.status(200).json({
+        ok: true, action: decision.action, opened: false, skipped: 'reconciliation_required',
+        reconciliation, diagnostics,
+      });
+      return;
+    }
+    await event('BROKER_RECONCILED', { reconciliationStatus: reconciliation.status });
   }
 
   const sizing = computePositionSize(
@@ -839,15 +1028,15 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
       underlyingGroup: candidateSymbolGroup,
     },
     {
-      // AUTO bases every %-of-equity risk cap (max risk/trade, daily/weekly
-      // loss, portfolio risk, correlated-group risk) on the REAL account
-      // balance too — reserved_fund is a self-declared number a human
-      // typed in, and letting real risk limits key off it would let those
-      // caps drift arbitrarily far from what the account can actually
-      // absorb. PAPER keeps using reserved_fund, since there's no real
-      // balance to check it against.
-      equity: isLive ? (realAvailableFunds ?? 0) : Number(settings.reserved_fund) || 0,
-      availableFunds: isLive ? (realAvailableFunds ?? 0) : Number(settings.reserved_fund) || 0,
+      // AUTO and SHADOW both base every %-of-equity risk cap (max
+      // risk/trade, daily/weekly loss, portfolio risk, correlated-group
+      // risk) on the REAL account balance — reserved_fund is a self-
+      // declared number a human typed in, and letting real risk limits key
+      // off it would let those caps drift arbitrarily far from what the
+      // account can actually absorb. PAPER keeps using reserved_fund,
+      // since there's no real balance to check it against.
+      equity: usesRealFunds ? (realAvailableFunds ?? 0) : Number(settings.reserved_fund) || 0,
+      availableFunds: usesRealFunds ? (realAvailableFunds ?? 0) : Number(settings.reserved_fund) || 0,
     },
     portfolio,
     {
@@ -885,15 +1074,191 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     recalculatedMaxLoss: best.result.maxLoss, originalMaxLoss: best.result.maxLoss, maxLossDriftPct: 5,
   });
 
+  // Concurrency/idempotency gate (QUANT_AUDIT.md Task 2) — the actual
+  // claim happens here, right before execution, on the FINAL scaled legs
+  // (the exact candidate shape a real order would be placed for). A
+  // conflicting claim means another invocation already owns this exact
+  // candidate right now — zero broker calls follow for this attempt. See
+  // orderIntent.ts for exactly what "the same trade" means here, and why
+  // a later, distinct attempt is never permanently blocked.
+  const intentStore = supabaseOrderIntentStore(supabase);
+  const claim = await claimOrderIntent(intentStore, {
+    symbol, expiry: expiryDateStr, strategyLabel: decision.expiryEvaluation.strategyLabel, tradeDate: todayIST,
+    legs: scaledLegs.map((l) => ({ side: l.side, right: l.right, strike: l.strike })),
+    executionMode: modeLabel,
+  });
+  if (!claim.claimed) {
+    if (claim.reason === 'CONFLICT') {
+      await event('INTENT_CONFLICT', { intentKey: claim.intentKey });
+      await event('ENTRY_SKIPPED', { reason: 'intent_conflict' });
+      await log('info', `${modeLabel}: intent conflict for ${symbol} — another invocation already claimed this exact candidate. Skipping, zero orders placed.`);
+      res.status(200).json({ ok: true, action: decision.action, opened: false, skipped: 'intent_conflict', diagnostics });
+      return;
+    }
+    // STORE_ERROR — the intent table itself couldn't be written to. Fail
+    // closed rather than proceeding without the concurrency guarantee.
+    await event('ENTRY_SKIPPED', { reason: 'intent_claim_failed' });
+    await log('error', `${modeLabel}: failed to claim an order intent for ${symbol} — refusing to place any order without the concurrency lock.`, { message: claim.message });
+    res.status(200).json({ ok: true, action: decision.action, opened: false, skipped: 'intent_claim_failed', diagnostics });
+    return;
+  }
+  await event('INTENT_CLAIMED', { intentId: claim.intentId, intentKey: claim.intentKey });
+  await event('PRETRADE_VALIDATED', { passed: validation.passed });
+
   // AUTO fires REAL orders against the real Zerodha account — BUY (hedge)
   // legs first, confirmed FILLED, before any SELL (short) leg, exactly the
   // sequencing real margin treatment requires (see liveFill.ts's own
   // header). PAPER keeps simulating every leg filling instantly.
+  if (isLive) await event('HEDGE_SUBMITTED', { intentId: claim.intentId });
+  const winningSlice = enriched.slices.find((s) => s.expiry === decision.expiryEvaluation!.expiry);
+  const shadowExecResult = isShadow && winningSlice
+    ? runShadowExecutionForLegs(scaledLegs, validation, winningSlice.quotes)
+    : null;
   const execResult = isLive
     ? await runLiveExecution(scaledLegs, validation, makeLiveOrderPlacer(token, apiKey), { exchange })
-    : runPaperExecution(scaledLegs, validation);
+    : shadowExecResult
+      ? shadowExecResult
+      : runPaperExecution(scaledLegs, validation);
+
+  // SHADOW-only telemetry: option-chain snapshot + per-expiry IV history +
+  // the forward-validation ledger signal, ALL best-effort (SOFT_FAIL — a
+  // failure here never blocks recording the position/log below, it only
+  // affects this signal's eligibility for the OFFICIAL forward-validation
+  // sample, per FORWARD_VALIDATION_PROTOCOL.md). Persists the EXACT slice
+  // already used above — never a second fetch.
+  let shadowEligible = false;
+  let shadowEligibilityReasons: string[] = [];
+  let shadowLedgerId: string | null = null;
+  if (isShadow && winningSlice) {
+    const shadowRepo = supabaseShadowRepository(supabase);
+    const scanIdForShadow = randomUUID();
+    const nowIso = new Date().toISOString();
+    const snapshotRows: OptionChainSnapshotRow[] = winningSlice.quotes.map((q) => ({
+      scanId: scanIdForShadow, capturedAt: nowIso, symbol, spot: spot ?? null,
+      indiaVix: null, forward: winningSlice.forward, expiry: expiryDateStr,
+      calendarDte: decision.expiryEvaluation!.dte, tradingSessionHorizon: approxTradingSessionsFromCalendarDays(decision.expiryEvaluation!.dte),
+      strike: q.quote.strike, optionRight: q.quote.right,
+      bid: q.quote.bid, bidQty: null, ask: q.quote.ask, askQty: null, ltp: q.quote.last, markPrice: q.markPrice,
+      volume: q.quote.volume, openInterest: q.quote.openInterest, iv: q.iv,
+      delta: q.greeks.delta, gamma: q.greeks.gamma, theta: q.greeks.theta, vega: q.greeks.vega,
+    }));
+    let snapshotOk = true;
+    try { snapshotOk = 'ok' in await shadowRepo.insertChainSnapshots(snapshotRows); } catch { snapshotOk = false; }
+
+    const atmIvForShadow = atmIvOf(winningSlice);
+    const ivRows: IvHistoryRow[] = winningSlice.atmStrike !== null ? [{
+      capturedAt: nowIso, symbol, expiry: expiryDateStr, atmStrike: winningSlice.atmStrike,
+      atmCallIv: winningSlice.quotes.find((q) => q.quote.strike === winningSlice.atmStrike && q.quote.right === 'CE')?.iv ?? null,
+      atmPutIv: winningSlice.quotes.find((q) => q.quote.strike === winningSlice.atmStrike && q.quote.right === 'PE')?.iv ?? null,
+      combinedAtmIv: atmIvForShadow, calendarDte: decision.expiryEvaluation!.dte, tradingSessionHorizon: approxTradingSessionsFromCalendarDays(decision.expiryEvaluation!.dte),
+      spot: spot ?? null, indiaVix: null,
+    }] : [];
+    try { await shadowRepo.insertIvHistory(dedupeIvHistoryRows(ivRows)); } catch { /* SOFT_FAIL — see comment above */ }
+
+    let ledgerOk = true;
+    try {
+      // Task 13: version fingerprint — activeProtocolId is null (a real,
+      // honest PRE_PROTOCOL state) until a protocol run has actually been
+      // started for this symbol+baseline via resource=start-forward-
+      // validation; this lookup never creates or infers one.
+      const { data: activeRun } = await supabase.from('forward_validation_runs')
+        .select('protocol_id').eq('symbol', symbol).eq('baseline_version', BASELINE_VERSION).eq('status', 'ACTIVE').maybeSingle();
+      const signal: ForwardSignal = {
+        symbol, strategyLabel: decision.expiryEvaluation!.strategyLabel, expiry: expiryDateStr,
+        calendarDte: decision.expiryEvaluation!.dte, tradingSessionHorizon: approxTradingSessionsFromCalendarDays(decision.expiryEvaluation!.dte),
+        shortDeltaTarget: null, wingWidth: null, netCredit: best.result.netCredit, estimatedMaxLoss: best.result.maxLoss,
+        estimatedPop: best.result.pop, expectedValue: best.expectedValue, premiumEdgePct: best.qualityScore.raw.premiumEdgePct,
+        independentEvPerUnitRisk: best.qualityScore.raw.independentEvPerUnitRisk, ivRank: null,
+        liquidityTier: best.liquidity.tier, marketRegime: null, sizingLots: sizing.lots, expectedCostsRupees: null,
+        intentId: claim.claimed ? claim.intentId : null,
+        baselineVersion: BASELINE_VERSION, fillModelVersion: 'SHADOW_EXECUTION_V1',
+        protocolId: activeRun?.protocol_id ?? null, codeVersion: process.env.VERCEL_GIT_COMMIT_SHA ?? null,
+      };
+      // Task 1: capture the returned ledger row id so it can be stored on
+      // the position row created below — this IS the link that lets the
+      // eventual exit find its way back to the same ledger row.
+      shadowLedgerId = await recordSignal(supabaseForwardLedgerStore(supabase), signal);
+    } catch { ledgerOk = false; }
+
+    // Task 3: entry execution-quality telemetry, one row per leg, from the
+    // SAME fill/quote objects SHADOW_EXECUTION_V1 already produced above —
+    // never a second fetch.
+    let entryTelemetryOk = true;
+    if (shadowExecResult && shadowExecResult.state !== 'FAILED') {
+      try {
+        const quotesByKey = new Map(winningSlice.quotes.map((q) => [`${q.quote.strike}:${q.quote.right}`, q]));
+        const entryRows: ExecutionQualityRow[] = shadowExecResult.legFills.map((l) => {
+          const q = quotesByKey.get(`${l.strike}:${l.right}`);
+          const decisionMid = q?.mid ?? null;
+          const slippage = decisionMid !== null ? (l.side === 'BUY' ? l.fillPrice - decisionMid : decisionMid - l.fillPrice) : null;
+          return {
+            scanId: scanIdForShadow, candidateId: null, intentId: claim.claimed ? claim.intentId : null,
+            positionId: null, legId: null, symbol, strategyLabel: decision.expiryEvaluation!.strategyLabel,
+            expiry: expiryDateStr, strike: l.strike, optionRight: l.right, side: l.side, quantity: l.quantity,
+            executionMode: 'SHADOW', fillModel: 'SHADOW_EXECUTION_V1',
+            // Task 2: phase+forwardLedgerId are what let an eventual exit
+            // look up this EXACT entry's real slippage cost instead of
+            // hard-coding entryExecutionCost to 0.
+            phase: 'ENTRY', forwardLedgerId: shadowLedgerId,
+            decisionAt: nowIso, quoteAt: nowIso, submittedAt: nowIso, filledAt: nowIso,
+            decisionMid, bid: q?.quote.bid ?? null, ask: q?.quote.ask ?? null, spreadPct: q?.spreadPct ?? null,
+            submittedPrice: l.fillPrice, actualFill: l.fillPrice,
+            slippageRupees: slippage, slippageBps: decisionMid && decisionMid > 0 && slippage !== null ? (slippage / decisionMid) * 10_000 : null,
+            latencyMs: null, volume: q?.quote.volume ?? null, openInterest: q?.quote.openInterest ?? null,
+            delta: q?.greeks.delta ?? null, dte: decision.expiryEvaluation!.dte, indiaVix: null,
+            brokerOrderId: null, fillIsSimulated: true,
+          };
+        });
+        const result = await shadowRepo.insertExecutionQuality(entryRows);
+        entryTelemetryOk = 'ok' in result;
+      } catch { entryTelemetryOk = false; }
+    }
+
+    const eligibility = isEligibleForForwardValidation({
+      baselineVersion: BASELINE_VERSION, executionMode: 'SHADOW', fillModel: 'SHADOW_EXECUTION_V1',
+      everyLegHasRealBidAsk: shadowExecResult?.hasRealBidAsk ?? false,
+      quotesFreshMs: 0, maxQuoteAgeMs: 5 * 60_000,
+      snapshotStoredSuccessfully: snapshotOk, ledgerSignalStoredSuccessfully: ledgerOk && entryTelemetryOk,
+      knownIngestionBug: false, brokerOrderPlaced: false,
+      expectedBaselineVersion: BASELINE_VERSION, expectedFillModel: 'SHADOW_EXECUTION_V1',
+    });
+    shadowEligible = eligibility.eligible;
+    shadowEligibilityReasons = eligibility.reasons;
+    await event('SHADOW_SIGNAL_RECORDED', { eligibleForForwardValidation: shadowEligible, reasons: shadowEligibilityReasons, ledgerId: shadowLedgerId });
+  }
+
+  if (execResult.state === 'RECONCILIATION_REQUIRED') {
+    // A real order's true broker status is unknown (a timeout the
+    // follow-up query also couldn't resolve — see liveFill.ts). This MUST
+    // leave a durable, visible record — not just a log line — so the
+    // reconciliation gate above actually blocks future AUTO entries on
+    // the next scan, and a human sees it in the dashboard the same way
+    // an existing CLOSE_FAILED position already shows up.
+    const { data: reconRow } = await supabase.from('options_autotrade_positions').insert({
+      symbol, strategy_label: decision.expiryEvaluation.strategyLabel, expiry: expiryDateStr,
+      status: 'RECONCILIATION_REQUIRED', execution_state: execResult.state, protection: execResult.protection,
+      execution_mode: modeLabel, lots: sizing.lots, net_credit: best.result.netCredit,
+      max_profit: sizing.sizedMaxProfit, max_loss: sizing.sizedMaxLoss, margin_required: sizing.sizedMarginRequired,
+      quality_score: best.qualityScore.score, decision_explanation: decision.explanation, entry_date: todayIST,
+    }).select('id').single();
+    if (reconRow) {
+      await supabase.from('options_autotrade_legs').insert(execResult.legFills.map((l) => ({
+        position_id: reconRow.id, side: l.side, option_right: l.right, strike: l.strike,
+        tradingsymbol: l.tradingsymbol, quantity: l.quantity, fill_price: l.fillPrice, status: l.status,
+        order_id: l.orderId ?? null,
+      })));
+    }
+    await intentStore.updateStatus(claim.intentId, { status: 'FAILED', error: 'RECONCILIATION_REQUIRED', positionId: reconRow?.id });
+    await event('BROKER_STATE_AMBIGUOUS', { intentId: claim.intentId, positionId: reconRow?.id });
+    await event('RECONCILIATION_REQUIRED', { intentId: claim.intentId, positionId: reconRow?.id });
+    await log('error', `${modeLabel}: position for ${symbol} needs MANUAL RECONCILIATION against the broker — at least one leg's true status is unknown. New AUTO entries are now blocked account-wide until resolved.`, { log: execResult.log });
+    res.status(200).json({ ok: true, action: decision.action, opened: false, reconciliationRequired: true, validation, sizing, log: execResult.log, diagnostics });
+    return;
+  }
 
   if (execResult.state !== 'ACTIVE') {
+    await intentStore.updateStatus(claim.intentId, { status: 'FAILED', error: execResult.state });
+    await event('ENTRY_SKIPPED', { intentId: claim.intentId, reason: execResult.state });
     await log(isLive ? 'error' : 'info', `${modeLabel} position not opened for ${symbol}`, { reason: execResult.log });
     res.status(200).json({ ok: true, action: decision.action, opened: false, validation, sizing, log: execResult.log, diagnostics });
     return;
@@ -910,9 +1275,29 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     net_theta: (best.result.netGreeks.theta ?? 0) * sizing.lots, net_vega: (best.result.netGreeks.vega ?? 0) * sizing.lots,
     quality_score: best.qualityScore.score, decision_explanation: decision.explanation,
     entry_date: todayIST,
+    // Task 1: link this position back to its forward-validation ledger
+    // row (null for PAPER/AUTO, which never populate shadowLedgerId).
+    // If ledger recording failed, the position still opens (a research-
+    // telemetry failure must never block the underlying paper/shadow
+    // tracking itself) but is explicitly marked ineligible rather than
+    // silently left in an ambiguous state.
+    forward_ledger_id: isShadow ? shadowLedgerId : null,
+    valid_for_forward_validation: isShadow ? shadowEligible : null,
+    forward_validation_ineligibility_reasons: isShadow && !shadowEligible ? shadowEligibilityReasons : null,
   }).select('id').single();
 
-  if (insertErr) { res.status(502).json({ ok: false, error: 'supabase_error', message: insertErr.message }); return; }
+  if (insertErr) {
+    // A real fill (for AUTO) may have just happened at the broker, but it
+    // couldn't be persisted — the intent must NOT be left CLAIMED (that
+    // would silently permit a duplicate claim of the identical candidate
+    // later) nor marked COMPLETED (nothing was actually recorded). Marked
+    // ABANDONED so the next scan's reconciliation gate blocks new AUTO
+    // entries account-wide until a human confirms what really happened.
+    await intentStore.updateStatus(claim.intentId, { status: 'ABANDONED', error: `position_insert_failed: ${insertErr.message}` });
+    await log('error', `${modeLabel}: position insert FAILED for ${symbol} after execution reported ${execResult.state} — broker state and DB now disagree. Manual reconciliation required.`, { message: insertErr.message, log: execResult.log });
+    res.status(502).json({ ok: false, error: 'supabase_error', message: insertErr.message });
+    return;
+  }
 
   const legRows = execResult.legFills.map((l) => ({
     position_id: inserted.id, side: l.side, option_right: l.right, strike: l.strike,
@@ -920,9 +1305,77 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     order_id: l.orderId ?? null,
   }));
   await supabase.from('options_autotrade_legs').insert(legRows);
+  await intentStore.updateStatus(claim.intentId, { status: 'COMPLETED', positionId: inserted.id });
+  await event('POSITION_ACTIVE', { intentId: claim.intentId, positionId: inserted.id, lots: sizing.lots });
   await log('info', `Opened ${modeLabel} position #${inserted.id}: ${decision.expiryEvaluation.strategyLabel} on ${symbol}, ${sizing.lots} lot(s).`, isLive ? { log: execResult.log } : undefined);
 
   res.status(200).json({ ok: true, action: decision.action, opened: true, positionId: inserted.id, sizing, explanation: decision.explanation, diagnostics });
+}
+
+/**
+ * Forward-start blocker phase, Task 3/4/5 — the LEDGER_COMPLETED +
+ * POSITION_ACTIVE recovery path. See SHADOW_EXIT_RECOVERY.md for the full
+ * durable-sequence design. Returns the closed-position summary (for the
+ * position-monitor response) when a recovery finalize actually ran, or
+ * `null` when the ledger was not yet completed (the ordinary, no-op case
+ * — the caller should continue with its normal exit-evaluation logic).
+ *
+ * Never re-simulates an exit, never re-derives P&L from fresh quotes,
+ * never writes a second batch of exit telemetry — only reads back the
+ * FIRST, already-persisted ledger outcome and idempotently finalizes the
+ * position from those exact values, via an atomic
+ * `WHERE id = ? AND status = 'ACTIVE'` UPDATE so a second, concurrent
+ * recovery attempt affects zero rows instead of double-firing.
+ */
+async function recoverShadowPositionIfLedgerCompleted(
+  supabase: SupabaseClient, p: any, log: (level: 'info' | 'error', message: string, detail?: unknown, mode?: string | null) => any,
+): Promise<{ positionId: number; symbol: string; reason: string | null; realizedPnl: number } | null> {
+  const ledgerStore = supabaseForwardLedgerStore(supabase);
+  const ledgerRead = await ledgerStore.getOutcome(p.forward_ledger_id);
+  const ledgerCompleted = ledgerRead.found && ledgerRead.outcome.completed;
+  const state = classifyShadowConsistency(ledgerCompleted, p.status);
+
+  if (state === 'RECONCILIATION_REQUIRED') {
+    // A position status this SHADOW lifecycle never intentionally
+    // produces alongside an incomplete ledger (e.g. CLOSED with no
+    // completed outcome) — surfaced, never silently ignored, but this
+    // function only RECOVERS the RECOVERABLE_INCONSISTENCY case; a true
+    // reconciliation-required state needs a human, not an automatic fix.
+    await log('error', `Position #${p.id} (SHADOW): consistency check found ${state} (ledger completed=${ledgerCompleted}, position status=${p.status}) — needs manual reconciliation, not auto-fixed.`, undefined, 'SHADOW');
+    return null;
+  }
+  if (state !== 'RECOVERABLE_INCONSISTENCY') return null; // NORMAL_OPEN or NORMAL_CLOSED — nothing to do.
+
+  // RECOVERABLE_INCONSISTENCY: recordOutcome succeeded in some earlier
+  // invocation, but the position's own CLOSED update never ran (or hasn't
+  // yet, in a still-in-flight concurrent invocation). Read back exactly
+  // what that FIRST outcome persisted, and finalize from it.
+  if (!ledgerRead.found) return null; // unreachable given ledgerCompleted above, but keeps the type narrowing honest.
+  const { count: exitTelemetryCount } = await supabase.from('options_execution_quality')
+    .select('id', { count: 'exact', head: true }).eq('forward_ledger_id', p.forward_ledger_id).eq('phase', 'EXIT');
+
+  const plan = buildShadowRecoveryFinalizationPlan({
+    ledgerId: p.forward_ledger_id, positionId: p.id,
+    entryDateIso: p.entry_date ? String(p.entry_date) : new Date().toISOString().slice(0, 10),
+    outcome: {
+      exitReason: ledgerRead.outcome.exitReason, netPnl: ledgerRead.outcome.netPnl,
+      outcomeRecordedAtIso: ledgerRead.outcome.outcomeRecordedAtIso,
+      validForForwardValidationCarry: p.valid_for_forward_validation ?? false,
+    },
+    exitTelemetryFound: (exitTelemetryCount ?? 0) > 0,
+  });
+
+  // Atomic — matches zero rows if another concurrent recovery invocation
+  // (or the original invocation, finishing late) already finalized it.
+  const { data: closedRows } = await supabase.from('options_autotrade_positions')
+    .update(plan.update).eq('id', p.id).eq('status', 'ACTIVE').select('id');
+  if (!closedRows || closedRows.length === 0) {
+    await log('info', `Position #${p.id} (SHADOW): recovery finalize found it already CLOSED by another invocation — no-op.`, undefined, 'SHADOW');
+    return null;
+  }
+
+  await log('info', `Position #${p.id} (SHADOW): RECOVERED from a completed ledger outcome (ledger #${p.forward_ledger_id}) that the position row had not yet reflected — finalized CLOSED using the ORIGINAL persisted outcome, no re-simulated exit.`, { plan }, 'SHADOW');
+  return { positionId: p.id, symbol: p.symbol, reason: plan.update.exit_reason, realizedPnl: plan.update.realized_pnl };
 }
 
 /**
@@ -996,6 +1449,19 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
   for (const p of positions) {
     const legs = p.options_autotrade_legs ?? [];
     const exchange = symbolExchanges[p.symbol] ?? 'NFO';
+
+    // Forward-start blocker phase, Task 3/4/5: recovery MUST be checked
+    // BEFORE any quote-based logic or a fresh evaluateExit() call — if the
+    // market has moved back since a prior crash (recordOutcome succeeded,
+    // then the process died before the position CLOSED update), a fresh
+    // exit decision this cycle could easily be HOLD, and this position
+    // would never reach the exit-handling code below again. A completed
+    // ledger is authoritative regardless of what today's quotes say.
+    if (p.execution_mode === 'SHADOW' && p.forward_ledger_id) {
+      const recovered = await recoverShadowPositionIfLedgerCompleted(supabase, p, log);
+      if (recovered) { closed.push(recovered); continue; }
+    }
+
     let currentCostToClose = 0;
     let missingQuote = false;
     for (const l of legs) {
@@ -1092,6 +1558,217 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
         continue;
       }
       realizedPnl = (Number(p.max_profit) || 0) - actualCostToClose;
+    } else if (p.execution_mode === 'SHADOW') {
+      // SHADOW exit (lifecycle-completion phase, Task 4/5/6/9/10). Same
+      // trigger (evaluateExit, above) and same re-quoted quoteMap as every
+      // other position this cycle — never a second fetch. NO broker
+      // closeLeg/awaitFill call anywhere in this branch.
+      const exitLegs = legs.map((l: any) => ({
+        side: l.side as 'BUY' | 'SELL', right: l.option_right as 'CE' | 'PE', strike: Number(l.strike),
+        price: midOrLastPrice(quoteMap.get(`${exchange}:${l.tradingsymbol}`)) ?? 0,
+        entryFillPrice: Number(l.fill_price), quantity: l.quantity, tradingsymbol: l.tradingsymbol,
+      }));
+      const rawQuoteMapForShadow = new Map<string, RawKiteQuote>();
+      for (const l of legs) {
+        const raw = quoteMap.get(`${exchange}:${l.tradingsymbol}`);
+        if (raw) rawQuoteMapForShadow.set(`${exchange}:${l.tradingsymbol}`, raw);
+      }
+
+      // Task 6's "exit telemetry written + crash before outcome" case: if
+      // a PRIOR invocation already inserted an EXIT telemetry batch for
+      // this exact ledger row but the ledger itself was never completed
+      // (recordOutcome never ran, or crashed before it), re-simulating a
+      // fresh exit here would produce a SECOND, independently-priced exit
+      // — the exact "no duplicate telemetry representing two independent
+      // exits" invariant this phase requires. Rather than guess which set
+      // of fills is authoritative, this is flagged for manual
+      // reconciliation and the position is left ACTIVE — never silently
+      // resolved by trusting either a re-simulation or a fragile
+      // reconstruction from partial stored fields.
+      const { count: existingExitTelemetryCount } = await supabase.from('options_execution_quality')
+        .select('id', { count: 'exact', head: true }).eq('forward_ledger_id', p.forward_ledger_id).eq('phase', 'EXIT');
+      // ledgerCompleted is always false here — if it were true, the
+      // earlier recovery check at the top of this loop would already
+      // have handled (and `continue`d) this position.
+      if (hasOrphanedExitTelemetry(false, existingExitTelemetryCount ?? 0)) {
+        await log('error', `Position #${p.id} (SHADOW): exit execution-quality telemetry already exists for ledger #${p.forward_ledger_id} but its outcome was never completed — an ambiguous crash-recovery state (telemetry written, outcome not recorded) that cannot be safely auto-resolved. Left ACTIVE; manual reconciliation required.`, undefined, 'SHADOW');
+        continue;
+      }
+
+      const exitFillResult = simulateShadowExitFills({ legs: exitLegs, quoteMap: rawQuoteMapForShadow, exchange });
+
+      if (exitFillResult.status !== 'FILLED') {
+        await log('error', `Position #${p.id} (SHADOW): exit fill simulation failed — ${exitFillResult.reason}. Left ACTIVE for a retry next cycle.`, undefined, 'SHADOW');
+        continue;
+      }
+      // Task 3: grossPnl is the MID-to-MID economic payoff (zero
+      // execution slippage) — costToCloseAtMid, not the slippage-bearing
+      // costToClose, is what belongs here; slippage is subtracted out
+      // exactly once via entryExecutionCost/exitExecutionCost below (see
+      // executionCost.ts for the full canonical-formula rationale).
+      const grossPnl = (Number(p.max_profit) || 0) - exitFillResult.costToCloseAtMid;
+      const exitExecutionCost = exitFillResult.fills.reduce((s, f) => s + Math.abs(f.slippageRupees), 0);
+
+      // Task 2: real entry-side slippage cost, looked up from THIS exact
+      // trade's own phase='ENTRY' telemetry rows — never hard-coded to 0.
+      // null (not 0) when unavailable, e.g. entry telemetry failed to
+      // persist or predates this fix.
+      const shadowRepoForCost = supabaseShadowRepository(supabase);
+      const entryExecutionCostLookup = p.forward_ledger_id
+        ? await shadowRepoForCost.sumEntryExecutionCost(p.forward_ledger_id)
+        : { value: null, rowCount: 0 };
+
+      // Task 2: statutory/brokerage charges — a deterministic estimate
+      // from the SAME cost model the backtest engine uses, kept strictly
+      // separate from slippage (never folded into totalExecutionCost).
+      const transactionChargesEstimate = estimateTransactionCharges({
+        legs: legs.map((l: any, i: number) => ({
+          side: l.side as 'BUY' | 'SELL', entryTurnover: Number(l.fill_price) * l.quantity,
+          exitTurnover: exitFillResult.fills[i].filledPrice * l.quantity,
+        })),
+        tradeDate: todayIST,
+      }).estimate;
+
+      const costs = computeExecutionCostBreakdown({ entryExecutionCostLookup, exitExecutionCost, transactionChargesEstimate });
+      const canonicalPnl = computeCanonicalForwardPnl(grossPnl, costs);
+      realizedPnl = canonicalPnl.netPnl;
+      const entryDate = p.entry_date ? String(p.entry_date) : todayIST;
+      const holdingPeriodDays = Math.max(0, Math.round((Date.parse(todayIST) - Date.parse(entryDate)) / 86_400_000));
+
+      // Task 11: forward observability ONLY — this hypothetical read never
+      // writes to the SHARED options_autotrade_daily_stats table (that
+      // table governs the REAL daily-risk-lock for PAPER/AUTO; mixing
+      // SHADOW's hypothetical P&L into it would corrupt that gate). It is
+      // approximated against settings.reserved_fund (not a real funds
+      // re-fetch — see this phase's own report for why) — a disclosed
+      // limitation, not silently assumed exact.
+      const { data: shadowTodayRows } = await supabase.from('options_autotrade_positions')
+        .select('realized_pnl').eq('execution_mode', 'SHADOW').eq('status', 'CLOSED').eq('exit_date', todayIST);
+      const shadowRealizedToday = (shadowTodayRows ?? []).reduce((s: number, r: any) => s + (Number(r.realized_pnl) || 0), 0) + realizedPnl;
+      const shadowConsecutiveLosses = (() => {
+        let count = realizedPnl < 0 ? 1 : 0;
+        for (const r of (shadowTodayRows ?? []).slice().reverse()) {
+          if (Number(r.realized_pnl) < 0) count++; else break;
+        }
+        return count;
+      })();
+      const hypotheticalLock = checkDailyRiskLock(
+        { realizedPnlToday: shadowRealizedToday, consecutiveLosses: shadowConsecutiveLosses },
+        { equity: Number(settings.reserved_fund) || 0, maxDailyLossPct: settings.max_daily_loss_pct, maxConsecutiveLosses: settings.max_consecutive_losses },
+      );
+
+      let outcomeStoredOk = false;
+      if (p.forward_ledger_id) {
+        const outcomeResult = await recordOutcome(supabaseForwardLedgerStore(supabase), p.forward_ledger_id, {
+          exitReason: decision.reason ?? 'UNKNOWN', holdingPeriodDays,
+          grossPnl: canonicalPnl.grossPnl, netPnl: canonicalPnl.netPnl,
+          entryExecutionCost: canonicalPnl.entryExecutionCost, exitExecutionCost: canonicalPnl.exitExecutionCost,
+          totalExecutionCost: canonicalPnl.totalExecutionCost, transactionChargesEstimate: canonicalPnl.transactionChargesEstimate,
+          costModelVersion: EXECUTION_COST_MODEL_VERSION,
+          maxAdverseExcursion: null, maxFavorableExcursion: null, // Task 7: MAE_MFE_UNAVAILABLE — no intratrade mark series persisted yet
+          dailyLockState: {
+            wouldTriggerMaxDailyLoss: hypotheticalLock.locked && hypotheticalLock.reason === 'MAX_DAILY_LOSS',
+            wouldTriggerMaxConsecutiveLosses: hypotheticalLock.locked && hypotheticalLock.reason === 'MAX_CONSECUTIVE_LOSSES',
+            realizedPnlTodayAfterThisTrade: shadowRealizedToday, consecutiveLossesAfterThisTrade: shadowConsecutiveLosses,
+          },
+          dataQuality: {
+            maeMfe: 'MAE_MFE_UNAVAILABLE',
+            entryExecutionCostBasis: canonicalPnl.costBasis.entry,
+            entryExecutionCostRowCount: entryExecutionCostLookup.rowCount,
+          },
+        });
+        if ('alreadyCompleted' in outcomeResult) {
+          // Task 9/10 (and forward-start blocker phase Task 3): another
+          // (overlapping/retried) invocation already completed this exact
+          // SHADOW trade's outcome — the ledger's own atomic guard caught
+          // it. This losing invocation must NEVER write its own telemetry
+          // or touch the ledger again, but the position itself may still
+          // be sitting ACTIVE if the WINNING invocation hasn't reached its
+          // own CLOSED update yet (or crashed before it) — recover from
+          // the winner's persisted outcome instead of silently leaving it
+          // stuck, using the exact same recovery path a later monitor
+          // cycle would use.
+          const recovered = await recoverShadowPositionIfLedgerCompleted(supabase, p, log);
+          if (recovered) { closed.push(recovered); }
+          else { await log('info', `Position #${p.id} (SHADOW): outcome already recorded by another invocation — skipping duplicate exit (position not yet recoverable this pass).`, undefined, 'SHADOW'); }
+          continue;
+        }
+        outcomeStoredOk = 'ok' in outcomeResult;
+      }
+
+      // Exit execution-quality telemetry, one row per leg (Task 5).
+      let exitTelemetryOk = true;
+      try {
+        const shadowRepo = supabaseShadowRepository(supabase);
+        const exitRows: ExecutionQualityRow[] = exitFillResult.fills.map((f, i) => {
+          const leg = exitLegs[i];
+          return {
+            scanId: randomUUID(), candidateId: null, intentId: null, positionId: p.id, legId: null,
+            symbol: p.symbol, strategyLabel: p.strategy_label, expiry: p.expiry, strike: leg.strike, optionRight: leg.right,
+            side: f.side, quantity: leg.quantity, executionMode: 'SHADOW', fillModel: 'SHADOW_EXECUTION_V1',
+            phase: 'EXIT', forwardLedgerId: p.forward_ledger_id ?? null,
+            decisionAt: new Date().toISOString(), quoteAt: new Date().toISOString(), submittedAt: new Date().toISOString(), filledAt: new Date().toISOString(),
+            decisionMid: f.decisionPrice, bid: null, ask: null, spreadPct: f.spreadAtEntryPct,
+            submittedPrice: f.submittedPrice, actualFill: f.filledPrice,
+            slippageRupees: f.slippageRupees, slippageBps: f.slippageBps, latencyMs: f.latencyMs,
+            volume: null, openInterest: null, delta: null, dte: 0, indiaVix: null,
+            brokerOrderId: null, fillIsSimulated: true,
+          };
+        });
+        const result = await shadowRepo.insertExecutionQuality(exitRows);
+        exitTelemetryOk = 'ok' in result;
+      } catch { exitTelemetryOk = false; }
+
+      // Forward-start blocker phase, Task 2: the final completed-trade
+      // eligibility verdict, now including protocol-timing — read from
+      // the ledger signal's own version fingerprint + the referenced
+      // protocol run (a real DB read, done HERE by the caller; the
+      // eligibility functions themselves stay pure — see
+      // protocolTiming.ts/shadowExecution.ts's own comments on this).
+      const { data: ledgerFingerprint } = await supabase.from('options_forward_validation_ledger')
+        .select('protocol_id,baseline_version,fill_model_version,recorded_at').eq('id', p.forward_ledger_id).maybeSingle();
+      const { data: referencedRun } = ledgerFingerprint?.protocol_id
+        ? await supabase.from('forward_validation_runs').select('protocol_id,baseline_version,fill_model,status,started_at,stopped_at').eq('protocol_id', ledgerFingerprint.protocol_id).maybeSingle()
+        : { data: null };
+      const protocolTiming = evaluateProtocolTimingEligibility(
+        {
+          signalProtocolId: ledgerFingerprint?.protocol_id ?? null,
+          signalBaselineVersion: ledgerFingerprint?.baseline_version ?? BASELINE_VERSION,
+          signalFillModelVersion: ledgerFingerprint?.fill_model_version ?? 'SHADOW_EXECUTION_V1',
+          signalTimestampMs: ledgerFingerprint?.recorded_at ? Date.parse(ledgerFingerprint.recorded_at) : Date.now(),
+        },
+        {
+          runExists: !!referencedRun, runStatus: referencedRun?.status ?? null, runProtocolId: referencedRun?.protocol_id ?? null,
+          runBaselineVersion: referencedRun?.baseline_version ?? null, runFillModel: referencedRun?.fill_model ?? null,
+          runStartedAtMs: referencedRun?.started_at ? Date.parse(referencedRun.started_at) : null,
+          runTerminalAtMs: referencedRun?.stopped_at ? Date.parse(referencedRun.stopped_at) : null,
+        },
+      );
+      const completedEligibility = isCompletedTradeEligibleForForwardValidation({
+        entryEligibility: { eligible: p.valid_for_forward_validation ?? false, reasons: p.forward_validation_ineligibility_reasons ?? [] },
+        exitEverLegHasRealBidAsk: exitFillResult.hasRealBidAsk, exitQuotesFreshMs: 0, maxQuoteAgeMs: 5 * 60_000,
+        entryExecutionTelemetryStored: entryExecutionCostLookup.rowCount > 0, exitExecutionTelemetryStored: exitTelemetryOk,
+        outcomeStoredSuccessfully: outcomeStoredOk, strategyDrift: false, fillModelDrift: false,
+        knownIngestionBug: false, brokerOrderPlaced: false, protocolTiming,
+      });
+
+      // Second-layer completion guard on the position row itself (Task 9)
+      // — .eq('status','ACTIVE') makes this UPDATE match zero rows if
+      // another invocation already closed it, independent of the ledger
+      // guard above (belt-and-braces, not a replacement for it).
+      const { data: closedRows } = await supabase.from('options_autotrade_positions').update({
+        status: 'CLOSED', execution_state: 'CLOSED', exit_date: todayIST, exit_reason: decision.reason,
+        realized_pnl: realizedPnl, updated_at: new Date().toISOString(),
+        valid_for_forward_validation: completedEligibility.eligible,
+        forward_validation_ineligibility_reasons: completedEligibility.eligible ? null : completedEligibility.reasons,
+      }).eq('id', p.id).eq('status', 'ACTIVE').select('id');
+      if (!closedRows || closedRows.length === 0) {
+        await log('info', `Position #${p.id} (SHADOW): already closed by another invocation — skipping duplicate update.`, undefined, 'SHADOW');
+        continue;
+      }
+      await log('info', `Closed SHADOW position #${p.id} (${p.symbol} ${p.strategy_label}): ${decision.reason} — hypothetical realized P&L ₹${realizedPnl.toFixed(0)} (real bid/ask: ${exitFillResult.hasRealBidAsk}).`, undefined, 'SHADOW');
+      closed.push({ positionId: p.id, symbol: p.symbol, reason: decision.reason, realizedPnl });
+      continue; // SHADOW's own position update already ran above — skip the shared PAPER/AUTO update below
     }
 
     const { error: updateErr } = await supabase.from('options_autotrade_positions').update({
@@ -1112,6 +1789,269 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
   }
 
   res.status(200).json({ ok: true, checked: positions.length, closed });
+}
+
+/**
+ * SHADOW health panel (forward-validation readiness phase, Task 4).
+ * READ-ONLY — makes no write of any kind. Per-symbol counts are drawn
+ * from what is ACTUALLY, reliably observable in this schema:
+ *   - scansAttempted / entryTelemetryAttempts / ledgerSignalAttempts all
+ *     come from the SCAN_STARTED / SHADOW_SIGNAL_RECORDED log events
+ *     handlePaperScan already emits unconditionally for every SHADOW scan
+ *     cycle that reaches that stage — this IS the honest "attempted"
+ *     count, since a totally-failed DB insert leaves no row of its own to
+ *     count, only a log line proving the attempt happened.
+ *   - every *_Successes count comes straight from real rows in the
+ *     underlying table (a row only exists when its insert actually
+ *     succeeded).
+ *   - exitTelemetryAttempts/ledgerOutcomeAttempts are approximated from
+ *     the position-monitor's own SHADOW exit log lines (a disclosed
+ *     approximation — there is no dedicated per-exit-attempt event table
+ *     the way entry has SHADOW_SIGNAL_RECORDED — see this comment, not
+ *     silently assumed exact).
+ * Defaults to today (IST); pass ?date=YYYY-MM-DD for a different day.
+ */
+async function handleShadowHealth(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const date = (req.query?.date as string) || new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const dayStart = `${date}T00:00:00.000Z`;
+  const dayEnd = `${date}T23:59:59.999Z`;
+  const symbols = Object.keys(OPTIONS_SYMBOLS as Record<string, string>);
+  const nowMs = Date.now();
+
+  const reports = [];
+  for (const symbol of symbols) {
+    const scanStartedCount = await countLog(supabase, symbol, 'SHADOW', '[SCAN_STARTED]', dayStart, dayEnd);
+    const signalRecordedCount = await countLog(supabase, symbol, 'SHADOW', '[SHADOW_SIGNAL_RECORDED]', dayStart, dayEnd);
+    const exitClosedCount = await countLog(supabase, symbol, 'SHADOW', 'Closed SHADOW position', dayStart, dayEnd);
+    const exitFailedCount = await countLog(supabase, symbol, 'SHADOW', 'exit fill simulation failed', dayStart, dayEnd);
+    const exitDuplicateCount = await countLog(supabase, symbol, 'SHADOW', 'outcome already recorded', dayStart, dayEnd);
+
+    const { data: snapshotRows } = await supabase.from('options_chain_snapshots')
+      .select('scan_id,bid,ask,open_interest,iv,captured_at').eq('symbol', symbol).gte('captured_at', dayStart).lte('captured_at', dayEnd);
+    const snapshots = snapshotRows ?? [];
+    const distinctSnapshotScans = new Set(snapshots.map((r: any) => r.scan_id)).size;
+
+    const { data: ivRows } = await supabase.from('options_iv_history').select('id').eq('symbol', symbol).gte('captured_at', dayStart).lte('captured_at', dayEnd);
+
+    const { data: entryTelemetryRows } = await supabase.from('options_execution_quality')
+      .select('scan_id').eq('symbol', symbol).eq('execution_mode', 'SHADOW').eq('phase', 'ENTRY').gte('decision_at', dayStart).lte('decision_at', dayEnd);
+    const distinctEntryTelemetryScans = new Set((entryTelemetryRows ?? []).map((r: any) => r.scan_id)).size;
+
+    const { data: exitTelemetryRows } = await supabase.from('options_execution_quality')
+      .select('id').eq('symbol', symbol).eq('execution_mode', 'SHADOW').eq('phase', 'EXIT').gte('decision_at', dayStart).lte('decision_at', dayEnd);
+
+    const { count: ledgerSignalCount } = await supabase.from('options_forward_validation_ledger')
+      .select('id', { count: 'exact', head: true }).eq('symbol', symbol).gte('recorded_at', dayStart).lte('recorded_at', dayEnd);
+
+    const { count: ledgerOutcomeCount } = await supabase.from('options_forward_validation_ledger')
+      .select('id', { count: 'exact', head: true }).eq('symbol', symbol).eq('completed', true).gte('outcome_recorded_at', dayStart).lte('outcome_recorded_at', dayEnd);
+
+    const { count: openPositions } = await supabase.from('options_autotrade_positions')
+      .select('id', { count: 'exact', head: true }).eq('symbol', symbol).eq('execution_mode', 'SHADOW').eq('status', 'ACTIVE');
+    const { count: completedTrades } = await supabase.from('options_autotrade_positions')
+      .select('id', { count: 'exact', head: true }).eq('symbol', symbol).eq('execution_mode', 'SHADOW').eq('status', 'CLOSED');
+    const { count: eligibleCompletedTrades } = await supabase.from('options_autotrade_positions')
+      .select('id', { count: 'exact', head: true }).eq('symbol', symbol).eq('execution_mode', 'SHADOW').eq('status', 'CLOSED').eq('valid_for_forward_validation', true);
+
+    const { data: activeRun } = await supabase.from('forward_validation_runs')
+      .select('started_at').eq('symbol', symbol).eq('baseline_version', BASELINE_VERSION).eq('status', 'ACTIVE').maybeSingle();
+
+    // Task 7/8: classify every SHADOW position (that has a ledger link at
+    // all) against its ledger's completed state, using the SAME pure
+    // classifier the position monitor's recovery path uses — a read-only
+    // embedded-relationship query, no write of any kind.
+    const { data: allShadowRows } = await supabase.from('options_autotrade_positions')
+      .select('id,status,forward_ledger_id,forward_validation_ineligibility_reasons,options_forward_validation_ledger(completed)')
+      .eq('symbol', symbol).eq('execution_mode', 'SHADOW').not('forward_ledger_id', 'is', null);
+    let completedLedgerActivePositionCount = 0;
+    let closedPositionIncompleteLedgerCount = 0;
+    let recoveryRequiredCount = 0;
+    for (const row of allShadowRows ?? []) {
+      const ledgerCompleted = (row as any).options_forward_validation_ledger?.completed === true;
+      const state = classifyShadowConsistency(ledgerCompleted, row.status);
+      if (state === 'RECOVERABLE_INCONSISTENCY') completedLedgerActivePositionCount++;
+      else if (state === 'RECONCILIATION_REQUIRED' && row.status === 'CLOSED') closedPositionIncompleteLedgerCount++;
+      else if (state === 'RECONCILIATION_REQUIRED') recoveryRequiredCount++;
+    }
+    // jsonb array column — filtered in JS rather than via a PostgREST
+    // text-pattern operator that doesn't apply cleanly to jsonb.
+    const { data: ineligibleClosedRows } = await supabase.from('options_autotrade_positions')
+      .select('forward_validation_ineligibility_reasons').eq('symbol', symbol).eq('execution_mode', 'SHADOW')
+      .eq('status', 'CLOSED').eq('valid_for_forward_validation', false);
+    const protocolTimingInvalidTradeCount = (ineligibleClosedRows ?? []).filter((r: any) =>
+      Array.isArray(r.forward_validation_ineligibility_reasons) && r.forward_validation_ineligibility_reasons.some((reason: string) => reason.startsWith('protocol:')),
+    ).length;
+
+    const maxQuoteAgeMs = 5 * 60_000;
+    const counts: ShadowHealthCounts = {
+      symbol,
+      completedLedgerActivePositionCount, closedPositionIncompleteLedgerCount,
+      protocolTimingInvalidTradeCount, recoveryRequiredCount,
+      scansAttempted: scanStartedCount,
+      snapshotWriteSuccesses: distinctSnapshotScans, snapshotWriteAttempts: signalRecordedCount,
+      ivHistoryWriteSuccesses: (ivRows ?? []).length, ivHistoryWriteAttempts: signalRecordedCount,
+      missingBidAskCount: snapshots.filter((s: any) => s.bid === null || s.ask === null).length,
+      staleQuoteCount: snapshots.filter((s: any) => nowMs - Date.parse(s.captured_at) > maxQuoteAgeMs).length,
+      missingOiCount: snapshots.filter((s: any) => s.open_interest === null).length,
+      missingIvCount: snapshots.filter((s: any) => s.iv === null).length,
+      snapshotRowCount: snapshots.length,
+      entryTelemetrySuccesses: distinctEntryTelemetryScans, entryTelemetryAttempts: signalRecordedCount,
+      exitTelemetrySuccesses: (exitTelemetryRows ?? []).length, exitTelemetryAttempts: exitClosedCount + exitFailedCount + exitDuplicateCount,
+      ledgerSignalSuccesses: ledgerSignalCount ?? 0, ledgerSignalAttempts: signalRecordedCount,
+      ledgerOutcomeSuccesses: ledgerOutcomeCount ?? 0, ledgerOutcomeAttempts: exitClosedCount + exitFailedCount + exitDuplicateCount,
+      openShadowPositions: openPositions ?? 0, completedShadowTrades: completedTrades ?? 0,
+      eligibleCompletedShadowTrades: eligibleCompletedTrades ?? 0,
+      activeProtocolRun: !!activeRun, protocolStartedAt: activeRun?.started_at ?? null, nowMs,
+    };
+    reports.push(computeShadowHealthReport(counts));
+  }
+
+  res.status(200).json({ ok: true, date, reports });
+}
+
+async function countLog(supabase: SupabaseClient, symbol: string, executionMode: string, messageContains: string, gte: string, lte: string): Promise<number> {
+  const { count } = await supabase.from('options_autotrade_log')
+    .select('id', { count: 'exact', head: true })
+    .eq('execution_mode', executionMode).ilike('message', `%${messageContains}%${symbol}%`).gte('created_at', gte).lte('created_at', lte);
+  // handlePaperScan's own event()/log() format is `[EVENT_NAME] SYMBOL` or
+  // a plain sentence containing the symbol elsewhere — SCAN_STARTED/
+  // SHADOW_SIGNAL_RECORDED follow the first form (checked with the %...%
+  // pattern above); the exit-side messages ("Closed SHADOW position #N
+  // (SYMBOL ...)") contain the symbol later in the string, which the same
+  // wildcard pattern still matches. If a future log format change breaks
+  // this match, the count degrades to 0 (visibly wrong, not silently
+  // wrong) rather than matching every symbol's rows indiscriminately.
+  return count ?? 0;
+}
+
+/**
+ * Forward-validation protocol START (readiness phase, Task 6/7). Requires
+ * EXPLICIT invocation — never runs automatically on deploy or on the
+ * first SHADOW trade (no code path calls this function except this HTTP
+ * route). Refuses unless BOTH evaluateForwardValidationReadiness()
+ * returns READY and the in-memory self-test passes — a wiring regression
+ * must never be able to silently start an official run.
+ */
+async function handleStartForwardValidation(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const symbol = (req.body?.symbol as string) || 'NIFTY';
+  if (!(OPTIONS_SYMBOLS as Record<string, string>)[symbol]) {
+    res.status(400).json({ error: 'bad_request', message: `Unknown symbol '${symbol}'.` });
+    return;
+  }
+
+  const { data: settings } = await supabase.from('options_autotrade_settings').select('execution_mode').eq('id', 1).maybeSingle();
+  const autoEnabled = settings?.execution_mode === 'AUTO';
+
+  // migrationsPresent: probed non-destructively — real SELECTs of the
+  // exact columns/table 011+012+013 add; a missing-column or missing-table
+  // error means the migration is not applied, not a fabricated guess.
+  const { error: positionsProbeError } = await supabase.from('options_autotrade_positions')
+    .select('forward_ledger_id,valid_for_forward_validation,forward_validation_ineligibility_reasons').limit(1);
+  const { error: ledgerProbeError } = await supabase.from('options_forward_validation_ledger')
+    .select('completed,gross_pnl,entry_execution_cost,exit_execution_cost,total_execution_cost,transaction_charges_estimate,protocol_id,baseline_version,fill_model_version,code_version').limit(1);
+  const { error: execQualityProbeError } = await supabase.from('options_execution_quality').select('phase,forward_ledger_id').limit(1);
+  const { error: runsProbeError } = await supabase.from('forward_validation_runs')
+    .select('id,protocol_id,baseline_version,fill_model,symbol,started_at,status,stopped_at,protocol_version,code_version').limit(1);
+  const migrationsPresent = !positionsProbeError && !ledgerProbeError && !execQualityProbeError && !runsProbeError;
+
+  const selfTestResult = await runForwardValidationSelfTest();
+
+  const health = await (async () => {
+    const req2 = { method: 'GET', query: { symbol } } as any;
+    let captured: any = null;
+    const res2 = { status: () => ({ json: (body: any) => { captured = body; } }) } as any;
+    await handleShadowHealth(req2, res2, supabase);
+    return captured?.reports?.find((r: any) => r.symbol === symbol) ?? null;
+  })();
+  const hasUnresolvedShadowLifecycleInconsistency = !!health && (
+    health.completedLedgerActivePositionCount > 0 || health.closedPositionIncompleteLedgerCount > 0 || health.recoveryRequiredCount > 0
+  );
+
+  const readiness = evaluateForwardValidationReadiness({
+    migrationsPresent,
+    baselineVersion: BASELINE_VERSION, expectedBaselineVersion: BASELINE_VERSION,
+    shadowExecutionV1Active: true, // structurally the only fill model shadowExecution.ts's runShadowFillSimulation ever uses
+    entryTelemetryWired: true, exitTelemetryWired: true, ledgerSignalWired: true, ledgerOutcomeWired: true,
+    entryExecutionCostNonStubbed: true, completionIdempotencyActive: true,
+    healthEndpointWorking: health !== null,
+    // NOT_READY (zero scans today) is a normal pre-market/fresh-symbol
+    // state, not a fault — only DEGRADED (an actual threshold failure or
+    // lifecycle inconsistency) blocks readiness here.
+    hasActiveUnresolvedDataQualityFault: health?.healthStatus === 'DEGRADED',
+    autoEnabled, useNetEvRankingEnabled: false, // hardcoded false in simulate.ts — no code path in this repo can ever set it true
+    protocolTimingEligibilityWired: true, completedLedgerRecoveryWired: true, canonicalPnlActive: true,
+    hasUnresolvedShadowLifecycleInconsistency,
+  });
+
+  if (!selfTestResult.passed) {
+    res.status(200).json({
+      ok: true, started: false, status: 'NOT_READY',
+      reasons: ['pre-start self-test failed', ...selfTestResult.checks.filter((c) => !c.passed).map((c) => `${c.name}: ${c.detail ?? 'failed'}`)],
+    });
+    return;
+  }
+  if (readiness.status !== 'READY') {
+    res.status(200).json({ ok: true, started: false, status: 'NOT_READY', reasons: readiness.reasons });
+    return;
+  }
+
+  const protocolId = `${symbol}-${BASELINE_VERSION}-${new Date().toISOString().slice(0, 10)}-${randomUUID().slice(0, 8)}`;
+  // Atomic claim: forward_validation_runs_one_active_per_symbol_baseline_idx
+  // (migration 013) makes a second concurrent ACTIVE row for this exact
+  // symbol+baseline fail with a unique-violation, not a check-then-act
+  // race — this INSERT is the ONLY place that can ever create a run.
+  const { data: inserted, error: insertErr } = await supabase.from('forward_validation_runs').insert({
+    protocol_id: protocolId, symbol, baseline_version: BASELINE_VERSION, fill_model: 'SHADOW_EXECUTION_V1',
+    status: 'ACTIVE', protocol_version: 'FORWARD_VALIDATION_PROTOCOL_V1', code_version: process.env.VERCEL_GIT_COMMIT_SHA ?? null,
+  }).select('id,protocol_id,started_at').single();
+
+  if (insertErr) {
+    const isUniqueViolation = /duplicate key|unique constraint/i.test(insertErr.message);
+    res.status(isUniqueViolation ? 409 : 502).json({
+      ok: false, started: false,
+      error: isUniqueViolation ? 'already_active' : 'supabase_error',
+      message: isUniqueViolation ? `An ACTIVE forward-validation run already exists for ${symbol}/${BASELINE_VERSION}.` : insertErr.message,
+    });
+    return;
+  }
+
+  await supabase.from('options_autotrade_log').insert({
+    level: 'info', message: `[FORWARD_VALIDATION_STARTED] ${symbol}`,
+    detail: { protocolId, baselineVersion: BASELINE_VERSION, fillModel: 'SHADOW_EXECUTION_V1', startedAt: inserted.started_at },
+    execution_mode: 'SHADOW',
+  });
+
+  res.status(200).json({ ok: true, started: true, status: 'READY', protocolId, startedAt: inserted.started_at, selfTest: selfTestResult });
+}
+
+/**
+ * Protocol STOP/ABORT (Task 12). Never deletes a run — transitions ACTIVE
+ * -> STOPPED (a deliberate, clean end) or ACTIVE -> INVALIDATED (the
+ * code/baseline/fill-model changed mid-run and this run's sample is no
+ * longer comparable). A new run always needs a NEW protocol_id — this
+ * endpoint never resurrects or reuses one.
+ */
+async function handleStopForwardValidation(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const protocolId = req.body?.protocolId as string;
+  const outcome = (req.body?.outcome as string) === 'INVALIDATED' ? 'INVALIDATED' : 'STOPPED';
+  if (!protocolId) { res.status(400).json({ error: 'bad_request', message: 'protocolId is required.' }); return; }
+
+  const { data, error } = await supabase.from('forward_validation_runs')
+    .update({ status: outcome, stopped_at: new Date().toISOString(), notes: req.body?.notes ?? null })
+    .eq('protocol_id', protocolId).eq('status', 'ACTIVE').select('id,protocol_id,symbol,baseline_version,started_at,stopped_at,status');
+
+  if (error) { res.status(502).json({ ok: false, error: 'supabase_error', message: error.message }); return; }
+  if (!data || data.length === 0) {
+    res.status(404).json({ ok: false, error: 'not_found', message: `No ACTIVE run found for protocolId '${protocolId}'.` });
+    return;
+  }
+  await supabase.from('options_autotrade_log').insert({
+    level: 'info', message: `[FORWARD_VALIDATION_${outcome}] ${data[0].symbol}`, detail: data[0], execution_mode: 'SHADOW',
+  });
+  res.status(200).json({ ok: true, run: data[0] });
 }
 
 const EDITABLE_SETTINGS_FIELDS = [
@@ -1814,5 +2754,8 @@ export default async function handler(req: any, res: any) {
   if (resource === 'position-monitor') return handlePositionMonitor(req, res, supabase);
   if (resource === 'vwap-scalper-scan') return handleVwapScalperScan(req, res, supabase);
   if (resource === 'vwap-scalper-monitor') return handleVwapScalperMonitor(req, res, supabase);
+  if (resource === 'shadow-health') return handleShadowHealth(req, res, supabase);
+  if (resource === 'start-forward-validation') return handleStartForwardValidation(req, res, supabase);
+  if (resource === 'stop-forward-validation') return handleStopForwardValidation(req, res, supabase);
   res.status(400).json({ error: 'bad_request', message: 'Unknown or missing ?resource=.' });
 }

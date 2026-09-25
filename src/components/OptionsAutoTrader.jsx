@@ -3,7 +3,6 @@ import { motion, AnimatePresence, useMotionValue, useSpring } from "framer-motio
 import { ChartLineUp, Info, Wallet, Gear, CaretDown, CaretUp, CaretLeft, CaretRight, HandPalm, Bell, Eye, EyeSlash, SortAscending, CalendarBlank } from "@phosphor-icons/react";
 import { inr, toneClass } from "./swingFormat.js";
 import { ScoreBadge } from "./ScoreWidgets.jsx";
-import CinematicHero from "./CinematicHero.jsx";
 
 const POLL_MS = 60_000; // this dashboard only reads already-computed state (settings/positions/log) — the live chain fetch itself runs on its own 30-min cron, not on this poll
 
@@ -831,9 +830,7 @@ export default function OptionsAutoTrader() {
   ].slice(0, 30);
 
   return (
-    <>
-      <CinematicHero />
-      <div className="p-4 pb-20 sm:pb-4 max-w-[1400px] mx-auto relative">
+    <div className="p-4 pb-20 sm:pb-4 max-w-[1400px] mx-auto relative">
       <div className="flex items-center justify-between mb-1 flex-wrap gap-3">
         <div className="flex items-center gap-2">
           <ChartLineUp size={16} weight="bold" className="text-accent" />
@@ -1088,7 +1085,6 @@ export default function OptionsAutoTrader() {
           <span className="text-[10px] font-medium">Activity</span>
         </button>
       </div>
-      </div>
-    </>
+    </div>
   );
 }

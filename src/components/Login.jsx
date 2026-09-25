@@ -1,6 +1,7 @@
 import { useState, useRef } from "react";
 import { motion, useMotionValue, useTransform, AnimatePresence } from "framer-motion";
 import { LockKey, User, Eye, EyeSlash, ArrowRight, CircleNotch, WarningCircle, ShieldCheck } from "@phosphor-icons/react";
+import SplashScreen from "./SplashScreen.jsx";
 
 /**
  * Custom login screen — replaces the native, un-stylable HTTP Basic Auth
@@ -61,6 +62,7 @@ export default function Login() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
   const [shake, setShake] = useState(0);
+  const [showSplash, setShowSplash] = useState(false);
 
   const cardRef = useRef(null);
   const rotateX = useMotionValue(0);
@@ -77,6 +79,12 @@ export default function Login() {
     rotateX.set(py * -6);
   };
   const handlePointerLeave = () => { rotateX.set(0); rotateY.set(0); };
+
+  const goToDashboard = () => {
+    const params = new URLSearchParams(window.location.search);
+    const next = params.get("next");
+    window.location.href = next && next.startsWith("/") ? next : "/";
+  };
 
   const submit = (e) => {
     e.preventDefault();
@@ -95,9 +103,9 @@ export default function Login() {
           setSubmitting(false);
           return;
         }
-        const params = new URLSearchParams(window.location.search);
-        const next = params.get("next");
-        window.location.href = next && next.startsWith("/") ? next : "/";
+        // Session cookie is already set at this point — the splash is
+        // purely a cinematic hold before navigating, not a loading gate.
+        setShowSplash(true);
       })
       .catch(() => {
         setError("Couldn't reach the server — check your connection and try again.");
@@ -108,6 +116,10 @@ export default function Login() {
 
   return (
     <div className="relative min-h-screen flex items-center justify-center px-5 overflow-hidden" style={{ perspective: 1200 }}>
+      <AnimatePresence>
+        {showSplash && <SplashScreen onDone={goToDashboard} />}
+      </AnimatePresence>
+
       <AuroraBackground />
 
       <motion.form

@@ -39,9 +39,23 @@ function isPubliclyReachable(pathname: string, searchParams: URLSearchParams): b
   return false;
 }
 
+// The paper-scan/position-monitor/vwap-scalper crons are server-triggered
+// (an external scheduler, no browser involved) and authenticate with their
+// own Authorization: Bearer <OPTIONS_AUTOTRADE_CRON_SECRET> header, checked
+// again inside options-autotrade.ts's own dispatch. Without this carve-out
+// every cron hit died here with 401 before ever reaching that check — the
+// entire automated scan/monitor pipeline went silent the moment the session
+// cookie gate shipped, since a cron call obviously carries no such cookie.
+function isValidCronRequest(request: Request): boolean {
+  const secret = process.env.OPTIONS_AUTOTRADE_CRON_SECRET;
+  if (!secret) return false;
+  return request.headers.get('authorization') === `Bearer ${secret}`;
+}
+
 export default async function middleware(request: Request): Promise<Response | undefined> {
   const url = new URL(request.url);
   if (isPubliclyReachable(url.pathname, url.searchParams)) return undefined;
+  if (isValidCronRequest(request)) return undefined;
 
   const secret = process.env.SESSION_SECRET;
   if (!secret) {

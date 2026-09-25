@@ -67,11 +67,17 @@ export function sessionCookieName(): string {
 
 export function buildSetCookieHeader(token: string): string {
   const maxAgeSeconds = Math.floor(SESSION_DURATION_MS / 1000);
-  return `${COOKIE_NAME}=${token}; Path=/; Max-Age=${maxAgeSeconds}; HttpOnly; Secure; SameSite=Strict`;
+  // Lax, not Strict: Zerodha's OAuth redirect lands back on /api/kite-callback
+  // as a cross-site top-level GET, and Strict cookies are never sent on a
+  // cross-site request — that dropped this very cookie on the callback hop,
+  // making middleware.ts see "unauthenticated" mid-connect. Lax still omits
+  // the cookie on cross-site POSTs/subrequests (CSRF protection intact) but
+  // allows it on a cross-site top-level navigation like this one.
+  return `${COOKIE_NAME}=${token}; Path=/; Max-Age=${maxAgeSeconds}; HttpOnly; Secure; SameSite=Lax`;
 }
 
 export function buildClearCookieHeader(): string {
-  return `${COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict`;
+  return `${COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`;
 }
 
 /** Reads a named cookie out of a raw Cookie header string. */

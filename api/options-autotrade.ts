@@ -116,6 +116,9 @@ import { runR2ConnectivityTest } from '../src/vwap-scalper/archive/r2Connectivit
 import { exportPartitionToArchive, supabasePostgresBarReader } from '../src/vwap-scalper/archive/exportPostgresToArchive.ts';
 import { createBarArchiveStore } from '../src/vwap-scalper/data/parquetBarArchiveStore.ts';
 import { readBarsForSymbolRange, partitionsInRange } from '../src/vwap-scalper/archive/archiveBarReader.ts';
+import { backfillSymbolToArchive } from '../src/vwap-scalper/archive/archiveBackfill.ts';
+import { supabaseCheckpointStore } from '../src/vwap-scalper/archive/checkpointStore.ts';
+import { createLiveKiteFetcher, checkKiteSessionValid } from '../src/vwap-scalper/archive/kiteLiveFetcher.ts';
 import { createSessionToken, buildSetCookieHeader, buildClearCookieHeader, readCookie, verifySessionToken, sessionCookieName } from '../src/lib/session.ts';
 
 const KITE_BASE = 'https://api.kite.trade';
@@ -1928,6 +1931,102 @@ async function handleVwapR2Verify(req: any, res: any, supabase: SupabaseClient) 
   res.status(400).json({ error: 'bad_request', message: 'stage must be one of: connectivity, canary, full-export' });
 }
 
+/**
+ * Resumable, checkpoint-bounded Kite → R2 archive backfill
+ * (VWAP_STORAGE_MIGRATION_PLAN.md tasks 10/11, run after R2 connectivity
+ * and reconciliation both passed — see VWAP_R2_EXPORT_RECONCILIATION_REPORT.md).
+ * Writes ONLY to the R2 archive via `backfillSymbolToArchive` — never to
+ * `vwap_minute_bars`. The Postgres `vwap_backfill_checkpoints` table
+ * remains authoritative for resume progress.
+ *
+ * ?stage=session-check — a read-only Kite `/user/profile` call. Kite
+ *   access tokens expire daily; this must be checked before starting any
+ *   real backfill work, never assumed valid from a token obtained
+ *   yesterday.
+ * ?stage=status — current checkpoint state for every NIFTY-50 symbol
+ *   (COMPLETE/PARTIAL/FAILED/NO_DATA/IN_PROGRESS/NOT_STARTED), so no
+ *   symbol is ever silently omitted from a final report.
+ * ?stage=run&symbol=SYM&maxChunks=N — processes up to N chunk windows for
+ *   SYM this call, bounded to stay inside this function's own execution
+ *   time limit. Checks the Kite session first and refuses to start (or
+ *   continue) on an invalid one, preserving whatever checkpoint already
+ *   exists. Instrument tokens are resolved from the existing `stocks`
+ *   table (already populated for the swing strategy, covers all 50
+ *   NIFTY-50 symbols) rather than re-fetching Kite's instrument dump.
+ */
+async function handleVwapArchiveBackfill(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const stage = (req.query?.stage as string) || 'status';
+
+  const apiKey = process.env.KITE_API_KEY;
+  if (!apiKey) { res.status(500).json({ error: 'server_misconfigured', message: 'KITE_API_KEY missing' }); return; }
+  const { data: kiteSessionRow } = await supabase.from('kite_session').select('access_token').eq('id', 1).maybeSingle();
+  const accessToken = kiteSessionRow?.access_token;
+  if (!accessToken) { res.status(200).json({ stage, error: 'KITE_SESSION_REQUIRED', message: 'No Kite session on file — connect first.' }); return; }
+  const creds = { apiKey, accessToken };
+
+  if (stage === 'session-check') {
+    const result = await checkKiteSessionValid(creds);
+    res.status(200).json({ stage, ...result });
+    return;
+  }
+
+  if (stage === 'status') {
+    const { data: checkpoints, error } = await supabase.from('vwap_backfill_checkpoints').select('*');
+    if (error) { res.status(500).json({ error: error.message }); return; }
+    const bySymbol = new Map((checkpoints ?? []).map((c: any) => [c.symbol, c]));
+    const report = NIFTY_50_UNIVERSE.map((s) => {
+      const cp = bySymbol.get(s.symbol) as any;
+      return {
+        symbol: s.symbol,
+        status: cp?.backfill_status ?? 'NOT_STARTED',
+        storageBackend: cp?.storage_backend ?? null,
+        earliestPersistedTimestamp: cp?.earliest_persisted_timestamp ?? null,
+        latestPersistedTimestamp: cp?.latest_persisted_timestamp ?? null,
+      };
+    });
+    res.status(200).json({ stage, symbols: report });
+    return;
+  }
+
+  if (stage === 'run') {
+    const symbol = req.query?.symbol as string;
+    if (!symbol) { res.status(400).json({ error: 'bad_request', message: 'symbol is required' }); return; }
+    const maxChunks = Math.max(1, Math.min(10, Number(req.query?.maxChunks) || 3));
+
+    const sessionCheck = await checkKiteSessionValid(creds);
+    if (!sessionCheck.valid) {
+      res.status(200).json({ stage, symbol, error: 'KITE_SESSION_REQUIRED', message: sessionCheck.message });
+      return;
+    }
+
+    const { data: stockRow, error: stockError } = await supabase.from('stocks').select('instrument_token').eq('symbol', symbol).maybeSingle();
+    if (stockError || !stockRow?.instrument_token) {
+      res.status(200).json({ stage, symbol, error: 'instrument_token_not_found', message: stockError?.message ?? `no stocks row for ${symbol}` });
+      return;
+    }
+
+    const r2Config = readR2ConfigFromEnv();
+    const client = createR2ObjectStorage(r2Config);
+    const archiveStore = createBarArchiveStore(client, '/tmp/vwap-archive-backfill-scratch');
+    const checkpoints = supabaseCheckpointStore(supabase);
+    const fetcher = createLiveKiteFetcher(creds);
+
+    const today = new Date().toISOString().slice(0, 10);
+    const result = await backfillSymbolToArchive(
+      { fetcher, archiveStore, checkpoints },
+      {
+        symbol, instrumentToken: stockRow.instrument_token, overallFromISO: '2023-01-01', overallToISO: today,
+        throttleMs: 1200, storageBackend: 'R2', maxChunksPerCall: maxChunks,
+      },
+    );
+    res.status(200).json({ stage, result });
+    return;
+  }
+
+  res.status(400).json({ error: 'bad_request', message: 'stage must be one of: session-check, status, run' });
+}
+
 async function handleShadowHealth(req: any, res: any, supabase: SupabaseClient) {
   if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
   const date = (req.query?.date as string) || new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
@@ -2906,6 +3005,7 @@ export default async function handler(req: any, res: any) {
   if (resource === 'vwap-scalper-monitor') return handleVwapScalperMonitor(req, res, supabase);
   if (resource === 'shadow-health') return handleShadowHealth(req, res, supabase);
   if (resource === 'vwap-r2-verify') return handleVwapR2Verify(req, res, supabase);
+  if (resource === 'vwap-archive-backfill') return handleVwapArchiveBackfill(req, res, supabase);
   if (resource === 'start-forward-validation') return handleStartForwardValidation(req, res, supabase);
   if (resource === 'stop-forward-validation') return handleStopForwardValidation(req, res, supabase);
   res.status(400).json({ error: 'bad_request', message: 'Unknown or missing ?resource=.' });

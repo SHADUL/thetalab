@@ -22,7 +22,7 @@ import type { BarArchiveStoreWithIntegrity } from '../data/parquetBarArchiveStor
 import { partitionKeyForTimestamp } from '../data/barArchiveStore.ts';
 import { detectCheckpointArchiveDrift } from './checkpointDrift.ts';
 
-export type ArchiveBackfillStatus = 'COMPLETE' | 'PARTIAL' | 'FAILED' | 'NO_DATA' | 'DRIFT_DETECTED';
+export type ArchiveBackfillStatus = 'COMPLETE' | 'PARTIAL' | 'FAILED' | 'NO_DATA' | 'DRIFT_DETECTED' | 'IN_PROGRESS';
 
 export interface CheckpointRecord {
   earliestPersistedMs: number | null;
@@ -45,6 +45,8 @@ export interface ArchiveBackfillSymbolParams {
   overallToISO: string;
   throttleMs: number;
   storageBackend: 'LOCAL' | 'R2';
+  /** Caps how many chunk windows this single call processes — a serverless function has a hard execution-time limit, and a multi-year backfill is many chunks. Omit to process every remaining window in one call (fine for tests/local use). The checkpoint is updated after each chunk, so a bounded call is naturally resumable: the next call with the same params picks up exactly where this one stopped. */
+  maxChunksPerCall?: number;
 }
 
 export interface ArchiveBackfillSymbolResult {
@@ -99,7 +101,9 @@ export async function backfillSymbolToArchive(
     }
   }
 
-  const windows = buildChunkWindows(resumeFromISO, params.overallToISO);
+  const allWindows = buildChunkWindows(resumeFromISO, params.overallToISO);
+  const windows = params.maxChunksPerCall != null ? allWindows.slice(0, params.maxChunksPerCall) : allWindows;
+  const boundedThisCall = windows.length < allWindows.length;
   let barsWritten = 0;
   let chunksFailed = 0;
   const failedChunkDetails: Array<{ from: string; to: string; message: string }> = [];
@@ -181,7 +185,16 @@ export async function backfillSymbolToArchive(
     await sleep(params.throttleMs);
   }
 
-  const status: ArchiveBackfillStatus = barsWritten === 0 && chunksFailed === windows.length ? 'FAILED'
+  // A bounded call that got through all its allotted chunks without a
+  // terminal FAILED and still has more windows left overall is
+  // IN_PROGRESS, not COMPLETE/PARTIAL/NO_DATA — those final classifications
+  // only apply once every window up to overallToISO has actually been
+  // attempted. The checkpoint already reflects everything written so far,
+  // so the next call resumes correctly regardless of which status this
+  // one returns.
+  const status: 'FAILED' | 'IN_PROGRESS' | 'NO_DATA' | 'PARTIAL' | 'COMPLETE' =
+    barsWritten === 0 && chunksFailed === windows.length ? 'FAILED'
+    : boundedThisCall ? 'IN_PROGRESS'
     : barsWritten === 0 ? 'NO_DATA'
     : chunksFailed > 0 ? 'PARTIAL'
     : 'COMPLETE';

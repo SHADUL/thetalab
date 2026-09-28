@@ -25,6 +25,7 @@
  * for ambiguous same-bar fills).
  */
 import type { Bar, Direction, VwapBandsPoint } from './types.ts';
+import { evaluateExitPolicy, observationFromBar } from './exitPolicy.ts';
 
 export interface VwapScalperExitEvaluation {
   exited: boolean;
@@ -58,6 +59,16 @@ export function computeEffectiveTarget(
   return direction === 'LONG' ? Math.max(currentVwap, minRewardTarget) : Math.min(currentVwap, minRewardTarget);
 }
 
+/**
+ * Now a thin wrapper over the shared exitPolicy.ts core (VWAP_SCALPER_AUDIT.md
+ * §2.13/§3.4 fix) — this function no longer has its own copy of the
+ * stop/target/tie-break rules; it just loops bars and delegates each one
+ * to `evaluateExitPolicy`, the SAME function `handleVwapScalperMonitor`'s
+ * live path now calls too (see api/options-autotrade.ts). SESSION_END is
+ * never produced here (a backtest replay has no "session ended" signal of
+ * its own mid-array — the caller decides that), so `sessionEnded` is
+ * always false in this loop.
+ */
 export function evaluateVwapScalperExit(
   direction: Direction,
   stopPrice: number | null,
@@ -68,13 +79,13 @@ export function evaluateVwapScalperExit(
 ): VwapScalperExitEvaluation {
   for (let i = 0; i < barsSinceEntry.length; i++) {
     const bar = barsSinceEntry[i];
-    const target = computeEffectiveTarget(direction, entryPrice, stopPrice, bandsSinceEntry[i].vwap, minRewardMultiple);
-
-    const stopHit = stopPrice !== null && (direction === 'LONG' ? bar.l <= stopPrice : bar.h >= stopPrice);
-    if (stopHit) return { exited: true, reason: 'STOP', exitPrice: stopPrice!, exitBarIndex: i };
-
-    const targetHit = direction === 'LONG' ? bar.h >= target : bar.l <= target;
-    if (targetHit) return { exited: true, reason: 'TARGET', exitPrice: target, exitBarIndex: i };
+    const effectiveTarget = computeEffectiveTarget(direction, entryPrice, stopPrice, bandsSinceEntry[i].vwap, minRewardMultiple);
+    const result = evaluateExitPolicy({
+      direction, stopPrice, effectiveTarget, observation: observationFromBar(bar), sessionEnded: false,
+    });
+    if (result.decision === 'STOP' || result.decision === 'TARGET') {
+      return { exited: true, reason: result.decision, exitPrice: result.exitPrice!, exitBarIndex: i };
+    }
   }
   return NOT_EXITED;
 }

@@ -108,6 +108,14 @@ import { computeVwapScalperPositionSize, computeFixedCapitalPositionSize } from 
 import { NIFTY_50_UNIVERSE } from '../src/vwap-scalper/nifty50Universe.ts';
 import { computeEffectiveTarget } from '../src/vwap-scalper/targetAndStop.ts';
 import type { Bar as VwapBar, VwapScalperParams } from '../src/vwap-scalper/types.ts';
+import { claimEntryIntent, supabaseEntryIntentStore } from '../src/vwap-scalper/entryIntent.ts';
+import { evaluateExitPolicy, observationFromLiveTick } from '../src/vwap-scalper/exitPolicy.ts';
+import { computeVwapScalperGrossPnl } from '../src/vwap-scalper/pnl.ts';
+import { readR2ConfigFromEnv, createR2ObjectStorage, createR2AdminOps } from '../src/vwap-scalper/archive/r2ObjectStorage.ts';
+import { runR2ConnectivityTest } from '../src/vwap-scalper/archive/r2ConnectivityTest.ts';
+import { exportPartitionToArchive, supabasePostgresBarReader } from '../src/vwap-scalper/archive/exportPostgresToArchive.ts';
+import { createBarArchiveStore } from '../src/vwap-scalper/data/parquetBarArchiveStore.ts';
+import { readBarsForSymbolRange, partitionsInRange } from '../src/vwap-scalper/archive/archiveBarReader.ts';
 import { createSessionToken, buildSetCookieHeader, buildClearCookieHeader, readCookie, verifySessionToken, sessionCookieName } from '../src/lib/session.ts';
 
 const KITE_BASE = 'https://api.kite.trade';
@@ -1811,6 +1819,115 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
  *     silently assumed exact).
  * Defaults to today (IST); pass ?date=YYYY-MM-DD for a different day.
  */
+/**
+ * Gated production verification for the VWAP R2 archive migration
+ * (VWAP_STORAGE_MIGRATION_PLAN.md / VWAP_R2_ARCHIVE_READINESS_REPORT.md).
+ * R2's `Secret`-type env vars are only ever injected into a running
+ * Vercel function — they cannot be pulled via `vercel env pull` or read
+ * via the API/CLI — so this is the ONLY place a real connectivity test,
+ * canary export, or full export/reconciliation can actually run. This
+ * resource NEVER touches VWAP strategy behavior or Options Auto-Trader
+ * state, and NEVER deletes a Postgres row.
+ *
+ * ?stage=connectivity (default) — env-var presence (booleans only, never
+ *   values) + the real write/read/list/delete R2 round-trip.
+ * ?stage=canary — exports+reconciles exactly one fixed partition
+ *   (ADANIENT/2023/1, part of its known-COMPLETE Postgres range), then
+ *   reads it back through the same path the backtest engine will use.
+ * ?stage=full-export&offset=&limit= — exports+reconciles up to `limit`
+ *   partitions starting at `offset` from the full, deterministic list of
+ *   partitions implied by every row currently in
+ *   `vwap_backfill_checkpoints`. Idempotent and resumable by construction
+ *   (writeBars merges/dedupes) — safe to re-call the same offset, and
+ *   bounded per call to stay well inside a serverless function's
+ *   execution time limit rather than exporting 3.04M rows in one request.
+ */
+async function handleVwapR2Verify(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const stage = (req.query?.stage as string) || 'connectivity';
+
+  const envCheck = {
+    VWAP_ARCHIVE_BACKEND: process.env.VWAP_ARCHIVE_BACKEND ?? null,
+    R2_ACCOUNT_ID: Boolean(process.env.R2_ACCOUNT_ID),
+    R2_ACCESS_KEY_ID: Boolean(process.env.R2_ACCESS_KEY_ID),
+    R2_SECRET_ACCESS_KEY: Boolean(process.env.R2_SECRET_ACCESS_KEY),
+    R2_BUCKET_NAME: Boolean(process.env.R2_BUCKET_NAME),
+  };
+  const allPresent = envCheck.VWAP_ARCHIVE_BACKEND === 'R2'
+    && envCheck.R2_ACCOUNT_ID && envCheck.R2_ACCESS_KEY_ID && envCheck.R2_SECRET_ACCESS_KEY && envCheck.R2_BUCKET_NAME;
+
+  if (!allPresent) {
+    res.status(200).json({ stage, envCheck, error: 'R2 not fully configured — see envCheck for which var(s) are missing' });
+    return;
+  }
+
+  let r2Config;
+  try {
+    r2Config = readR2ConfigFromEnv();
+  } catch (err: any) {
+    res.status(200).json({ stage, envCheck, error: err.message });
+    return;
+  }
+
+  const client = createR2ObjectStorage(r2Config);
+  const adminOps = createR2AdminOps(r2Config);
+  const scratchDir = '/tmp/vwap-r2-verify-scratch';
+
+  if (stage === 'connectivity') {
+    const result = await runR2ConnectivityTest(client, adminOps.deleteObject, scratchDir);
+    res.status(200).json({ stage, envCheck, connectivity: result });
+    return;
+  }
+
+  const archiveStore = createBarArchiveStore(client, scratchDir);
+  const reader = supabasePostgresBarReader(supabase);
+
+  if (stage === 'canary') {
+    const key = { symbol: 'ADANIENT', year: 2023, month: 1 };
+    const exportResult = await exportPartitionToArchive({ reader, archiveStore }, key);
+    let readBack: { rowCount: number } | null = null;
+    if (exportResult.status === 'RECONCILED') {
+      const fromMs = Date.UTC(2023, 0, 1);
+      const toMs = Date.UTC(2023, 1, 1);
+      const rows = await readBarsForSymbolRange(archiveStore, 'ADANIENT', fromMs, toMs);
+      readBack = { rowCount: rows.length };
+    }
+    res.status(200).json({ stage, envCheck, exportResult, readBack });
+    return;
+  }
+
+  if (stage === 'full-export') {
+    const offset = Math.max(0, Number(req.query?.offset) || 0);
+    const limit = Math.max(1, Math.min(20, Number(req.query?.limit) || 5));
+
+    const { data: checkpoints, error } = await supabase.from('vwap_backfill_checkpoints').select('*').order('symbol', { ascending: true });
+    if (error) { res.status(500).json({ error: error.message }); return; }
+
+    const allPartitions: Array<{ symbol: string; year: number; month: number }> = [];
+    for (const cp of checkpoints ?? []) {
+      if (!cp.earliest_persisted_timestamp || !cp.latest_persisted_timestamp) continue;
+      allPartitions.push(...partitionsInRange(cp.symbol, Date.parse(cp.earliest_persisted_timestamp), Date.parse(cp.latest_persisted_timestamp)));
+    }
+
+    const batch = allPartitions.slice(offset, offset + limit);
+    const results = [];
+    for (const key of batch) {
+      results.push(await exportPartitionToArchive({ reader, archiveStore }, key));
+    }
+
+    res.status(200).json({
+      stage, envCheck,
+      totalPartitions: allPartitions.length,
+      offset, limit,
+      processedThisCall: results,
+      nextOffset: offset + batch.length < allPartitions.length ? offset + batch.length : null,
+    });
+    return;
+  }
+
+  res.status(400).json({ error: 'bad_request', message: 'stage must be one of: connectivity, canary, full-export' });
+}
+
 async function handleShadowHealth(req: any, res: any, supabase: SupabaseClient) {
   if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
   const date = (req.query?.date as string) || new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
@@ -2482,13 +2599,35 @@ async function handleVwapScalperScan(req: any, res: any, supabase: SupabaseClien
       continue;
     }
 
-    const { error: insertErr } = await supabase.from('vwap_scalper_positions').insert({
+    // VWAP_SCALPER_AUDIT.md §2.17 fix: atomic claim BEFORE inserting the
+    // position — the partial unique index on vwap_scalper_entry_intents
+    // (migration 003) is the actual concurrency authority. Two overlapping
+    // scans discovering the exact same signal (same symbol/session/candle/
+    // direction/entry mode) now genuinely collide here; only one proceeds
+    // to open a position for it. A later, real signal (different candle)
+    // is a different intent_key and is never blocked by this claim.
+    const signalTimestampMs = bars[bars.length - 1].t;
+    const claim = await claimEntryIntent(supabaseEntryIntentStore(supabase), {
+      symbol, tradeDate: todayIST, signalTimestampMs, direction: freshSignal.direction, entryMode: params.entryMode,
+    });
+    if (!claim.claimed) {
+      if (claim.reason === 'CONFLICT') await log('info', `${symbol}: signal already claimed by another invocation this cycle — skipping duplicate.`);
+      else await log('error', `${symbol}: entry-intent claim failed — ${claim.message}. Skipping to avoid an unguarded duplicate entry.`);
+      continue;
+    }
+
+    const { data: insertedPosition, error: insertErr } = await supabase.from('vwap_scalper_positions').insert({
       symbol, direction: freshSignal.direction, quantity: sizing.quantity,
       entry_price: freshSignal.entryPrice, vwap_at_entry: freshSignal.vwapAtEntry,
       stop_price: freshSignal.stopPrice, entry_bar_time: new Date(bars[bars.length - 1].t).toISOString(),
       status: 'ACTIVE',
-    });
-    if (insertErr) { await log('error', `Failed to open PAPER position for ${symbol}`, { message: insertErr.message }); continue; }
+    }).select('id').single();
+    if (insertErr) {
+      await log('error', `Failed to open PAPER position for ${symbol}`, { message: insertErr.message });
+      await supabaseEntryIntentStore(supabase).updateStatus(claim.intentId, { status: 'FAILED', error: insertErr.message });
+      continue;
+    }
+    await supabaseEntryIntentStore(supabase).updateStatus(claim.intentId, { status: 'COMPLETED', positionId: insertedPosition.id });
 
     const stopLabel = freshSignal.stopPrice !== null ? `stop ₹${freshSignal.stopPrice.toFixed(2)}` : 'no stop';
     await log('info', `Opened PAPER position: ${symbol} ${freshSignal.direction} x${sizing.quantity} @ ₹${freshSignal.entryPrice.toFixed(2)} (${stopLabel}) — ${freshSignal.reason}`);
@@ -2570,23 +2709,28 @@ async function handleVwapScalperMonitor(req: any, res: any, supabase: SupabaseCl
     const currentVwap = computeVwapBands(bars, params.stdevMultiplier)[bars.length - 1].vwap;
 
     const direction = p.direction as 'LONG' | 'SHORT';
-    const unrealizedPnl = (direction === 'LONG' ? ltp - Number(p.entry_price) : Number(p.entry_price) - ltp) * Number(p.quantity);
+    const unrealizedPnl = computeVwapScalperGrossPnl(direction, Number(p.entry_price), ltp, Number(p.quantity));
     await supabase.from('vwap_scalper_positions').update({
       unrealized_pnl: unrealizedPnl, unrealized_pnl_updated_at: new Date().toISOString(),
     }).eq('id', p.id);
 
+    // VWAP_SCALPER_CORRECTNESS Task 3: the SAME shared exit-policy core the
+    // backtest engine's evaluateVwapScalperExit now delegates to as well
+    // (see exitPolicy.ts) — this file no longer has its own independent
+    // stop/target/tie-break rules.
     const stopPrice = p.stop_price !== null ? Number(p.stop_price) : null;
     const minRewardMultiple = Number(settings.min_reward_risk_multiple) || null;
     const effectiveTarget = computeEffectiveTarget(direction, Number(p.entry_price), stopPrice, currentVwap, minRewardMultiple);
-    const stopHit = stopPrice !== null && (direction === 'LONG' ? ltp <= stopPrice : ltp >= stopPrice);
-    const targetHit = direction === 'LONG' ? ltp >= effectiveTarget : ltp <= effectiveTarget;
     const sessionEnded = !isMarketOpenIST();
+    const exitDecision = evaluateExitPolicy({
+      direction, stopPrice, effectiveTarget, observation: observationFromLiveTick(ltp), sessionEnded,
+    });
 
-    if (!stopHit && !targetHit && !sessionEnded) continue;
+    if (exitDecision.decision === 'HOLD') continue;
 
-    const exitPrice = stopHit ? stopPrice! : targetHit ? effectiveTarget : ltp;
-    const reason = stopHit ? 'STOP' : targetHit ? 'TARGET' : 'SESSION_END';
-    const realizedPnl = (direction === 'LONG' ? exitPrice - Number(p.entry_price) : Number(p.entry_price) - exitPrice) * Number(p.quantity);
+    const exitPrice = exitDecision.exitPrice!;
+    const reason = exitDecision.decision;
+    const realizedPnl = computeVwapScalperGrossPnl(direction, Number(p.entry_price), exitPrice, Number(p.quantity));
 
     const { error: updateErr } = await supabase.from('vwap_scalper_positions').update({
       status: 'CLOSED', exit_price: exitPrice, exit_reason: reason, exit_bar_time: new Date().toISOString(),
@@ -2761,6 +2905,7 @@ export default async function handler(req: any, res: any) {
   if (resource === 'vwap-scalper-scan') return handleVwapScalperScan(req, res, supabase);
   if (resource === 'vwap-scalper-monitor') return handleVwapScalperMonitor(req, res, supabase);
   if (resource === 'shadow-health') return handleShadowHealth(req, res, supabase);
+  if (resource === 'vwap-r2-verify') return handleVwapR2Verify(req, res, supabase);
   if (resource === 'start-forward-validation') return handleStartForwardValidation(req, res, supabase);
   if (resource === 'stop-forward-validation') return handleStopForwardValidation(req, res, supabase);
   res.status(400).json({ error: 'bad_request', message: 'Unknown or missing ?resource=.' });

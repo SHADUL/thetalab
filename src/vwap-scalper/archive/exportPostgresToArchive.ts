@@ -43,6 +43,8 @@ export async function exportPartitionToArchive(
     : { status: 'MISMATCH', key, reconciliation };
 }
 
+const SUPABASE_PAGE_SIZE = 1000; // PostgREST's own default row cap per request — every read MUST paginate past this, never a single unbounded .select().
+
 /** Production adapter — bounded to one calendar month per query by construction, never the whole table. Typed loosely, same reason as every other Supabase adapter in this codebase (see orderIntent.ts's own header comment). */
 export function supabasePostgresBarReader(supabase: any): PostgresBarReader {
   return {
@@ -50,15 +52,33 @@ export function supabasePostgresBarReader(supabase: any): PostgresBarReader {
       const monthStr = String(month).padStart(2, '0');
       const rangeStart = new Date(Date.UTC(year, month - 1, 1)).toISOString();
       const rangeEnd = new Date(Date.UTC(month === 12 ? year + 1 : year, month === 12 ? 0 : month, 1)).toISOString();
-      const { data, error } = await supabase
-        .from('vwap_minute_bars')
-        .select('*')
-        .eq('symbol', symbol)
-        .gte('timestamp', rangeStart)
-        .lt('timestamp', rangeEnd)
-        .order('timestamp', { ascending: true });
-      if (error) throw new Error(`readBarsForPartition(${symbol}, ${year}-${monthStr}) failed: ${error.message}`);
-      return (data ?? []).map((row: any): ArchiveBarRow => ({
+
+      // PAGINATED — a single unbounded .select('*') silently truncates at
+      // Supabase/PostgREST's default 1000-row response cap, which would
+      // make every partition with >1000 bars in a month (i.e. almost
+      // every real month) export incomplete and "reconcile" clean only
+      // because the reconciliation compared against the SAME truncated
+      // read, never the true Postgres total. Loop with .range() until a
+      // page comes back short.
+      const allRows: any[] = [];
+      let offset = 0;
+      for (;;) {
+        const { data, error } = await supabase
+          .from('vwap_minute_bars')
+          .select('*')
+          .eq('symbol', symbol)
+          .gte('timestamp', rangeStart)
+          .lt('timestamp', rangeEnd)
+          .order('timestamp', { ascending: true })
+          .range(offset, offset + SUPABASE_PAGE_SIZE - 1);
+        if (error) throw new Error(`readBarsForPartition(${symbol}, ${year}-${monthStr}) failed at offset ${offset}: ${error.message}`);
+        const page = data ?? [];
+        allRows.push(...page);
+        if (page.length < SUPABASE_PAGE_SIZE) break;
+        offset += SUPABASE_PAGE_SIZE;
+      }
+
+      return allRows.map((row: any): ArchiveBarRow => ({
         symbol: row.symbol,
         instrumentToken: row.instrument_token,
         t: Date.parse(row.timestamp),

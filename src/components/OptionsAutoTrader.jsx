@@ -866,6 +866,42 @@ export default function OptionsAutoTrader() {
           {killSwitchBusy ? "Stopping…" : "Kill Switch"}
         </motion.button>
       </div>
+
+      {/* Always visible — was previously only reachable by opening the
+          collapsible settings panel below, so switching modes (or even
+          seeing which mode is active beyond the small header badge)
+          required an extra click every time. */}
+      <div className="flex items-center gap-3 flex-wrap py-2.5 mb-2 px-3 rounded-[12px]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+        <span className="text-[11px] font-semibold text-muted">Execution Mode</span>
+        <div className="seg-track">
+          {["OFF", "PAPER", "SHADOW", "AUTO"].map((mode) => (
+            <motion.button key={mode} whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+              role="tab" aria-selected={settings?.execution_mode === mode} data-on={settings?.execution_mode === mode}
+              onClick={() => setExecutionMode(mode)} disabled={saving} className="seg"
+              style={
+                mode === "AUTO" && settings?.execution_mode === "AUTO" ? { color: "var(--c-loss)" }
+                : mode === "SHADOW" && settings?.execution_mode === "SHADOW" ? { color: "var(--c-accent)" }
+                : undefined
+              }>
+              {mode}
+            </motion.button>
+          ))}
+        </div>
+        {settings?.execution_mode === "AUTO" ? (
+          <span className="text-[10.5px] font-semibold px-2 py-1 rounded-[6px]" style={{ background: "var(--c-loss-soft)", color: "var(--c-loss)" }}>
+            REAL MONEY — real orders are placed on your Zerodha account
+          </span>
+        ) : settings?.execution_mode === "SHADOW" ? (
+          <span className="text-[10.5px] font-semibold px-2 py-1 rounded-[6px]" style={{ background: "var(--c-accent-soft)", color: "var(--c-accent)" }}>
+            SHADOW — live decisions, simulated fills, zero broker orders
+          </span>
+        ) : (
+          <span className="text-[10.5px] text-faint px-2 py-1 rounded-[6px]" style={{ background: "var(--c-surface-2)" }}>
+            ALERT_ONLY/SEMI_AUTO aren't built yet
+          </span>
+        )}
+      </div>
+
       <IndexTicker indices={indices} />
       <button onClick={() => setDescOpen((v) => !v)} className="flex items-center gap-1 text-[11px] text-muted mb-2">
         <Info size={12} weight="regular" />
@@ -927,36 +963,6 @@ export default function OptionsAutoTrader() {
 
         {settingsOpen && (
           <div className="px-3 pb-3 pt-1" style={{ borderTop: "1px solid var(--c-line)" }}>
-            <div className="flex items-center gap-3 flex-wrap py-2.5">
-              <span className="text-[11px] font-semibold text-muted">Execution Mode</span>
-              <div className="seg-track">
-                {["OFF", "PAPER", "SHADOW", "AUTO"].map((mode) => (
-                  <motion.button key={mode} whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
-                    role="tab" aria-selected={settings?.execution_mode === mode} data-on={settings?.execution_mode === mode}
-                    onClick={() => setExecutionMode(mode)} disabled={saving} className="seg"
-                    style={
-                      mode === "AUTO" && settings?.execution_mode === "AUTO" ? { color: "var(--c-loss)" }
-                      : mode === "SHADOW" && settings?.execution_mode === "SHADOW" ? { color: "var(--c-accent)" }
-                      : undefined
-                    }>
-                    {mode}
-                  </motion.button>
-                ))}
-              </div>
-              {settings?.execution_mode === "AUTO" ? (
-                <span className="text-[10.5px] font-semibold px-2 py-1 rounded-[6px]" style={{ background: "var(--c-loss-soft)", color: "var(--c-loss)" }}>
-                  REAL MONEY — real orders are placed on your Zerodha account
-                </span>
-              ) : settings?.execution_mode === "SHADOW" ? (
-                <span className="text-[10.5px] font-semibold px-2 py-1 rounded-[6px]" style={{ background: "var(--c-accent-soft)", color: "var(--c-accent)" }}>
-                  SHADOW — live decisions, simulated fills, zero broker orders
-                </span>
-              ) : (
-                <span className="text-[10.5px] text-faint px-2 py-1 rounded-[6px]" style={{ background: "var(--c-surface-2)" }}>
-                  ALERT_ONLY/SEMI_AUTO aren't built yet
-                </span>
-              )}
-            </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
               {EDITABLE_GROUPS.map((group) => (

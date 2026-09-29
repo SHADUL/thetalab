@@ -3309,6 +3309,17 @@ async function handleRealFunds(req: any, res: any, supabase: SupabaseClient) {
   }
 }
 
+/** Groww equivalent of handleRealFunds — same shape, same fetchGrowwAvailableFunds used internally for real sizing, so the dashboard banner and the actual sizing check can never silently disagree. */
+async function handleGrowwRealFunds(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const { data: session } = await supabase.from('groww_session').select('access_token').eq('id', 1).maybeSingle();
+  const token = session?.access_token;
+  if (!token) { res.status(200).json({ ok: true, availableFunds: null, skipped: 'no_groww_session' }); return; }
+
+  const availableFunds = await fetchGrowwAvailableFunds(token);
+  res.status(200).json({ ok: true, availableFunds });
+}
+
 /**
  * Groww's daily-token mint (docs.groww.in/trade-api) — a genuinely
  * different shape from Kite's browser-OAuth redirect (kite-callback.js):
@@ -3530,6 +3541,7 @@ export default async function handler(req: any, res: any) {
   if (resource === 'settings') return handleSettings(req, res, supabase);
   if (resource === 'positions') return handlePositions(req, res, supabase);
   if (resource === 'real-funds') return handleRealFunds(req, res, supabase);
+  if (resource === 'groww-real-funds') return handleGrowwRealFunds(req, res, supabase);
   if (resource === 'groww-connect') return handleGrowwConnect(req, res, supabase);
   if (resource === 'groww-status') return handleGrowwStatus(req, res, supabase);
   if (resource === 'indices') return handleIndices(req, res, supabase);

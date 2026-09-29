@@ -647,6 +647,7 @@ export default function OptionsAutoTrader() {
   const [descOpen, setDescOpen] = useState(false);
   const [hideAmounts, setHideAmounts] = useState(false);
   const [realFunds, setRealFunds] = useState(null);
+  const [growwRealFunds, setGrowwRealFunds] = useState(null);
   const [showAllModes, setShowAllModes] = useState(false);
   const [indices, setIndices] = useState([]);
   const [showDesktopCalendar, setShowDesktopCalendar] = useState(false);
@@ -663,8 +664,9 @@ export default function OptionsAutoTrader() {
       fetch("/api/options-autotrade?resource=real-funds").then((r) => r.json()),
       fetch("/api/options-autotrade?resource=indices").then((r) => r.json()),
       fetch("/api/options-autotrade?resource=groww-status").then((r) => r.json()),
+      fetch("/api/options-autotrade?resource=groww-real-funds").then((r) => r.json()),
     ])
-      .then(([s, posBody, logBody, dailyBody, fundsBody, indicesBody, growwBody]) => {
+      .then(([s, posBody, logBody, dailyBody, fundsBody, indicesBody, growwBody, growwFundsBody]) => {
         if (s?.error) { setError(s.message || s.error); return; }
         setError(null);
         setSettings(s);
@@ -675,6 +677,7 @@ export default function OptionsAutoTrader() {
         setRealFunds(fundsBody);
         setIndices(indicesBody?.indices ?? []);
         setGrowwStatus(growwBody);
+        setGrowwRealFunds(growwFundsBody);
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
@@ -766,11 +769,16 @@ export default function OptionsAutoTrader() {
 
   const setExecutionMode = (mode) => {
     if (mode === "AUTO") {
+      const broker = settings?.active_broker === "GROWW" ? "GROWW" : "KITE";
       const confirmed = window.confirm(
-        "This places REAL orders on your real Zerodha account with real money — not a simulation.\n\n" +
-        "Every future scan cycle will size and fire live BUY/SELL orders the moment a candidate clears the quality gate, with no per-trade confirmation. " +
-        "Position-monitor will also place real closing orders automatically.\n\n" +
-        "Are you sure you want to switch to AUTO?",
+        broker === "GROWW"
+          ? "Broker is set to GROWW.\n\n" +
+            "Real order placement through Groww is NOT fully enabled yet — a required safety check (broker reconciliation, which prevents a duplicate real order firing when this system's records disagree with the broker's) only exists for Kite so far. Every Groww-routed entry will currently be refused rather than place a real order.\n\n" +
+            "Switching to AUTO now will still enable real Kite closing orders for any EXISTING Kite positions, and live decisioning/sizing checks will run for real. Are you sure you want to switch to AUTO?"
+          : "This places REAL orders on your real Zerodha (Kite) account with real money — not a simulation.\n\n" +
+            "Every future scan cycle will size and fire live BUY/SELL orders the moment a candidate clears the quality gate, with no per-trade confirmation. " +
+            "Position-monitor will also place real closing orders automatically.\n\n" +
+            "Are you sure you want to switch to AUTO?",
       );
       if (!confirmed) return;
       // Real money gets a visually distinct app-wide theme, not just this
@@ -987,19 +995,28 @@ export default function OptionsAutoTrader() {
         </div>
       ) : (
         <>
-          {settings?.execution_mode === "AUTO" && (
-            <div className="flex items-center gap-3 flex-wrap mb-3 p-3 rounded-[var(--radius-md)]" style={{ border: "1px solid var(--c-loss)", background: "var(--c-loss-soft)" }}>
-              <span className="text-[11px] font-semibold text-loss">REAL ACCOUNT BALANCE</span>
-              <span className="text-[15px] font-bold n text-loss">
-                {realFunds?.availableFunds != null ? inr(realFunds.availableFunds) : realFunds?.skipped === "no_kite_session" ? "No Kite session" : "—"}
-              </span>
-              {realFunds?.utilised != null && <span className="text-[10.5px] text-ink2">({inr(realFunds.utilised)} utilised)</span>}
-              <label className="flex items-center gap-1.5 text-[10.5px] text-ink2 ml-auto">
-                <input type="checkbox" checked={showAllModes} onChange={(e) => setShowAllModes(e.target.checked)} />
-                Show PAPER history too
-              </label>
-            </div>
-          )}
+          {settings?.execution_mode === "AUTO" && (() => {
+            const isGroww = settings?.active_broker === "GROWW";
+            const funds = isGroww ? growwRealFunds : realFunds;
+            const noSessionLabel = isGroww ? "No Groww session" : "No Kite session";
+            const noSessionCode = isGroww ? "no_groww_session" : "no_kite_session";
+            return (
+              <div className="flex items-center gap-3 flex-wrap mb-3 p-3 rounded-[var(--radius-md)]" style={{ border: "1px solid var(--c-loss)", background: "var(--c-loss-soft)" }}>
+                <span className="text-[11px] font-semibold text-loss">REAL {isGroww ? "GROWW" : "ZERODHA"} BALANCE</span>
+                <span className="text-[15px] font-bold n text-loss">
+                  {funds?.availableFunds != null ? inr(funds.availableFunds) : funds?.skipped === noSessionCode ? noSessionLabel : "—"}
+                </span>
+                {funds?.utilised != null && <span className="text-[10.5px] text-ink2">({inr(funds.utilised)} utilised)</span>}
+                {isGroww && (
+                  <span className="text-[10.5px] text-ink2">— real order placement through Groww is not enabled yet, entries are refused at a safety gate</span>
+                )}
+                <label className="flex items-center gap-1.5 text-[10.5px] text-ink2 ml-auto">
+                  <input type="checkbox" checked={showAllModes} onChange={(e) => setShowAllModes(e.target.checked)} />
+                  Show PAPER history too
+                </label>
+              </div>
+            );
+          })()}
 
           <RiskCommandBar positions={visiblePositions} settings={settings} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} realFunds={realFunds} />
 

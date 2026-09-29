@@ -514,54 +514,94 @@ function RiskCommandBar({ positions, settings, hideAmounts, setHideAmounts, real
   const capitalBase = isLive ? activeRealFunds?.availableFunds ?? null : Number(settings?.reserved_fund) || null;
   const riskPct = capitalBase && capitalBase > 0 ? (maxLossAtRisk / capitalBase) * 100 : null;
   const brokerCapital = isLive ? activeRealFunds?.availableFunds ?? null : null;
+  const [expanded, setExpanded] = useState(false);
+
+  // Everything past "Today" — collapsed by default on mobile (only
+  // Today's P&L shows until the caret is tapped), always visible on
+  // desktop (rendered a second time below via display:contents so it
+  // stays real flex-row siblings, not wrapped in an extra box).
+  const secondaryContent = (
+    <>
+      <div className="hidden sm:block w-px self-stretch" style={{ background: "var(--c-line)" }} />
+
+      <div className="min-w-[140px]">
+        <div className="text-[10.5px] font-semibold text-muted tracking-wide mb-0.5">TOTAL RETURN</div>
+        <div className={`font-display text-[20px] sm:text-[22px] font-bold n leading-none ${totalReturns >= 0 ? "text-gain" : "text-loss"}`}>
+          {totalReturns >= 0 ? "+" : ""}{fmt(totalReturns)}
+        </div>
+      </div>
+
+      <div className="hidden sm:block w-px self-stretch" style={{ background: "var(--c-line)" }} />
+
+      <div className="grid grid-cols-2 sm:flex sm:items-center gap-x-6 gap-y-2.5 sm:gap-8 flex-1">
+        <RiskMetric label="Realized" value={fmt(totalRealizedToday)} tone={totalRealizedToday >= 0 ? "gain" : "loss"} signed />
+        <RiskMetric label="Unrealized" value={fmt(totalUnrealized)} tone={totalUnrealized >= 0 ? "gain" : "loss"} signed />
+        <RiskMetric label="Margin Used" value={fmt(totalMargin)} />
+        <RiskMetric label="Max Risk" value={fmt(maxLossAtRisk)} tone={positions.active.length ? "loss" : undefined} />
+        {riskPct !== null && (
+          <RiskMetric label="Risk Utilization" value={`${riskPct.toFixed(1)}%`} tone={riskPct > 80 ? "loss" : riskPct > 50 ? "warn" : "gain"} />
+        )}
+      </div>
+
+      {isLive && brokerCapital != null && (
+        <div className="oat-tile rounded-[var(--radius-md)] px-3.5 py-2.5 w-full sm:w-auto">
+          <div className="text-[9.5px] font-semibold text-muted tracking-wide mb-0.5">LIVE CAPITAL</div>
+          <div className="font-display text-[17px] font-bold n leading-tight text-ink">{fmt(brokerCapital)}</div>
+          <span className="text-[9px] font-bold" style={{ color: "var(--oat-accent)" }}>{isGrowwBroker ? "GROWW" : "KITE"}</span>
+        </div>
+      )}
+    </>
+  );
 
   return (
     <div className="oat-hero rounded-[var(--radius-lg)] mb-4 px-4 py-4 sm:px-6 sm:py-5" style={{ border: "1px solid var(--c-line)", boxShadow: "var(--e-2)" }}>
       <div className="relative flex items-start sm:items-center gap-4 sm:gap-8 flex-wrap">
-        <div className="min-w-[140px]">
+        <div className="min-w-[140px] flex-1 sm:flex-initial">
           <div className="flex items-center gap-2 mb-0.5">
             <span className="text-[10.5px] font-semibold text-muted tracking-wide">TODAY</span>
             <motion.button whileHover={{ scale: 1.12 }} whileTap={{ scale: 0.9 }} onClick={() => setHideAmounts((v) => !v)} className="text-muted" aria-label="Toggle amount visibility">
               {hideAmounts ? <EyeSlash size={13} weight="regular" /> : <Eye size={13} weight="regular" />}
             </motion.button>
           </div>
-          <AnimatePresence mode="wait">
-            <motion.div key={hideAmounts ? "hidden" : todaysPnl} initial={{ opacity: 0, y: 3 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2, ease: [0.2, 0.8, 0.2, 1] }}
-              className={`font-display text-[32px] sm:text-[38px] font-bold n leading-none ${todaysPnl >= 0 ? "text-gain" : "text-loss"}`}>
-              {todaysPnl >= 0 ? "+" : ""}{fmt(todaysPnl)}
-            </motion.div>
-          </AnimatePresence>
-        </div>
-
-        <div className="hidden sm:block w-px self-stretch" style={{ background: "var(--c-line)" }} />
-
-        <div className="min-w-[140px]">
-          <div className="text-[10.5px] font-semibold text-muted tracking-wide mb-0.5">TOTAL RETURN</div>
-          <div className={`font-display text-[20px] sm:text-[22px] font-bold n leading-none ${totalReturns >= 0 ? "text-gain" : "text-loss"}`}>
-            {totalReturns >= 0 ? "+" : ""}{fmt(totalReturns)}
+          <div className="flex items-center justify-between gap-2">
+            <AnimatePresence mode="wait">
+              <motion.div key={hideAmounts ? "hidden" : todaysPnl} initial={{ opacity: 0, y: 3 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2, ease: [0.2, 0.8, 0.2, 1] }}
+                className={`font-display text-[32px] sm:text-[38px] font-bold n leading-none ${todaysPnl >= 0 ? "text-gain" : "text-loss"}`}>
+                {todaysPnl >= 0 ? "+" : ""}{fmt(todaysPnl)}
+              </motion.div>
+            </AnimatePresence>
+            {/* Mobile-only expand toggle — desktop always shows everything,
+                nothing to collapse there. */}
+            <motion.button
+              onClick={() => setExpanded((v) => !v)}
+              className="sm:hidden flex items-center justify-center shrink-0 text-muted"
+              style={{ width: 30, height: 30, borderRadius: 999, background: "var(--c-surface-3)" }}
+              aria-label={expanded ? "Hide portfolio details" : "Show portfolio details"}
+              aria-expanded={expanded}
+            >
+              <motion.span animate={{ rotate: expanded ? 180 : 0 }} transition={{ duration: 0.22, ease: [0.2, 0.8, 0.2, 1] }} style={{ display: "flex" }}>
+                <CaretDown size={14} weight="bold" />
+              </motion.span>
+            </motion.button>
           </div>
         </div>
 
-        <div className="hidden sm:block w-px self-stretch" style={{ background: "var(--c-line)" }} />
-
-        <div className="grid grid-cols-2 sm:flex sm:items-center gap-x-6 gap-y-2.5 sm:gap-8 flex-1">
-          <RiskMetric label="Realized" value={fmt(totalRealizedToday)} tone={totalRealizedToday >= 0 ? "gain" : "loss"} signed />
-          <RiskMetric label="Unrealized" value={fmt(totalUnrealized)} tone={totalUnrealized >= 0 ? "gain" : "loss"} signed />
-          <RiskMetric label="Margin Used" value={fmt(totalMargin)} />
-          <RiskMetric label="Max Risk" value={fmt(maxLossAtRisk)} tone={positions.active.length ? "loss" : undefined} />
-          {riskPct !== null && (
-            <RiskMetric label="Risk Utilization" value={`${riskPct.toFixed(1)}%`} tone={riskPct > 80 ? "loss" : riskPct > 50 ? "warn" : "gain"} />
-          )}
-        </div>
-
-        {isLive && brokerCapital != null && (
-          <div className="oat-tile rounded-[var(--radius-md)] px-3.5 py-2.5 w-full sm:w-auto">
-            <div className="text-[9.5px] font-semibold text-muted tracking-wide mb-0.5">LIVE CAPITAL</div>
-            <div className="font-display text-[17px] font-bold n leading-tight text-ink">{fmt(brokerCapital)}</div>
-            <span className="text-[9px] font-bold" style={{ color: "var(--oat-accent)" }}>{isGrowwBroker ? "GROWW" : "KITE"}</span>
-          </div>
-        )}
+        <div className="hidden sm:contents">{secondaryContent}</div>
       </div>
+
+      <AnimatePresence initial={false}>
+        {expanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.3, ease: [0.2, 0.8, 0.2, 1] }}
+            className="sm:hidden overflow-hidden"
+          >
+            <div className="flex items-start gap-4 flex-wrap pt-4 mt-1" style={{ borderTop: "1px solid var(--oat-hairline)" }}>
+              {secondaryContent}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <div className="relative text-[10px] text-faint mt-3 pt-3" style={{ borderTop: "1px solid var(--oat-hairline)" }}>
         {isLive ? "LIVE" : isShadow ? "SHADOW" : "PAPER"} positions ({positions.active.length}{settings?.max_positions ? ` / ${settings.max_positions} max` : ""})
@@ -817,6 +857,11 @@ function PnLCalendar({ positions, hideAmounts }) {
     setMonth(monthKeyOf(isoDate(new Date(y, m - 1 + n, 1))));
   };
   const monthTitle = new Date(month + "-01T00:00:00").toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+  // Only cells actually IN this month (the 42-cell grid pads with a few
+  // leading/trailing days from the adjacent months so every week row is
+  // full) — those padding days must not leak into this month's total.
+  const monthTrades = grid.filter((c) => c.inMonth).reduce((s, c) => s + c.trades.length, 0);
+  const monthTotal = grid.filter((c) => c.inMonth).reduce((s, c) => s + c.pnl, 0);
 
   const selectedCell = grid.find((c) => c.key === selected) ?? { key: selected, trades: byDay[selected] ?? [], pnl: (byDay[selected] ?? []).reduce((s, p) => s + (Number(p.realized_pnl) || 0), 0) };
   const selectedLabel = new Date(selected + "T00:00:00").toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "short", year: "numeric" });
@@ -824,10 +869,17 @@ function PnLCalendar({ positions, hideAmounts }) {
   return (
     <div className="sm:flex sm:gap-4 sm:items-start">
       <div className="sm:w-[360px] sm:shrink-0 rounded-[var(--radius-lg)] p-4 mb-3 sm:mb-0" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
-        <div className="flex items-center gap-1 mb-3">
+        <div className="flex items-center gap-1 mb-1">
           <button onClick={() => shiftMonth(-1)} className="topstep !px-2" aria-label="Previous month"><CaretLeft size={12} weight="bold" /></button>
           <span className="text-[13px] font-semibold flex-1 text-center n">{monthTitle}</span>
           <button onClick={() => shiftMonth(1)} className="topstep !px-2" aria-label="Next month"><CaretRight size={12} weight="bold" /></button>
+        </div>
+
+        <div className="flex items-center justify-center gap-1.5 mb-3">
+          <span className="text-[10.5px] text-muted">Month total</span>
+          <span className={`text-[13px] font-bold n ${monthTrades === 0 ? "text-faint" : monthTotal >= 0 ? "text-gain" : "text-loss"}`}>
+            {monthTrades === 0 ? "—" : `${monthTotal >= 0 ? "+" : ""}${fmt(monthTotal)}`}
+          </span>
         </div>
 
         <div className="grid grid-cols-7 gap-1">

@@ -3033,6 +3033,51 @@ async function handleGrowwStatus(req: any, res: any, supabase: SupabaseClient) {
 }
 
 /**
+ * TEMPORARY, read-only diagnostic — confirms Groww's REAL response field
+ * names for funds/margin against the actual connected account, rather
+ * than trusting documentation snippets, before any order-placement code
+ * gets written against them. Placing a real order with a guessed field
+ * name would be reckless; reading them first is not. Remove once the
+ * real integration (handleGrowwConnect's follow-up) is built and these
+ * shapes are baked into typed adapter functions instead.
+ */
+async function handleGrowwProbe(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const apiKey = process.env.GROWW_API_KEY;
+  if (!apiKey) { res.status(500).json({ error: 'server_misconfigured' }); return; }
+  const { data: session } = await supabase.from('groww_session').select('access_token').eq('id', 1).maybeSingle();
+  const token = session?.access_token;
+  if (!token) { res.status(200).json({ ok: true, skipped: 'no_groww_session' }); return; }
+
+  const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  const results: Record<string, unknown> = {};
+
+  try {
+    const r = await fetch('https://api.groww.in/v1/margins/detail/user', { headers });
+    results.userMargin = { status: r.status, body: await r.json().catch(() => null) };
+  } catch (err: any) {
+    results.userMargin = { error: err.message };
+  }
+
+  try {
+    const r = await fetch('https://api.groww.in/v1/live-data/quote?exchange=NSE&segment=CASH&trading_symbol=RELIANCE', { headers });
+    results.sampleQuote = { status: r.status, body: await r.json().catch(() => null) };
+  } catch (err: any) {
+    results.sampleQuote = { error: err.message };
+  }
+
+  try {
+    const r = await fetch('https://growwapi-assets.groww.in/instruments/instrument.csv');
+    const text = await r.text();
+    results.instrumentsCsvSample = { status: r.status, firstLines: text.split('\n').slice(0, 4) };
+  } catch (err: any) {
+    results.instrumentsCsvSample = { error: err.message };
+  }
+
+  res.status(200).json({ ok: true, results });
+}
+
+/**
  * Login/logout/session-check for the custom login page — folded in here
  * (rather than its own api/auth.ts) purely to stay under Vercel Hobby's
  * 12-serverless-function-per-deployment cap, same reasoning the vwap-
@@ -3126,6 +3171,7 @@ export default async function handler(req: any, res: any) {
   if (resource === 'vwap-scalper-monitor') return handleVwapScalperMonitor(req, res, supabase);
   if (resource === 'shadow-health') return handleShadowHealth(req, res, supabase);
   if (resource === 'vwap-r2-verify') return handleVwapR2Verify(req, res, supabase);
+  if (resource === 'groww-probe') return handleGrowwProbe(req, res, supabase);
   if (resource === 'vwap-archive-backfill') return handleVwapArchiveBackfill(req, res, supabase);
   if (resource === 'start-forward-validation') return handleStartForwardValidation(req, res, supabase);
   if (resource === 'stop-forward-validation') return handleStopForwardValidation(req, res, supabase);

@@ -1024,15 +1024,15 @@ tr.is-atm-row .ch-cell { border-top: 1px solid color-mix(in srgb, var(--c-accent
   background: rgba(90, 85, 247, 0.035);
 }
 
-/* Open-vs-closed shading — a clearly-visible-but-not-loud green tint for
-   still-open rows, a cooler gray tint for closed ones (closed rows should
-   still read as "settled", not compete with what's still live). Bumped up
-   from the first pass, which turned out too faint to actually notice.
-   The :not() guards mean hover/selected — set above, same specificity —
-   still win outright rather than fighting the base tint for which rule
-   the cascade picks. */
+/* Open-vs-closed shading — active rows stay plain white (still-open
+   positions are the default, "nothing to flag" state), closed rows get a
+   cooler gray tint so they read as settled/receded. A left green accent
+   edge is the only mark on active rows — enough to tell them apart at a
+   glance without tinting the whole row. The :not() guards mean
+   hover/selected — set above, same specificity — still win outright
+   rather than fighting the base tint for which rule the cascade picks. */
 .oat-row[data-status="active"]:not(:hover):not([data-selected="true"]) {
-  background: rgba(10, 143, 98, 0.08);
+  background: var(--c-surface);
   box-shadow: inset 2px 0 0 rgba(10, 143, 98, 0.4);
 }
 .oat-row[data-status="closed"]:not(:hover):not([data-selected="true"]) {

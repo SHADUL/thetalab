@@ -3538,6 +3538,34 @@ async function handleGrowwStatus(req: any, res: any, supabase: SupabaseClient) {
 }
 
 /**
+ * Cron-triggered daily refresh of the Groww access token — Groww's own
+ * dashboard resets it every day at 6 AM IST (see the "API key dashboard"
+ * note), and unlike Kite's browser-OAuth login this mint is a pure
+ * server-to-server call (api key + secret + checksum, see
+ * mintGrowwAccessToken), so it needs no human in the loop at all. Run
+ * this a few minutes after 6 AM IST daily and "Reconnect Groww" in the
+ * dashboard becomes a manual fallback, not a daily chore.
+ */
+async function handleGrowwCronReconnect(req: any, res: any, supabase: SupabaseClient) {
+  const result = await mintGrowwAccessToken();
+  if ('error' in result) {
+    await supabase.from('options_autotrade_log').insert({
+      level: 'error', message: `Groww daily reconnect failed: ${result.error}`, execution_mode: null,
+    });
+    res.status(200).json({ ok: false, error: result.error });
+    return;
+  }
+
+  const { error } = await supabase.from('groww_session')
+    .upsert({ id: 1, access_token: result.accessToken, obtained_at: new Date().toISOString() });
+  if (error) {
+    res.status(502).json({ ok: false, error: 'supabase_error', message: error.message });
+    return;
+  }
+  res.status(200).json({ ok: true, connected: true });
+}
+
+/**
  * TEMPORARY, read-only diagnostic — confirms Groww's REAL response field
  * names for funds/margin against the actual connected account, rather
  * than trusting documentation snippets, before any order-placement code
@@ -3737,6 +3765,7 @@ export default async function handler(req: any, res: any) {
   }
   if (resource === 'instruments-sync') return handleInstrumentsSync(req, res, supabase);
   if (resource === 'groww-instruments-sync') return handleGrowwInstrumentsSync(req, res, supabase);
+  if (resource === 'groww-cron-reconnect') return handleGrowwCronReconnect(req, res, supabase);
   if (resource === 'margin') return handleMargin(req, res, supabase);
   if (resource === 'paper-scan') return handlePaperScan(req, res, supabase);
   if (resource === 'position-monitor') return handlePositionMonitor(req, res, supabase);

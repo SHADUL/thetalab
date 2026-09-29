@@ -78,7 +78,7 @@ import { atmIvOf } from '../src/quant/analytics/atmIv.ts';
 import { classifyMarketRegime, type MarketRegimeResult } from '../src/quant/analytics/marketRegime.ts';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { decideTrade, type DecisionThresholds } from '../src/quant/strategies/decisionGate.ts';
 import { computePositionSize, type PortfolioState, type OpenPositionSummary } from '../src/quant/strategies/positionSizing.ts';
 import { runPreTradeValidation } from '../src/quant/execution/preTradeValidation.ts';
@@ -2359,8 +2359,17 @@ async function handleSettings(req: any, res: any, supabase: SupabaseClient) {
       res.status(400).json({ error: 'bad_request', message: `execution_mode must be OFF, PAPER, SHADOW, or AUTO — ALERT_ONLY/SEMI_AUTO aren't implemented yet.` });
       return;
     }
+    // Which broker AUTO's real orders route through — a setting, not a
+    // per-position choice (see the header comment on handleGrowwConnect
+    // below for why: Groww's own historical-data depth can't replace
+    // Kite's, so Kite always stays wired in for data regardless of this).
+    if (body.active_broker !== undefined && !['KITE', 'GROWW'].includes(body.active_broker)) {
+      res.status(400).json({ error: 'bad_request', message: `active_broker must be KITE or GROWW.` });
+      return;
+    }
     const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (body.execution_mode !== undefined) update.execution_mode = body.execution_mode;
+    if (body.active_broker !== undefined) update.active_broker = body.active_broker;
     for (const key of EDITABLE_SETTINGS_FIELDS) {
       if (body[key] !== undefined) {
         const n = Number(body[key]);
@@ -2960,6 +2969,70 @@ async function handleRealFunds(req: any, res: any, supabase: SupabaseClient) {
 }
 
 /**
+ * Groww's daily-token mint (docs.groww.in/trade-api) — a genuinely
+ * different shape from Kite's browser-OAuth redirect (kite-callback.js):
+ * no request_token, no callback, no cookie. The whole exchange is
+ * server-to-server, so "Connect Groww" is just a button that POSTs here;
+ * GROWW_API_KEY/GROWW_API_SECRET (from Groww's own Cloud API Keys
+ * dashboard — a prerequisite this function cannot set up itself) must
+ * already be configured as Vercel env vars.
+ *
+ * IMPORTANT SCOPE NOTE: this wires up the CONNECTION only — a working
+ * groww_session row. It does NOT yet route real AUTO order placement,
+ * quotes, or margin checks through Groww; every execution path in this
+ * file still calls Kite regardless of `active_broker`, because Groww's
+ * quote/order/margin response shapes were not confirmed against a real
+ * account before this was written, and guessing at those field names for
+ * real-money order-placement code would be genuinely dangerous. Kite also
+ * stays as the sole VWAP/historical-data source regardless of
+ * active_broker — Groww's own 1-minute candle history is capped at 3
+ * months total, it cannot replace the multi-year archive this app
+ * already backfilled from Kite.
+ */
+async function mintGrowwAccessToken(): Promise<{ accessToken: string } | { error: string }> {
+  const apiKey = process.env.GROWW_API_KEY;
+  const apiSecret = process.env.GROWW_API_SECRET;
+  if (!apiKey || !apiSecret) return { error: 'GROWW_API_KEY / GROWW_API_SECRET are not configured on the server.' };
+
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const checksum = createHash('sha256').update(apiSecret + timestamp).digest('hex');
+
+  try {
+    const resp = await fetch('https://api.groww.in/v1/token/api/access', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key_type: 'approval', checksum, timestamp }),
+    });
+    const body = await resp.json().catch(() => null);
+    const accessToken = body?.token ?? body?.data?.token ?? body?.access_token ?? body?.data?.access_token;
+    if (!resp.ok || !accessToken) {
+      return { error: body?.message ?? `Groww token exchange failed (HTTP ${resp.status}).` };
+    }
+    return { accessToken };
+  } catch (err: any) {
+    return { error: `Network error reaching Groww: ${err.message}` };
+  }
+}
+
+async function handleGrowwConnect(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const result = await mintGrowwAccessToken();
+  if ('error' in result) { res.status(200).json({ ok: false, error: result.error }); return; }
+
+  const { error } = await supabase.from('groww_session')
+    .upsert({ id: 1, access_token: result.accessToken, obtained_at: new Date().toISOString() });
+  if (error) { res.status(502).json({ ok: false, error: 'supabase_error', message: error.message }); return; }
+
+  res.status(200).json({ ok: true, connected: true });
+}
+
+async function handleGrowwStatus(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const { data } = await supabase.from('groww_session').select('access_token, obtained_at').eq('id', 1).maybeSingle();
+  res.status(200).json({ ok: true, connected: Boolean(data?.access_token), obtainedAt: data?.obtained_at ?? null });
+}
+
+/**
  * Login/logout/session-check for the custom login page — folded in here
  * (rather than its own api/auth.ts) purely to stay under Vercel Hobby's
  * 12-serverless-function-per-deployment cap, same reasoning the vwap-
@@ -3022,6 +3095,8 @@ export default async function handler(req: any, res: any) {
   if (resource === 'settings') return handleSettings(req, res, supabase);
   if (resource === 'positions') return handlePositions(req, res, supabase);
   if (resource === 'real-funds') return handleRealFunds(req, res, supabase);
+  if (resource === 'groww-connect') return handleGrowwConnect(req, res, supabase);
+  if (resource === 'groww-status') return handleGrowwStatus(req, res, supabase);
   if (resource === 'indices') return handleIndices(req, res, supabase);
   if (resource === 'log') return handleLog(req, res, supabase);
   if (resource === 'kill-switch') return handleKillSwitch(req, res, supabase);

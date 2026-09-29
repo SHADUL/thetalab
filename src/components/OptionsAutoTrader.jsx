@@ -650,6 +650,8 @@ export default function OptionsAutoTrader() {
   const [showAllModes, setShowAllModes] = useState(false);
   const [indices, setIndices] = useState([]);
   const [showDesktopCalendar, setShowDesktopCalendar] = useState(false);
+  const [growwStatus, setGrowwStatus] = useState(null);
+  const [growwConnecting, setGrowwConnecting] = useState(false);
   const timerRef = useRef(null);
 
   const load = useCallback(() => {
@@ -660,8 +662,9 @@ export default function OptionsAutoTrader() {
       fetch("/api/options-autotrade?resource=daily-stats").then((r) => r.json()),
       fetch("/api/options-autotrade?resource=real-funds").then((r) => r.json()),
       fetch("/api/options-autotrade?resource=indices").then((r) => r.json()),
+      fetch("/api/options-autotrade?resource=groww-status").then((r) => r.json()),
     ])
-      .then(([s, posBody, logBody, dailyBody, fundsBody, indicesBody]) => {
+      .then(([s, posBody, logBody, dailyBody, fundsBody, indicesBody, growwBody]) => {
         if (s?.error) { setError(s.message || s.error); return; }
         setError(null);
         setSettings(s);
@@ -671,10 +674,32 @@ export default function OptionsAutoTrader() {
         setDailyStats(dailyBody);
         setRealFunds(fundsBody);
         setIndices(indicesBody?.indices ?? []);
+        setGrowwStatus(growwBody);
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
+
+  const setActiveBroker = (broker) => {
+    setSaving(true);
+    fetch("/api/options-autotrade?resource=settings", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ active_broker: broker }),
+    })
+      .then((r) => r.json())
+      .then((s) => { if (!s.error) setSettings(s); })
+      .catch(() => {})
+      .finally(() => setSaving(false));
+  };
+
+  const connectGroww = () => {
+    setGrowwConnecting(true);
+    fetch("/api/options-autotrade?resource=groww-connect", { method: "POST" })
+      .then((r) => r.json())
+      .then((result) => { setGrowwStatus(result.ok ? { ok: true, connected: true, obtainedAt: new Date().toISOString() } : { ok: false, connected: false, error: result.error }); })
+      .catch((e) => setGrowwStatus({ ok: false, connected: false, error: e.message }))
+      .finally(() => setGrowwConnecting(false));
+  };
 
   // A position's execution_mode is fixed at the moment it opened — a
   // PAPER position stays PAPER even after the switch is later moved to
@@ -850,6 +875,37 @@ export default function OptionsAutoTrader() {
           </span>
         )}
       </div>
+
+      {/* ── Broker: which account AUTO's real orders would route through.
+          Kite stays wired in for market data/historical regardless — Groww's
+          own 1-minute history only covers 3 months, it can't replace that. ── */}
+      <div className="flex items-center gap-3 flex-wrap py-2.5 mb-3 px-3 rounded-[var(--radius-md)]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+        <span className="text-[11px] font-semibold text-muted shrink-0">Broker</span>
+        <div className="seg-track">
+          {["KITE", "GROWW"].map((broker) => (
+            <button key={broker} role="tab" aria-selected={(settings?.active_broker ?? "KITE") === broker}
+              data-on={(settings?.active_broker ?? "KITE") === broker}
+              onClick={() => setActiveBroker(broker)} disabled={saving} className="seg">
+              {broker}
+            </button>
+          ))}
+        </div>
+        {(settings?.active_broker ?? "KITE") === "GROWW" && (
+          <>
+            <span className="text-[10.5px] px-2 py-1 rounded-[var(--radius-sm)]" style={{ background: growwStatus?.connected ? "var(--c-gain-soft)" : "var(--c-warn-soft)", color: growwStatus?.connected ? "var(--c-gain)" : "var(--c-warn)" }}>
+              {growwStatus?.connected ? `Connected${growwStatus.obtainedAt ? ` · ${agoLabel(growwStatus.obtainedAt)}` : ""}` : "Not connected"}
+            </span>
+            <button onClick={connectGroww} disabled={growwConnecting} className="topstep text-[11px]">
+              {growwConnecting ? "Connecting…" : growwStatus?.connected ? "Reconnect Groww" : "Connect Groww"}
+            </button>
+            {growwStatus?.error && <span className="text-[10.5px] text-loss">{growwStatus.error}</span>}
+            <span className="text-[10px] text-faint w-full">
+              Connection only — real order placement isn't routed through Groww yet, AUTO still executes via Kite.
+            </span>
+          </>
+        )}
+      </div>
+
       {descOpen && (
         <p className="text-[11px] text-muted mb-3 max-w-[80ch] px-1">
           Defined-risk options selling (Iron Condor / Bull Put Spread / Bear Call Spread), decided from a live chain: skew-based

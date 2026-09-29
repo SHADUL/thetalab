@@ -20,7 +20,7 @@ import Login from "./components/Login.jsx";
  */
 const SECTION_KEY = "thetalabSection";
 
-const SECTIONS = [
+const ALL_SECTIONS = [
   { value: "options", label: "Options Desk" },
   { value: "swing", label: "Swing Scanner" },
   { value: "intraday", label: "Intraday Trader" },
@@ -28,8 +28,13 @@ const SECTIONS = [
   { value: "vwap-scalper", label: "VWAP Scalper" },
 ];
 
+// TEMPORARY, per explicit request — every other section stays fully intact
+// underneath, just hidden from the nav. Flip back to false to restore them.
+const ONLY_OPTIONS_AUTO = true;
+const SECTIONS = ONLY_OPTIONS_AUTO ? ALL_SECTIONS.filter((s) => s.value === "options-auto") : ALL_SECTIONS;
+
 export default function Root() {
-  const [section, setSectionState] = useState(() => localStorage.getItem(SECTION_KEY) ?? "options");
+  const [section, setSectionState] = useState(() => (ONLY_OPTIONS_AUTO ? "options-auto" : localStorage.getItem(SECTION_KEY) ?? "options"));
   const setSection = (s) => {
     setSectionState(s);
     try { localStorage.setItem(SECTION_KEY, s); } catch { /* private browsing, etc. — just won't persist */ }

@@ -334,6 +334,178 @@ function makeLiveOrderPlacer(token: string, apiKey: string): LiveOrderPlacer {
   };
 }
 
+// Kite's F&O exchange codes (NFO/BFO) have no Groww equivalent — Groww
+// uses the plain exchange (NSE/BSE) for every segment, with `segment:
+// 'FNO'` in the request body doing the work NFO/BFO's suffix does on
+// Kite. OPTIONS_SYMBOLS (Kite's own exchange map) still decides WHICH
+// underlying exchange a symbol trades on; this just translates that
+// choice into Groww's own naming.
+const GROWW_EXCHANGE_FOR_KITE_EXCHANGE: Record<string, string> = { NFO: 'NSE', BFO: 'BSE' };
+
+/** Raw fetch wrapper for Groww's REST API — same throw-on-error, return-payload-only shape as kiteFetch, for the same reason (every caller gets one consistent try/catch pattern instead of re-checking `status`/`error` at every call site). */
+async function growwFetch(path: string, opts: { method?: string; token: string; jsonBody?: unknown }): Promise<any> {
+  const { method = 'GET', token, jsonBody } = opts;
+  const resp = await fetch(`https://api.groww.in${path}`, {
+    method,
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: jsonBody !== undefined ? JSON.stringify(jsonBody) : undefined,
+  });
+  const json = await resp.json().catch(() => null);
+  if (!resp.ok || json?.status === 'FAILURE') {
+    throw new Error(json?.error?.message || `Groww API error (${resp.status}) on ${path}`);
+  }
+  return json?.payload;
+}
+
+/**
+ * Real available funds for SELLING options through Groww — confirmed
+ * field name against a real connected account (VWAP_R2_ARCHIVE-style
+ * probe, see handleGrowwProbe): GET /v1/margins/detail/user returns
+ * fno_margin_details.option_sell_balance_available specifically for
+ * this, distinct from clear_cash (raw cash, usually near-zero when
+ * funds sit as collateral) and collateral_available (broader than what
+ * F&O selling alone can use). Mirrors fetchRealAvailableFunds's exact
+ * signature/null-on-failure contract so callers don't need to know
+ * which broker they're asking.
+ */
+async function fetchGrowwAvailableFunds(token: string): Promise<number | null> {
+  try {
+    const payload = await growwFetch('/v1/margins/detail/user', { token });
+    const available = Number(payload?.fno_margin_details?.option_sell_balance_available);
+    return available > 0 ? available : 0;
+  } catch {
+    return null;
+  }
+}
+
+/** Real basket margin for a set of legs, via Groww's own basket-margin endpoint (POST /v1/margins/detail/orders?segment=FNO) — confirmed request/response shape against a real account (handleGrowwProbe's dry-run check). Mirrors parseBasketMarginResponse's totalRequired contract. */
+async function fetchGrowwBasketMargin(
+  legs: Array<{ tradingSymbol: string; side: 'BUY' | 'SELL'; quantity: number }>,
+  token: string,
+): Promise<number | null> {
+  try {
+    const orders = legs.map((l) => ({
+      trading_symbol: l.tradingSymbol, transaction_type: l.side, quantity: l.quantity,
+      order_type: 'MARKET', product: 'NRML', exchange: 'NSE',
+    }));
+    const payload = await growwFetch('/v1/margins/detail/orders?segment=FNO', { method: 'POST', token, jsonBody: orders });
+    const total = Number(payload?.total_requirement);
+    return Number.isFinite(total) ? total : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 8-20 alphanumeric chars, no hyphens at all — comfortably inside Groww's own "max two hyphens" rule by having none, simplest way to never violate it. */
+function growwOrderReferenceId(): string {
+  return `tl${randomUUID().replace(/-/g, '')}`.slice(0, 20);
+}
+
+/**
+ * Queries Groww's real order-detail endpoint (GET /v1/order/detail/{id}
+ * — the richer endpoint with average_fill_price, unlike the lighter
+ * /status/ endpoint which only reports filled_quantity) and maps
+ * Groww's real OrderStatus enum (ACKED/APPROVED/CANCELLATION_REQUESTED/
+ * CANCELLED/COMPLETED/DELIVERY_AWAITED/EXECUTED/FAILED/
+ * MODIFICATION_REQUESTED/NEW/REJECTED/TRIGGER_PENDING — confirmed from
+ * Groww's own published SDK source, not guessed) onto this codebase's
+ * generic terminal states.
+ *
+ * Deliberately conservative on the "filled" case: COMPLETED and EXECUTED
+ * both plausibly mean "done" in Groww's vocabulary, and rather than pick
+ * one without ever having observed a real fill, this requires the
+ * status to be one of those TWO AND filled_quantity to exactly match
+ * the requested quantity AND average_fill_price to be a real positive
+ * number before calling it FILLED — any of those disagreeing leaves it
+ * OPEN (never assumed complete on a partial signal). ok:false means the
+ * query itself failed (network/parse) — the caller treats that as
+ * UNKNOWN, same as a Kite query failure.
+ */
+async function queryGrowwOrderDetail(orderId: string, token: string): Promise<
+  | { ok: true; status: 'COMPLETE' | 'REJECTED' | 'CANCELLED' | 'OPEN'; averagePrice: number | null }
+  | { ok: false }
+> {
+  try {
+    const payload = await growwFetch(`/v1/order/detail/${orderId}?segment=FNO`, { token });
+    const rawStatus = payload?.order_status as string | undefined;
+    const filledQuantity = Number(payload?.filled_quantity);
+    const requestedQuantity = Number(payload?.quantity);
+    const averagePrice = Number(payload?.average_fill_price);
+    if (rawStatus === 'REJECTED' || rawStatus === 'FAILED') return { ok: true, status: 'REJECTED', averagePrice: null };
+    if (rawStatus === 'CANCELLED') return { ok: true, status: 'CANCELLED', averagePrice: null };
+    if ((rawStatus === 'COMPLETED' || rawStatus === 'EXECUTED') && filledQuantity > 0 && filledQuantity === requestedQuantity && averagePrice > 0) {
+      return { ok: true, status: 'COMPLETE', averagePrice };
+    }
+    return { ok: true, status: 'OPEN', averagePrice: null };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** Groww implementation of LiveOrderPlacer — same interface makeLiveOrderPlacer (Kite) satisfies, so runLiveExecution's hedge-first sequencing, retry/unwind, and ambiguous-timeout handling (liveFill.ts) apply completely unchanged. Never modify liveFill.ts to add a "which broker" branch — that file stays broker-agnostic by design. */
+function makeGrowwOrderPlacer(token: string): LiveOrderPlacer {
+  return {
+    async getQuote(tradingsymbol, exchange) {
+      try {
+        const payload = await growwFetch(`/v1/live-data/quote?exchange=${exchange}&segment=FNO&trading_symbol=${encodeURIComponent(tradingsymbol)}`, { token });
+        const bid = payload?.depth?.buy?.[0]?.price;
+        const ask = payload?.depth?.sell?.[0]?.price;
+        const lastPrice = payload?.last_price;
+        if (!(lastPrice > 0)) return null;
+        return { bid: bid > 0 ? bid : lastPrice, ask: ask > 0 ? ask : lastPrice, lastPrice };
+      } catch {
+        return null;
+      }
+    },
+
+    async placeOrder(leg, exchange, transactionType, limitPrice) {
+      const payload = await growwFetch('/v1/order/create', {
+        method: 'POST', token,
+        jsonBody: {
+          trading_symbol: leg.tradingsymbol, quantity: leg.quantity, validity: 'DAY',
+          exchange, segment: 'FNO', product: 'NRML', order_type: 'LIMIT',
+          transaction_type: transactionType, price: Number(limitPrice.toFixed(2)),
+          order_reference_id: growwOrderReferenceId(),
+        },
+      });
+      return payload?.groww_order_id;
+    },
+
+    async closeLeg(leg, exchange) {
+      // Best-effort unwind: MARKET, opposite side of how the leg was
+      // meant to be held — same reasoning as Kite's closeLeg above.
+      const payload = await growwFetch('/v1/order/create', {
+        method: 'POST', token,
+        jsonBody: {
+          trading_symbol: leg.tradingsymbol, quantity: leg.quantity, validity: 'DAY',
+          exchange, segment: 'FNO', product: 'NRML', order_type: 'MARKET',
+          transaction_type: leg.side === 'BUY' ? 'SELL' : 'BUY',
+          order_reference_id: growwOrderReferenceId(),
+        },
+      });
+      return payload?.groww_order_id;
+    },
+
+    async awaitFill(orderId, timeoutMs) {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const result = await queryGrowwOrderDetail(orderId, token);
+        if (result.ok && result.status === 'COMPLETE') return { status: 'COMPLETE', averagePrice: result.averagePrice };
+        if (result.ok && (result.status === 'REJECTED' || result.status === 'CANCELLED')) return { status: result.status, averagePrice: null };
+        if (Date.now() >= deadline) return { status: 'TIMEOUT', averagePrice: null };
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    },
+
+    async getOrderStatus(orderId) {
+      const result = await queryGrowwOrderDetail(orderId, token);
+      if (!result.ok) return { status: 'UNKNOWN' as const, averagePrice: null };
+      if (result.status === 'OPEN') return { status: 'OPEN' as const, averagePrice: null };
+      return { status: result.status, averagePrice: result.averagePrice };
+    },
+  };
+}
+
 /**
  * Real available funds for F&O (the "equity" segment covers NFO/BFO
  * derivatives on Kite) — checked independently of the user-set
@@ -531,6 +703,59 @@ async function handleInstrumentsSync(req: any, res: any, supabase: SupabaseClien
   if (error) { res.status(502).json({ ok: false, error: 'supabase_error', message: error.message }); return; }
 
   res.status(200).json({ ok: true, synced: rows.length, exchanges });
+}
+
+/**
+ * Groww's own instrument master, scoped to exactly the three symbols
+ * this app trades — mirrors handleInstrumentsSync's shape, but the CSV
+ * itself needs no authentication (confirmed via handleGrowwProbe: it's
+ * a public bulk download, not a session-gated endpoint) and covers every
+ * segment in one file rather than one call per exchange.
+ */
+async function handleGrowwInstrumentsSync(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+
+  let text: string;
+  try {
+    const resp = await fetch('https://growwapi-assets.groww.in/instruments/instrument.csv');
+    if (!resp.ok) throw new Error(`Groww returned ${resp.status} for the instruments CSV`);
+    text = await resp.text();
+  } catch (err: any) {
+    res.status(502).json({ ok: false, error: 'groww_error', message: err.message });
+    return;
+  }
+
+  const lines = text.split('\n').filter((l) => l.trim().length > 0);
+  if (lines.length < 2) { res.status(200).json({ ok: true, synced: 0, warning: 'no_rows_parsed' }); return; }
+  const header = lines[0].split(',');
+  const idx = (name: string) => header.indexOf(name);
+  const cols = {
+    underlying: idx('underlying_symbol'), segment: idx('segment'), exchange: idx('exchange'),
+    tradingSymbol: idx('trading_symbol'), expiry: idx('expiry_date'), strike: idx('strike_price'),
+    type: idx('instrument_type'), lotSize: idx('lot_size'), buyAllowed: idx('buy_allowed'), sellAllowed: idx('sell_allowed'),
+  };
+
+  const TARGET_SYMBOLS = new Set(['NIFTY', 'BANKNIFTY', 'SENSEX']);
+  const nowIso = new Date().toISOString();
+  const rows = lines.slice(1)
+    .map((line) => line.split(','))
+    .filter((c) =>
+      TARGET_SYMBOLS.has(c[cols.underlying]) && c[cols.segment] === 'FNO' &&
+      (c[cols.type] === 'CE' || c[cols.type] === 'PE') &&
+      c[cols.buyAllowed] === '1' && c[cols.sellAllowed] === '1' && c[cols.expiry],
+    )
+    .map((c) => ({
+      symbol: c[cols.underlying], exchange: c[cols.exchange], trading_symbol: c[cols.tradingSymbol],
+      expiry: c[cols.expiry], strike: Number(c[cols.strike]), option_right: c[cols.type],
+      lot_size: Number(c[cols.lotSize]) || 0, last_synced_at: nowIso,
+    }));
+
+  if (!rows.length) { res.status(200).json({ ok: true, synced: 0, warning: 'no_rows_parsed' }); return; }
+
+  const { error } = await supabase.from('groww_options_instruments').upsert(rows, { onConflict: 'symbol,expiry,strike,option_right' });
+  if (error) { res.status(502).json({ ok: false, error: 'supabase_error', message: error.message }); return; }
+
+  res.status(200).json({ ok: true, synced: rows.length });
 }
 
 /**
@@ -999,17 +1224,54 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     const inst = instrumentRows.find((r: any) => r.expiry === expiryDateStr && Number(r.strike) === l.strike && r.option_right === l.right);
     return { side: l.side, right: l.right, strike: l.strike, tradingsymbol: inst?.tradingsymbol ?? '', quantity: lotSize ?? 0, fillPrice: l.price };
   });
+
+  // Which broker AUTO's real order would actually go through — decided
+  // once, here, and reused for every real-money check below (funds,
+  // margin, execution). PAPER/SHADOW never reach this branch's real
+  // consequences; they still use Kite's chain/quotes for the decision
+  // itself regardless (see options-auto's own scoping note: Groww's data
+  // depth can't replace Kite's here, this is order EXECUTION only).
+  const activeBroker = settings.active_broker === 'GROWW' ? 'GROWW' : 'KITE';
+  const routesRealOrdersThroughGroww = isLive && activeBroker === 'GROWW';
+  let growwToken: string | null = null;
+  if (routesRealOrdersThroughGroww) {
+    const { data: growwSessionRow } = await supabase.from('groww_session').select('access_token').eq('id', 1).maybeSingle();
+    growwToken = growwSessionRow?.access_token ?? null;
+  }
+
+  // A real Groww order needs GROWW's OWN trading_symbol (a different
+  // string format from Kite's, e.g. "NIFTY26O0622700PE") — resolved from
+  // groww_options_instruments, never Kite's options_instruments. Only
+  // overridden when a real order will actually go through Groww; every
+  // other path keeps the Kite-resolved symbol from above unchanged.
+  if (routesRealOrdersThroughGroww) {
+    const { data: growwInstrumentRows } = await supabase.from('groww_options_instruments')
+      .select('*').eq('symbol', symbol).eq('expiry', expiryDateStr);
+    for (const l of legs) {
+      const growwInst = (growwInstrumentRows ?? []).find((r: any) => Number(r.strike) === l.strike && r.option_right === l.right);
+      l.tradingsymbol = growwInst?.trading_symbol ?? '';
+    }
+  }
+
   const unresolvedLegs = legs.filter((l) => !l.tradingsymbol).map((l) => `${l.strike}${l.right}`);
 
   let marginRequiredPerLot = 0;
   let marginDetail = 'Margin not checked — instrument resolution failed.';
   if (!unresolvedLegs.length) {
     try {
-      const basketReq = buildBasketMarginRequest(legs.map((l) => ({ side: l.side, tradingsymbol: l.tradingsymbol, quantity: l.quantity })), { exchange, product: 'NRML' });
-      const marginData = await kiteFetch(`/margins/basket?consider_positions=false`, { method: 'POST', token, apiKey, jsonBody: basketReq.orders });
-      const margin = parseBasketMarginResponse(marginData);
-      marginRequiredPerLot = margin?.totalRequired ?? 0;
-      marginDetail = `Live basket margin for 1 lot: ₹${marginRequiredPerLot.toFixed(0)}.`;
+      if (routesRealOrdersThroughGroww) {
+        if (!growwToken) throw new Error('no_groww_session');
+        const total = await fetchGrowwBasketMargin(legs.map((l) => ({ tradingSymbol: l.tradingsymbol, side: l.side, quantity: l.quantity })), growwToken);
+        if (total === null) throw new Error('Groww basket-margin request failed');
+        marginRequiredPerLot = total;
+        marginDetail = `Live Groww basket margin for 1 lot: ₹${marginRequiredPerLot.toFixed(0)}.`;
+      } else {
+        const basketReq = buildBasketMarginRequest(legs.map((l) => ({ side: l.side, tradingsymbol: l.tradingsymbol, quantity: l.quantity })), { exchange, product: 'NRML' });
+        const marginData = await kiteFetch(`/margins/basket?consider_positions=false`, { method: 'POST', token, apiKey, jsonBody: basketReq.orders });
+        const margin = parseBasketMarginResponse(marginData);
+        marginRequiredPerLot = margin?.totalRequired ?? 0;
+        marginDetail = `Live basket margin for 1 lot: ₹${marginRequiredPerLot.toFixed(0)}.`;
+      }
     } catch (err: any) {
       marginDetail = `Margin check failed: ${err.message}`;
     }
@@ -1025,7 +1287,9 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   // intent reflects what AUTO would actually have sized — see this file's
   // header note on isShadow above.
   const usesRealFunds = isLive || isShadow;
-  const realAvailableFunds = usesRealFunds ? await fetchRealAvailableFunds(token, apiKey) : null;
+  const realAvailableFunds = usesRealFunds
+    ? (routesRealOrdersThroughGroww ? (growwToken ? await fetchGrowwAvailableFunds(growwToken) : null) : await fetchRealAvailableFunds(token, apiKey))
+    : null;
   if (usesRealFunds && realAvailableFunds === null) {
     await log('error', `${modeLabel}: could not verify real account funds for ${symbol} — refusing to size or record any intent this cycle.`);
     res.status(200).json({ ok: true, action: decision.action, opened: false, skipped: 'real_funds_unavailable', diagnostics });
@@ -1039,6 +1303,19 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   // which symbol is being scanned right now. This never touches an
   // existing position — it only refuses to add MORE exposure while the
   // broker's true state is uncertain.
+  //
+  // This gate only knows how to reconcile against KITE's order/position
+  // book. A real order routed through Groww has NO equivalent
+  // reconciliation check built yet — rather than silently skip this
+  // protection for Groww (which would mean a real Groww order could fire
+  // with zero duplicate-order safety net), this fails closed: refuses
+  // every Groww-routed AUTO entry at this gate until a real Groww
+  // reconciliation path exists, exactly like an unreachable broker would.
+  if (routesRealOrdersThroughGroww) {
+    await log('error', `AUTO (Groww): no broker-reconciliation check exists for Groww yet — refusing this entry rather than placing a real order with no duplicate-order safety net.`);
+    res.status(200).json({ ok: true, action: decision.action, opened: false, skipped: 'groww_reconciliation_not_implemented', diagnostics });
+    return;
+  }
   if (isLive) {
     const [brokerPositions, brokerOrders] = await Promise.all([
       fetchBrokerPositions(token, apiKey),
@@ -1171,8 +1448,16 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   const shadowExecResult = isShadow && winningSlice
     ? runShadowExecutionForLegs(scaledLegs, validation, winningSlice.quotes)
     : null;
+  // routesRealOrdersThroughGroww never actually reaches here today — the
+  // broker-reconciliation gate above already refuses and returns before
+  // this point whenever it's true (see that gate's own comment on why).
+  // Wired correctly anyway, so lifting that refusal later (once a real
+  // Groww reconciliation check exists) is a one-line change here, not a
+  // new feature.
   const execResult = isLive
-    ? await runLiveExecution(scaledLegs, validation, makeLiveOrderPlacer(token, apiKey), { exchange })
+    ? routesRealOrdersThroughGroww
+      ? await runLiveExecution(scaledLegs, validation, makeGrowwOrderPlacer(growwToken!), { exchange: GROWW_EXCHANGE_FOR_KITE_EXCHANGE[exchange] ?? 'NSE' })
+      : await runLiveExecution(scaledLegs, validation, makeLiveOrderPlacer(token, apiKey), { exchange })
     : shadowExecResult
       ? shadowExecResult
       : runPaperExecution(scaledLegs, validation);
@@ -1294,7 +1579,7 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     const { data: reconRow } = await supabase.from('options_autotrade_positions').insert({
       symbol, strategy_label: decision.expiryEvaluation.strategyLabel, expiry: expiryDateStr,
       status: 'RECONCILIATION_REQUIRED', execution_state: execResult.state, protection: execResult.protection,
-      execution_mode: modeLabel, lots: sizing.lots, net_credit: best.result.netCredit,
+      execution_mode: modeLabel, broker: activeBroker, lots: sizing.lots, net_credit: best.result.netCredit,
       max_profit: sizing.sizedMaxProfit, max_loss: sizing.sizedMaxLoss, margin_required: sizing.sizedMarginRequired,
       quality_score: best.qualityScore.score, decision_explanation: decision.explanation, entry_date: todayIST,
     }).select('id').single();
@@ -1325,7 +1610,7 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     symbol, strategy_label: decision.expiryEvaluation.strategyLabel,
     expiry: expiryDateStr,
     status: 'ACTIVE', execution_state: execResult.state, protection: execResult.protection,
-    execution_mode: modeLabel,
+    execution_mode: modeLabel, broker: activeBroker,
     lots: sizing.lots, net_credit: best.result.netCredit, max_profit: sizing.sizedMaxProfit, max_loss: sizing.sizedMaxLoss,
     margin_required: sizing.sizedMarginRequired,
     net_delta: (best.result.netGreeks.delta ?? 0) * sizing.lots, net_gamma: (best.result.netGreeks.gamma ?? 0) * sizing.lots,
@@ -1476,15 +1761,47 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
   const symbolExchanges = OPTIONS_SYMBOLS as Record<string, string>;
   const indexKeys = INDEX_QUOTE_KEY as Record<string, string>;
 
+  // PRICE DISCOVERY always goes through Kite regardless of which broker
+  // actually holds the position — Kite is this app's sole market-data
+  // source (see the dual-broker scoping note in handlePaperScan); only
+  // the real closing ORDER further below needs the position's own
+  // broker. A GROWW-broker leg's stored tradingsymbol is Groww's own
+  // format (e.g. "NIFTY26O0622700PE") and would not resolve against
+  // Kite's quote feed at all, so for exactly those legs this resolves
+  // KITE's own tradingsymbol fresh, by (symbol, expiry, strike, right) —
+  // never assuming the stored tradingsymbol's format matches Kite's.
+  const growwBrokerPositions = positions.filter((p: any) => p.broker === 'GROWW');
+  const kiteSymbolByGrowwLeg = new Map<string, string>(); // key: `${positionId}|${legId}`
+  if (growwBrokerPositions.length) {
+    const expiries = [...new Set(growwBrokerPositions.map((p: any) => p.expiry))];
+    const symbolsForLookup = [...new Set(growwBrokerPositions.map((p: any) => p.symbol))];
+    const { data: kiteInstrumentRows } = await supabase.from('options_instruments')
+      .select('symbol, expiry, strike, option_right, tradingsymbol')
+      .in('symbol', symbolsForLookup).in('expiry', expiries);
+    for (const p of growwBrokerPositions) {
+      for (const l of (p.options_autotrade_legs ?? [])) {
+        const match = (kiteInstrumentRows ?? []).find((r: any) =>
+          r.symbol === p.symbol && r.expiry === p.expiry && Number(r.strike) === Number(l.strike) && r.option_right === l.option_right);
+        if (match) kiteSymbolByGrowwLeg.set(`${p.id}|${l.id}`, match.tradingsymbol);
+      }
+    }
+  }
+  /** The tradingsymbol to use for KITE price discovery for this leg — resolved fresh for a GROWW-broker position, the leg's own (already-Kite-format) tradingsymbol otherwise. */
+  const kitePriceSymbolFor = (p: any, l: any): string | null =>
+    p.broker === 'GROWW' ? (kiteSymbolByGrowwLeg.get(`${p.id}|${l.id}`) ?? null) : l.tradingsymbol;
+
   // Batch every quote this run needs across ALL open positions at once —
-  // every leg's tradingsymbol plus each distinct symbol's index quote key
-  // — rather than one Kite call per position, so API usage stays bounded
-  // regardless of how many positions happen to be open.
+  // every leg's (Kite) tradingsymbol plus each distinct symbol's index
+  // quote key — rather than one Kite call per position, so API usage
+  // stays bounded regardless of how many positions happen to be open.
   const legKeys = new Set<string>();
   const symbolsNeeded = new Set<string>();
   for (const p of positions) {
     symbolsNeeded.add(p.symbol);
-    for (const l of (p.options_autotrade_legs ?? [])) legKeys.add(`${symbolExchanges[p.symbol] ?? 'NFO'}:${l.tradingsymbol}`);
+    for (const l of (p.options_autotrade_legs ?? [])) {
+      const kiteSymbol = kitePriceSymbolFor(p, l);
+      if (kiteSymbol) legKeys.add(`${symbolExchanges[p.symbol] ?? 'NFO'}:${kiteSymbol}`);
+    }
   }
   for (const s of symbolsNeeded) { const key = indexKeys[s]; if (key) legKeys.add(key); }
 
@@ -1502,6 +1819,8 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
 
   const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
   const closed: Array<{ positionId: number; symbol: string; reason: string | null; realizedPnl: number }> = [];
+  // undefined = not yet fetched this invocation; null = fetched, no session exists. Fetched at most once per run, only if a GROWW-broker position actually needs to place a real closing order this cycle.
+  let growwTokenForClosing: string | null | undefined;
 
   for (const p of positions) {
     const legs = p.options_autotrade_legs ?? [];
@@ -1522,7 +1841,8 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
     let currentCostToClose = 0;
     let missingQuote = false;
     for (const l of legs) {
-      const price = midOrLastPrice(quoteMap.get(`${exchange}:${l.tradingsymbol}`));
+      const kiteSymbol = kitePriceSymbolFor(p, l);
+      const price = kiteSymbol ? midOrLastPrice(quoteMap.get(`${exchange}:${kiteSymbol}`)) : null;
       if (price == null) { missingQuote = true; continue; }
       currentCostToClose += (l.side === 'SELL' ? 1 : -1) * price * l.quantity;
     }
@@ -1584,7 +1904,28 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
       // that already went through; it waits for a human to reconcile
       // against the broker directly, same posture as stateMachine.ts's
       // RECONCILIATION_REQUIRED.
-      const placer = makeLiveOrderPlacer(token, apiKey);
+      // Closing orders go through whichever broker ACTUALLY holds this
+      // position (p.broker, recorded once at open) — never whatever
+      // options_autotrade_settings.active_broker currently says, which
+      // can have changed since this position was opened. l.tradingsymbol
+      // is already in that broker's own format (resolved correctly at
+      // entry time), unlike the Kite-only price-discovery lookup above.
+      let placer: LiveOrderPlacer;
+      let closeExchange = exchange;
+      if (p.broker === 'GROWW') {
+        if (growwTokenForClosing === undefined) {
+          const { data: growwSessionRow } = await supabase.from('groww_session').select('access_token').eq('id', 1).maybeSingle();
+          growwTokenForClosing = growwSessionRow?.access_token ?? null;
+        }
+        if (!growwTokenForClosing) {
+          await log('error', `Position #${p.id}: no Groww session — cannot place real closing orders this cycle. Left ACTIVE for a retry next cycle.`, undefined, p.execution_mode);
+          continue;
+        }
+        placer = makeGrowwOrderPlacer(growwTokenForClosing);
+        closeExchange = GROWW_EXCHANGE_FOR_KITE_EXCHANGE[exchange] ?? 'NSE';
+      } else {
+        placer = makeLiveOrderPlacer(token, apiKey);
+      }
       const orderedClose = [...legs.filter((l: any) => l.side === 'SELL'), ...legs.filter((l: any) => l.side === 'BUY')];
       let allClosed = true;
       let actualCostToClose = 0;
@@ -1592,7 +1933,7 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
         try {
           const orderId = await placer.closeLeg(
             { side: l.side, right: l.option_right, strike: Number(l.strike), tradingsymbol: l.tradingsymbol, quantity: l.quantity, fillPrice: 0 },
-            exchange,
+            closeExchange,
           );
           const fill = await placer.awaitFill(orderId, 15_000);
           if (fill.status === 'COMPLETE' && fill.averagePrice != null) {
@@ -3213,6 +3554,7 @@ export default async function handler(req: any, res: any) {
     return;
   }
   if (resource === 'instruments-sync') return handleInstrumentsSync(req, res, supabase);
+  if (resource === 'groww-instruments-sync') return handleGrowwInstrumentsSync(req, res, supabase);
   if (resource === 'margin') return handleMargin(req, res, supabase);
   if (resource === 'paper-scan') return handlePaperScan(req, res, supabase);
   if (resource === 'position-monitor') return handlePositionMonitor(req, res, supabase);

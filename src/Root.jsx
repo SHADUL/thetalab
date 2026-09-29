@@ -55,8 +55,11 @@ export default function Root() {
     <div className="flex flex-col min-h-screen">
       <div className="flex items-center justify-between px-3 py-1.5 shrink-0"
         style={{ borderBottom: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
-        <span className="text-[12px] font-bold tracking-[-0.02em]">
-          theta<span className="text-accent">lab</span>
+        <span className="flex items-center gap-1.5">
+          <img src="/favicon.svg" alt="" width={18} height={18} className="shrink-0" />
+          <span className="text-[12px] font-bold tracking-[-0.02em]">
+            theta<span className="text-accent">lab</span>
+          </span>
         </span>
         {/* A selector for exactly one option is just noise — hide it
             entirely while ONLY_OPTIONS_AUTO is on, same one-flag revert. */}

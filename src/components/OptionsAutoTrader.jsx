@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { ChartLineUp, Info, Wallet, Gear, CaretDown, CaretUp, CaretLeft, CaretRight, Shield, Bell, Eye, EyeSlash, SortAscending, CalendarBlank } from "@phosphor-icons/react";
+import { ChartLineUp, Info, Wallet, Gear, CaretDown, CaretUp, CaretLeft, CaretRight, Shield, Bell, Eye, EyeSlash, SortAscending, CalendarBlank, ListBullets } from "@phosphor-icons/react";
 import { inr, toneClass, scoreTone, scoreLabel } from "./swingFormat.js";
 
 const POLL_MS = 60_000; // this dashboard only reads already-computed state (settings/positions/log) — the live chain fetch itself runs on its own 30-min cron, not on this poll
@@ -753,37 +753,33 @@ function PositionCardMobile({ p, hideAmounts, isFirst }) {
   );
 }
 
-function MobilePortfolio({ positions, hideAmounts }) {
-  const [filter, setFilter] = useState("active"); // active | closed
+/**
+ * Mobile positions list — Active and Closed are now separate BOTTOM-NAV
+ * tabs (Portfolio shows active only, Trades shows closed only) rather
+ * than a segmented switch within one screen, so this just renders
+ * whichever single `list` it's handed, plus the sort control. No filter
+ * state of its own anymore.
+ */
+function MobilePositionsList({ list, hideAmounts, emptyState }) {
   const [sortByPnl, setSortByPnl] = useState(false);
-
-  const list = filter === "active" ? positions.active : positions.closed;
   const sorted = sortByPnl
     ? [...list].sort((a, b) => Math.abs(Number(b.status === "ACTIVE" ? b.unrealized_pnl : b.realized_pnl) || 0) - Math.abs(Number(a.status === "ACTIVE" ? a.unrealized_pnl : a.realized_pnl) || 0))
     : list;
 
   return (
     <div className="sm:hidden">
-      <div className="flex items-center gap-2 mb-2.5">
-        <div className="seg-track flex-1" role="tablist" aria-label="Filter">
-          <button role="tab" aria-selected={filter === "active"} data-on={filter === "active"} onClick={() => setFilter("active")} className="seg" style={{ minHeight: 40 }}>
-            ACTIVE ({positions.active.length})
-          </button>
-          <button role="tab" aria-selected={filter === "closed"} data-on={filter === "closed"} onClick={() => setFilter("closed")} className="seg" style={{ minHeight: 40 }}>
-            CLOSED ({positions.closed.length})
+      {list.length > 0 && (
+        <div className="flex items-center justify-end gap-2 mb-2.5">
+          <button onClick={() => setSortByPnl((v) => !v)} className="topstep" style={{ minHeight: 40 }} title="Sort by |P&L|">
+            <SortAscending size={12} weight="bold" />
+            {sortByPnl ? "By P&L" : "Newest"}
           </button>
         </div>
-        <button onClick={() => setSortByPnl((v) => !v)} className="topstep" style={{ minHeight: 40 }} title="Sort by |P&L|">
-          <SortAscending size={12} weight="bold" />
-          {sortByPnl ? "By P&L" : "Newest"}
-        </button>
-      </div>
+      )}
 
       <AnimatePresence mode="wait">
-        <motion.div key={filter} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.16, ease: "easeOut" }}>
-          {sorted.length === 0 ? (
-            <EmptyState label={`No ${filter} positions.`} />
-          ) : (
+        <motion.div key={sortByPnl ? "pnl" : "newest"} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.16, ease: "easeOut" }}>
+          {sorted.length === 0 ? emptyState : (
             sorted.map((p, i) => (
               <PositionCardMobile key={p.id} p={p} hideAmounts={hideAmounts} isFirst={i === 0} />
             ))
@@ -1054,7 +1050,7 @@ export default function OptionsAutoTrader() {
   const [killSwitchResult, setKillSwitchResult] = useState(null);
   const [dailyStats, setDailyStats] = useState(null);
   const [clearingLock, setClearingLock] = useState(false);
-  const [mobileTab, setMobileTab] = useState("portfolio"); // portfolio | calendar | activity
+  const [mobileTab, setMobileTab] = useState("portfolio"); // portfolio | trades | calendar | activity
   const [hideAmounts, setHideAmounts] = useState(false);
   const [realFunds, setRealFunds] = useState(null);
   const [growwRealFunds, setGrowwRealFunds] = useState(null);
@@ -1221,6 +1217,11 @@ export default function OptionsAutoTrader() {
   ].slice(0, 30);
 
   const modeColor = MODE_COLOR[settings?.execution_mode] ?? MODE_COLOR.OFF;
+  // Trades and Activity are now dedicated full-screen tabs on mobile — just
+  // the header (title/mode/kill switch stay reachable everywhere) plus
+  // that tab's own list, none of the ticker/mode/portfolio-hero/capital/
+  // settings sections Portfolio and Calendar still show above their content.
+  const mobileFullScreenTab = mobileTab === "trades" || mobileTab === "activity";
 
   return (
     // flex-col + explicit order-[N] on each top-level section below: mobile
@@ -1230,10 +1231,12 @@ export default function OptionsAutoTrader() {
     // exactly mirror this file's own source order, so desktop is a no-op
     // here — only the unprefixed (mobile) values actually move anything.
     <div className="oat-page flex flex-col px-3 sm:px-6 pt-3 pb-20 sm:pb-6 max-w-[1560px] mx-auto relative" style={{ paddingTop: "max(0.75rem, env(safe-area-inset-top, 0px))" }}>
-      <MobileBrokerBar
-        settings={settings} growwStatus={growwStatus} growwConnecting={growwConnecting}
-        connectGroww={connectGroww} setActiveBroker={setActiveBroker} saving={saving}
-      />
+      {!mobileFullScreenTab && (
+        <MobileBrokerBar
+          settings={settings} growwStatus={growwStatus} growwConnecting={growwConnecting}
+          connectGroww={connectGroww} setActiveBroker={setActiveBroker} saving={saving}
+        />
+      )}
 
       {/* ── Header: title, mode badge, kill switch — floats slightly above
           the page with a soft hairline beneath, reads as a command bar
@@ -1264,12 +1267,13 @@ export default function OptionsAutoTrader() {
       </div>
 
       <MarketStrip indices={indices} />
-      <RotatingTicker indices={indices} />
+      {!mobileFullScreenTab && <RotatingTicker indices={indices} />}
 
       {/* ── Execution mode: mobile-only compact segmented control — a
           single slim row, no label, no filled status pill. Desktop's mode
           control lives in UtilityBar below instead (broker + mode +
           settings together, one slim utility row, not two stacked cards). ── */}
+      {!mobileFullScreenTab && (
       <div className="sm:hidden flex items-center gap-2.5 flex-wrap py-2 mb-3 px-3 rounded-[var(--radius-md)] order-[40]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)", boxShadow: "var(--e-1)" }}>
         <div className="seg-track flex-1">
           {["OFF", "PAPER", "SHADOW", "AUTO"].map((mode) => (
@@ -1302,6 +1306,7 @@ export default function OptionsAutoTrader() {
           </span>
         )}
       </div>
+      )}
 
       {/* ── Utility Bar: broker + mode + settings, one slim flat row —
           desktop only. Mobile gets MobileBrokerBar (top) + the compact
@@ -1352,6 +1357,7 @@ export default function OptionsAutoTrader() {
           default, risk-parameter fields only. Ordered AFTER positions on
           mobile per the redesign brief (operational detail, not primary
           content the user opens the page to see). ── */}
+      {!mobileFullScreenTab && (
       <div className="sm:hidden rounded-[var(--radius-md)] mb-4 order-[90]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
         <button onClick={() => setSettingsOpen((v) => !v)} className="w-full flex items-center gap-3 p-3 text-left">
           <Gear size={14} weight="bold" className="text-muted shrink-0" />
@@ -1371,6 +1377,7 @@ export default function OptionsAutoTrader() {
           )}
         </AnimatePresence>
       </div>
+      )}
 
       {loading ? (
         <div className="rounded-[var(--radius-md)] h-[92px] mb-4 skeleton order-[60] sm:order-[90]" />
@@ -1381,32 +1388,58 @@ export default function OptionsAutoTrader() {
         </div>
       ) : (
         <>
-          <div className="order-[60] sm:order-[90]">
+          <div className={mobileFullScreenTab ? "hidden sm:block sm:order-[90]" : "order-[60] sm:order-[90]"}>
             <RiskCommandBar positions={visiblePositions} settings={settings} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} realFunds={realFunds} growwRealFunds={growwRealFunds} />
           </div>
 
-          <MobileCapitalCard settings={settings} realFunds={realFunds} growwRealFunds={growwRealFunds} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} />
+          {!mobileFullScreenTab && (
+            <MobileCapitalCard settings={settings} realFunds={realFunds} growwRealFunds={growwRealFunds} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} />
+          )}
 
           <div className="order-[80] sm:order-[100]">
-            {visiblePositions.active.length === 0 && visiblePositions.closed.length === 0 ? (
-              <EmptyState
-                label="No active positions"
-                sub={`The scanner is monitoring NIFTY, BANKNIFTY and SENSEX. New ${settings?.execution_mode === "AUTO" ? "AUTO" : settings?.execution_mode === "SHADOW" ? "SHADOW" : "PAPER"} positions appear automatically when a candidate qualifies.`}
-                live={settings?.execution_mode && settings.execution_mode !== "OFF"}
-              />
-            ) : (
+            {/* Desktop: unaffected by mobile's tabs — same combined
+                active+closed empty check as always. */}
+            <div className="hidden sm:block">
+              {visiblePositions.active.length === 0 && visiblePositions.closed.length === 0 && (
+                <EmptyState
+                  label="No active positions"
+                  sub={`The scanner is monitoring NIFTY, BANKNIFTY and SENSEX. New ${settings?.execution_mode === "AUTO" ? "AUTO" : settings?.execution_mode === "SHADOW" ? "SHADOW" : "PAPER"} positions appear automatically when a candidate qualifies.`}
+                  live={settings?.execution_mode && settings.execution_mode !== "OFF"}
+                />
+              )}
+            </div>
+
+            {/* Mobile: each bottom-nav tab shows its own single list —
+                Portfolio = active only, Trades = closed only. */}
+            <div className="sm:hidden">
               <AnimatePresence mode="wait">
                 {mobileTab === "activity" ? null : mobileTab === "calendar" ? (
-                  <motion.div key="calendar" initial={{ opacity: 0, x: 12 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -12 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }} className="sm:hidden">
+                  <motion.div key="calendar" initial={{ opacity: 0, x: 12 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -12 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}>
                     <PnLCalendar positions={visiblePositions} hideAmounts={hideAmounts} />
+                  </motion.div>
+                ) : mobileTab === "trades" ? (
+                  <motion.div key="trades" initial={{ opacity: 0, x: 12 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -12 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}>
+                    <MobilePositionsList
+                      list={visiblePositions.closed} hideAmounts={hideAmounts}
+                      emptyState={<EmptyState label="No closed trades yet" sub="Positions will appear here once a trade exits." />}
+                    />
                   </motion.div>
                 ) : (
                   <motion.div key="portfolio" initial={{ opacity: 0, x: -12 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 12 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}>
-                    <MobilePortfolio positions={visiblePositions} hideAmounts={hideAmounts} />
+                    <MobilePositionsList
+                      list={visiblePositions.active} hideAmounts={hideAmounts}
+                      emptyState={
+                        <EmptyState
+                          label="No active positions"
+                          sub={`The scanner is monitoring NIFTY, BANKNIFTY and SENSEX. New ${settings?.execution_mode === "AUTO" ? "AUTO" : settings?.execution_mode === "SHADOW" ? "SHADOW" : "PAPER"} positions appear automatically when a candidate qualifies.`}
+                          live={settings?.execution_mode && settings.execution_mode !== "OFF"}
+                        />
+                      }
+                    />
                   </motion.div>
                 )}
               </AnimatePresence>
-            )}
+            </div>
           </div>
 
           <div className="hidden sm:flex items-center gap-3 mb-2 sm:order-[110]">
@@ -1459,6 +1492,7 @@ export default function OptionsAutoTrader() {
       <div className="sm:hidden fixed bottom-0 inset-x-0 z-40 flex" style={{ borderTop: "1px solid var(--c-line)", background: "var(--c-surface)", paddingBottom: "env(safe-area-inset-bottom, 0px)" }}>
         {[
           { key: "portfolio", label: "Portfolio", Icon: Wallet },
+          { key: "trades", label: "Trades", Icon: ListBullets },
           { key: "calendar", label: "Calendar", Icon: CalendarBlank },
           { key: "activity", label: "Activity", Icon: Bell },
         ].map(({ key, label, Icon }) => {

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { ChartLineUp, Info, Wallet, Gear, CaretDown, CaretUp, CaretLeft, CaretRight, Shield, Bell, Eye, EyeSlash, SortAscending, CalendarBlank, ListBullets } from "@phosphor-icons/react";
+import { ChartLineUp, Info, Wallet, Gear, CaretDown, CaretUp, CaretLeft, CaretRight, Shield, Bell, Eye, EyeSlash, CalendarBlank, ListBullets } from "@phosphor-icons/react";
 import { inr, toneClass, scoreTone, scoreLabel } from "./swingFormat.js";
 
 const POLL_MS = 60_000; // this dashboard only reads already-computed state (settings/positions/log) — the live chain fetch itself runs on its own 30-min cron, not on this poll
@@ -761,31 +761,13 @@ function PositionCardMobile({ p, hideAmounts, isFirst }) {
  * state of its own anymore.
  */
 function MobilePositionsList({ list, hideAmounts, emptyState }) {
-  const [sortByPnl, setSortByPnl] = useState(false);
-  const sorted = sortByPnl
-    ? [...list].sort((a, b) => Math.abs(Number(b.status === "ACTIVE" ? b.unrealized_pnl : b.realized_pnl) || 0) - Math.abs(Number(a.status === "ACTIVE" ? a.unrealized_pnl : a.realized_pnl) || 0))
-    : list;
-
   return (
     <div className="sm:hidden">
-      {list.length > 0 && (
-        <div className="flex items-center justify-end gap-2 mb-2.5">
-          <button onClick={() => setSortByPnl((v) => !v)} className="topstep" style={{ minHeight: 40 }} title="Sort by |P&L|">
-            <SortAscending size={12} weight="bold" />
-            {sortByPnl ? "By P&L" : "Newest"}
-          </button>
-        </div>
+      {list.length === 0 ? emptyState : (
+        list.map((p, i) => (
+          <PositionCardMobile key={p.id} p={p} hideAmounts={hideAmounts} isFirst={i === 0} />
+        ))
       )}
-
-      <AnimatePresence mode="wait">
-        <motion.div key={sortByPnl ? "pnl" : "newest"} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.16, ease: "easeOut" }}>
-          {sorted.length === 0 ? emptyState : (
-            sorted.map((p, i) => (
-              <PositionCardMobile key={p.id} p={p} hideAmounts={hideAmounts} isFirst={i === 0} />
-            ))
-          )}
-        </motion.div>
-      </AnimatePresence>
     </div>
   );
 }

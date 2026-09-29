@@ -1024,16 +1024,19 @@ tr.is-atm-row .ch-cell { border-top: 1px solid color-mix(in srgb, var(--c-accent
   background: rgba(90, 85, 247, 0.035);
 }
 
-/* Subtle open-vs-closed shading — a very faint green tint for still-open
-   rows, a barely-there neutral tint for closed ones (closed rows should
-   recede, not compete). The :not() guards mean hover/selected — set
-   above, same specificity — still win outright rather than fighting the
-   base tint for which rule the cascade picks. */
+/* Open-vs-closed shading — a clearly-visible-but-not-loud green tint for
+   still-open rows, a cooler gray tint for closed ones (closed rows should
+   still read as "settled", not compete with what's still live). Bumped up
+   from the first pass, which turned out too faint to actually notice.
+   The :not() guards mean hover/selected — set above, same specificity —
+   still win outright rather than fighting the base tint for which rule
+   the cascade picks. */
 .oat-row[data-status="active"]:not(:hover):not([data-selected="true"]) {
-  background: rgba(6, 122, 85, 0.025);
+  background: rgba(10, 143, 98, 0.08);
+  box-shadow: inset 2px 0 0 rgba(10, 143, 98, 0.4);
 }
 .oat-row[data-status="closed"]:not(:hover):not([data-selected="true"]) {
-  background: rgba(20, 30, 55, 0.015);
+  background: rgba(20, 30, 55, 0.045);
 }
 
 .oat-sticky-head {

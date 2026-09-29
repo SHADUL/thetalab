@@ -31,7 +31,7 @@ function MarketStrip({ indices }) {
   const rows = indices.filter((idx) => idx.lastPrice != null);
   if (!rows.length) return null;
   return (
-    <div className="flex items-center gap-1 flex-wrap px-3 py-2 mb-3 rounded-[var(--radius-md)]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+    <div className="hidden sm:flex items-center gap-1 flex-wrap px-3 py-2 mb-3 rounded-[var(--radius-md)] sm:order-[20]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
       <span className="live-dot shrink-0" aria-hidden="true" />
       {rows.map((idx, i) => {
         const positive = (idx.change ?? 0) >= 0;
@@ -45,6 +45,128 @@ function MarketStrip({ indices }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/**
+ * Mobile-only single-line ticker — rather than stacking NIFTY/BANKNIFTY/
+ * SENSEX as three lines (too much vertical space on a small screen), this
+ * shows exactly one index at a time and auto-advances to the next every
+ * 3.5s with a vertical slide + crossfade. Same `indices` data as
+ * MarketStrip (desktop keeps the all-at-once strip); this is presentation
+ * only — no new data, no polling change.
+ */
+function RotatingTicker({ indices }) {
+  const [i, setI] = useState(0);
+  const rows = (indices ?? []).filter((idx) => idx.lastPrice != null);
+  useEffect(() => {
+    if (rows.length < 2) return;
+    const t = setInterval(() => setI((v) => (v + 1) % rows.length), 3500);
+    return () => clearInterval(t);
+  }, [rows.length]);
+  if (!rows.length) return null;
+  const idx = rows[i % rows.length];
+  const positive = (idx.change ?? 0) >= 0;
+  return (
+    <div className="sm:hidden flex items-center gap-1.5 px-3 py-2 mb-2.5 rounded-[var(--radius-md)] overflow-hidden order-[30]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+      <span className="live-dot shrink-0" aria-hidden="true" />
+      <div className="relative h-[18px] flex-1 min-w-0 overflow-hidden">
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={idx.symbol}
+            initial={{ y: 14, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: -14, opacity: 0 }}
+            transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+            className="absolute inset-0 flex items-baseline gap-1.5"
+          >
+            <span className="text-[11px] font-semibold text-muted tracking-wide shrink-0">{INDEX_LABEL[idx.symbol] ?? idx.symbol}</span>
+            <span className="text-[13px] font-bold n shrink-0">{idx.lastPrice.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</span>
+            <span className={`text-[10.5px] font-semibold n flex items-center gap-0.5 shrink-0 ${positive ? "text-gain" : "text-loss"}`}>
+              {positive ? "▲" : "▼"} {Math.abs(idx.change ?? 0).toFixed(2)} ({Math.abs(idx.changePct ?? 0).toFixed(2)}%)
+            </span>
+          </motion.div>
+        </AnimatePresence>
+      </div>
+      {rows.length > 1 && (
+        <div className="flex items-center gap-1 shrink-0" aria-hidden="true">
+          {rows.map((_, d) => (
+            <span key={d} className="rounded-full" style={{ width: 3, height: 3, background: d === i % rows.length ? "var(--c-accent)" : "var(--c-line-2)" }} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Mobile-only top utility row — surfaces the broker toggle and connection
+ * health BEFORE the page title, since on a small screen "which broker/
+ * account am I about to trade real money on" is the first thing worth
+ * confirming. Same setActiveBroker/connectGroww handlers as the desktop
+ * BrokerCapitalCard's left side, just the top-of-screen presentation.
+ */
+function MobileBrokerBar({ settings, growwStatus, growwConnecting, connectGroww, setActiveBroker, saving }) {
+  const activeBroker = settings?.active_broker ?? "KITE";
+  const isGroww = activeBroker === "GROWW";
+  return (
+    <div className="sm:hidden flex items-center gap-2 flex-wrap py-1.5 mb-2 order-[10]">
+      <div className="seg-track">
+        {["KITE", "GROWW"].map((broker) => (
+          <button key={broker} role="tab" aria-selected={activeBroker === broker} data-on={activeBroker === broker}
+            onClick={() => setActiveBroker(broker)} disabled={saving} className="seg" style={{ minHeight: 32 }}>
+            {broker}
+          </button>
+        ))}
+      </div>
+      {isGroww && (
+        <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold px-2 py-1 rounded-full"
+          style={{ background: growwStatus?.connected ? "var(--c-gain-soft)" : "var(--c-warn-soft)", color: growwStatus?.connected ? "var(--c-gain)" : "var(--c-warn)" }}>
+          <span className="live-dot" style={{ background: growwStatus?.connected ? "var(--c-gain)" : "var(--c-warn)" }} aria-hidden="true" />
+          {growwStatus?.connected ? "Connected" : "Not connected"}
+        </span>
+      )}
+      {isGroww && (
+        <button onClick={connectGroww} disabled={growwConnecting} className="topstep text-[10.5px] ml-auto" style={{ minHeight: 32 }}>
+          {growwConnecting ? "Connecting…" : growwStatus?.connected ? "Reconnect" : "Connect"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Mobile-only live capital card — the same figures the desktop
+ * BrokerCapitalCard's right side shows, restyled as its own compact
+ * premium account card with a privacy eye-toggle (reuses the SAME
+ * hideAmounts state the portfolio hero card's toggle already uses, so
+ * one switch masks every rupee figure on the page consistently rather
+ * than inventing a second, independent hide state).
+ */
+function MobileCapitalCard({ settings, realFunds, growwRealFunds, hideAmounts, setHideAmounts }) {
+  const isAuto = settings?.execution_mode === "AUTO";
+  if (!isAuto) return null;
+  const isGroww = (settings?.active_broker ?? "KITE") === "GROWW";
+  const funds = isGroww ? growwRealFunds : realFunds;
+  const noSessionLabel = isGroww ? "No Groww session" : "No Kite session";
+  const noSessionCode = isGroww ? "no_groww_session" : "no_kite_session";
+  const hasBalance = funds?.availableFunds != null;
+  return (
+    <div className="sm:hidden rounded-[var(--radius-lg)] mb-3 p-4 order-[70]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)", boxShadow: "var(--e-1)" }}>
+      <div className="flex items-center justify-between gap-2 mb-1.5">
+        <span className="text-[10px] font-semibold text-muted tracking-wide uppercase">Live Broker Capital</span>
+        <div className="flex items-center gap-2">
+          <span className="text-[9.5px] font-bold px-1.5 py-0.5 rounded-[4px]" style={{ background: "var(--c-accent-soft)", color: "var(--c-accent)" }}>
+            {isGroww ? "GROWW" : "KITE"}
+          </span>
+          <motion.button whileTap={{ scale: 0.9 }} onClick={() => setHideAmounts((v) => !v)} className="text-muted" aria-label="Toggle capital visibility">
+            {hideAmounts ? <EyeSlash size={14} weight="regular" /> : <Eye size={14} weight="regular" />}
+          </motion.button>
+        </div>
+      </div>
+      <div className={`font-display text-[26px] font-bold n leading-tight ${!hasBalance ? "text-faint" : "text-ink"}`}>
+        {hideAmounts ? "₹••••••••" : hasBalance ? inr(funds.availableFunds) : funds?.skipped === noSessionCode ? noSessionLabel : "—"}
+      </div>
+      <span className="text-[10.5px] text-faint">Used for AUTO sizing and real execution safety checks</span>
     </div>
   );
 }
@@ -435,9 +557,13 @@ function PositionCardMobile({ p, hideAmounts, isFirst }) {
           <StatusMark status={p.status} exitReason={p.exit_reason} />
         </div>
         <div className="flex items-center justify-between gap-3 mt-2 pt-2" style={{ borderTop: "1px solid var(--c-line)" }}>
-          <div className="flex items-baseline gap-3 text-[11px]">
-            <span className="text-faint">{p.expiry ?? "—"}</span>
-            <span className="text-faint">Credit <b className="text-ink2 font-semibold n">{fmt(p.net_credit)}</b></span>
+          <div className="flex items-baseline gap-2.5 text-[11px] min-w-0">
+            {/* Trade-taken date is the primary visible date on mobile — far
+                more relevant to "what's happening right now" than expiry
+                during a quick scan. Expiry moves into the expanded detail
+                grid below, still fully available, just not front-and-center. */}
+            <span className="text-ink2 font-medium n truncate">Taken {formatDateTime(p.created_at) ?? "—"}</span>
+            <span className="text-faint shrink-0">Credit <b className="text-ink2 font-semibold n">{fmt(p.net_credit)}</b></span>
           </div>
           <div className="flex items-center gap-2 shrink-0">
             <Sparkline seed={p.id} positive={positive} />
@@ -446,14 +572,21 @@ function PositionCardMobile({ p, hideAmounts, isFirst }) {
         </div>
       </button>
 
-      {expanded && (
-        <div className="px-3 pb-3" style={{ background: "var(--c-surface-2)", borderTop: "1px solid var(--c-line)" }}>
+      <AnimatePresence initial={false}>
+        {expanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+            className="overflow-hidden"
+            style={{ background: "var(--c-surface-2)", borderTop: "1px solid var(--c-line)" }}
+          >
+          <div className="px-3 pb-3">
           <div className="grid grid-cols-3 gap-2.5 pt-3 pb-3 text-[11px]">
             <div><span className="text-faint">Max Profit</span><div className="n font-semibold text-gain mt-0.5">{fmt(p.max_profit)}</div></div>
             <div><span className="text-faint">Max Loss</span><div className="n font-semibold text-loss mt-0.5">{fmt(p.max_loss)}</div></div>
             <div><span className="text-faint">Margin</span><div className="n font-semibold mt-0.5">{p.margin_required != null ? fmt(p.margin_required) : "—"}</div></div>
             <div><span className="text-faint">Score</span><div className="mt-0.5"><ScoreChip score={p.quality_score} /></div></div>
-            <div><span className="text-faint">Entry</span><div className="n font-medium mt-0.5">{formatDateTime(p.created_at) ?? "—"}</div></div>
+            <div><span className="text-faint">Expiry</span><div className="n font-medium mt-0.5">{p.expiry ?? "—"}</div></div>
             <div><span className="text-faint">Exit</span><div className="n font-medium mt-0.5">{!isActive ? (formatDateTime(p.updated_at) ?? "—") : "—"}</div></div>
           </div>
 
@@ -481,8 +614,10 @@ function PositionCardMobile({ p, hideAmounts, isFirst }) {
               <pre className="text-[10.5px] text-ink2 whitespace-pre-wrap font-sans">{p.decision_explanation}</pre>
             </div>
           )}
-        </div>
-      )}
+          </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -498,28 +633,32 @@ function MobilePortfolio({ positions, hideAmounts }) {
 
   return (
     <div className="sm:hidden">
-      <div className="flex items-center gap-2 mb-2">
+      <div className="flex items-center gap-2 mb-2.5">
         <div className="seg-track flex-1" role="tablist" aria-label="Filter">
-          <button role="tab" aria-selected={filter === "active"} data-on={filter === "active"} onClick={() => setFilter("active")} className="seg">
+          <button role="tab" aria-selected={filter === "active"} data-on={filter === "active"} onClick={() => setFilter("active")} className="seg" style={{ minHeight: 40 }}>
             ACTIVE ({positions.active.length})
           </button>
-          <button role="tab" aria-selected={filter === "closed"} data-on={filter === "closed"} onClick={() => setFilter("closed")} className="seg">
+          <button role="tab" aria-selected={filter === "closed"} data-on={filter === "closed"} onClick={() => setFilter("closed")} className="seg" style={{ minHeight: 40 }}>
             CLOSED ({positions.closed.length})
           </button>
         </div>
-        <button onClick={() => setSortByPnl((v) => !v)} className="topstep" title="Sort by |P&L|">
+        <button onClick={() => setSortByPnl((v) => !v)} className="topstep" style={{ minHeight: 40 }} title="Sort by |P&L|">
           <SortAscending size={12} weight="bold" />
           {sortByPnl ? "By P&L" : "Newest"}
         </button>
       </div>
 
-      {sorted.length === 0 ? (
-        <EmptyState label={`No ${filter} positions.`} />
-      ) : (
-        sorted.map((p, i) => (
-          <PositionCardMobile key={p.id} p={p} hideAmounts={hideAmounts} isFirst={i === 0} />
-        ))
-      )}
+      <AnimatePresence mode="wait">
+        <motion.div key={filter} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.16, ease: "easeOut" }}>
+          {sorted.length === 0 ? (
+            <EmptyState label={`No ${filter} positions.`} />
+          ) : (
+            sorted.map((p, i) => (
+              <PositionCardMobile key={p.id} p={p} hideAmounts={hideAmounts} isFirst={i === 0} />
+            ))
+          )}
+        </motion.div>
+      </AnimatePresence>
     </div>
   );
 }
@@ -939,9 +1078,20 @@ export default function OptionsAutoTrader() {
   const modeColor = MODE_COLOR[settings?.execution_mode] ?? MODE_COLOR.OFF;
 
   return (
-    <div className="px-3 sm:px-6 pt-3 pb-20 sm:pb-6 max-w-[1560px] mx-auto relative" style={{ paddingTop: "max(0.75rem, env(safe-area-inset-top, 0px))" }}>
+    // flex-col + explicit order-[N] on each top-level section below: mobile
+    // needs a genuinely different section SEQUENCE (broker context and
+    // capital surfaced early, per the mobile redesign brief), not just
+    // this same desktop stack squeezed narrower. Desktop's order-[N] values
+    // exactly mirror this file's own source order, so desktop is a no-op
+    // here — only the unprefixed (mobile) values actually move anything.
+    <div className="flex flex-col px-3 sm:px-6 pt-3 pb-20 sm:pb-6 max-w-[1560px] mx-auto relative" style={{ paddingTop: "max(0.75rem, env(safe-area-inset-top, 0px))" }}>
+      <MobileBrokerBar
+        settings={settings} growwStatus={growwStatus} growwConnecting={growwConnecting}
+        connectGroww={connectGroww} setActiveBroker={setActiveBroker} saving={saving}
+      />
+
       {/* ── Header: title, mode badge, kill switch — one row, no wasted height ── */}
-      <div className="flex items-center justify-between gap-3 mb-3">
+      <div className="flex items-center justify-between gap-3 mb-3 order-[20] sm:order-[10]">
         <div className="flex items-center gap-2 min-w-0">
           <ChartLineUp size={17} weight="bold" className="text-accent shrink-0" />
           <h1 className="font-display text-[17px] sm:text-[20px] font-bold tracking-[-0.01em] truncate">Options Auto-Trader</h1>
@@ -964,54 +1114,71 @@ export default function OptionsAutoTrader() {
       </div>
 
       <MarketStrip indices={indices} />
+      <RotatingTicker indices={indices} />
 
-      {/* ── Execution mode: premium segmented control, compact contextual line, info on demand ── */}
-      <div className="flex items-center gap-3 flex-wrap py-2.5 mb-3 px-3 rounded-[var(--radius-md)]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)", boxShadow: "var(--e-1)" }}>
+      {/* ── Execution mode: premium segmented control. Desktop keeps the
+          full contextual sentence + info toggle; mobile shows only a
+          short status word — the redesign brief's rule that mobile never
+          shows long explanatory text by default. ── */}
+      <div className="flex items-center gap-3 flex-wrap py-2.5 mb-3 px-3 rounded-[var(--radius-md)] order-[40] sm:order-[30]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)", boxShadow: "var(--e-1)" }}>
         <span className="text-[11px] font-semibold text-muted shrink-0">Execution Mode</span>
-        <div className="seg-track">
+        <div className="seg-track flex-1 sm:flex-initial">
           {["OFF", "PAPER", "SHADOW", "AUTO"].map((mode) => (
             <motion.button key={mode} whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
               role="tab" aria-selected={settings?.execution_mode === mode} data-on={settings?.execution_mode === mode}
               onClick={() => setExecutionMode(mode)} disabled={saving} className="seg"
               style={
-                settings?.execution_mode !== mode ? undefined
+                settings?.execution_mode !== mode ? { minHeight: 40 }
                   // AUTO's active segment is a solid indigo fill (not the
                   // shared white-pill/colored-text look every other mode
                   // uses) — it needs its own background override here since
                   // MODE_COLOR.AUTO.fg is a light "ink" color meant for that
                   // fill, not for text on the default white active-pill.
-                  : mode === "AUTO" ? { background: MODE_COLOR.AUTO.bg, color: MODE_COLOR.AUTO.fg }
-                  : { color: MODE_COLOR[mode].fg }
+                  : mode === "AUTO" ? { background: MODE_COLOR.AUTO.bg, color: MODE_COLOR.AUTO.fg, minHeight: 40 }
+                  : { color: MODE_COLOR[mode].fg, minHeight: 40 }
               }>
               {mode}
             </motion.button>
           ))}
         </div>
         {settings?.execution_mode && settings.execution_mode !== "OFF" && (
-          <span className="text-[10.5px] font-semibold px-2 py-1 rounded-[var(--radius-sm)] inline-flex items-center gap-1.5" style={{ background: modeColor.bg, color: modeColor.fg }}>
-            {settings.execution_mode === "AUTO" ? "Live decisions · real broker orders"
-              : settings.execution_mode === "SHADOW" ? "Live decisions · simulated fills · zero broker orders"
-              : "Live decisions · paper fills · zero broker orders"}
-            <button onClick={() => setDescOpen((v) => !v)} className="opacity-70 hover:opacity-100" aria-label="More about this mode" title="What is this?">
-              <Info size={12} weight="bold" />
-            </button>
-          </span>
+          <>
+            {/* Desktop: full sentence + expandable "what is this" info. */}
+            <span className="hidden sm:inline-flex text-[10.5px] font-semibold px-2 py-1 rounded-[var(--radius-sm)] items-center gap-1.5" style={{ background: modeColor.bg, color: modeColor.fg }}>
+              {settings.execution_mode === "AUTO" ? "Live decisions · real broker orders"
+                : settings.execution_mode === "SHADOW" ? "Live decisions · simulated fills · zero broker orders"
+                : "Live decisions · paper fills · zero broker orders"}
+              <button onClick={() => setDescOpen((v) => !v)} className="opacity-70 hover:opacity-100" aria-label="More about this mode" title="What is this?">
+                <Info size={12} weight="bold" />
+              </button>
+            </span>
+            {/* Mobile: one short status word only, no paragraph, no info toggle. */}
+            <span className="sm:hidden text-[10px] font-semibold px-2 py-1 rounded-[var(--radius-sm)] shrink-0" style={{ background: modeColor.bg, color: modeColor.fg }}>
+              {settings.execution_mode === "AUTO" ? "real broker orders"
+                : settings.execution_mode === "SHADOW" ? "simulated fills"
+                : "simulated fills"}
+            </span>
+          </>
         )}
       </div>
 
-      {/* ── Broker & Capital: merged connection + live balance card. Kite
-          stays wired in for market data/historical regardless of which
-          broker is active — Groww's own 1-minute history only covers 3
-          months, it can't replace that. ── */}
-      <BrokerCapitalCard
-        settings={settings} growwStatus={growwStatus} growwConnecting={growwConnecting}
-        connectGroww={connectGroww} setActiveBroker={setActiveBroker} saving={saving}
-        realFunds={realFunds} growwRealFunds={growwRealFunds}
-        showAllModes={showAllModes} setShowAllModes={setShowAllModes}
-      />
+      {/* ── Broker & Capital: merged connection + live balance card, desktop
+          only — mobile gets MobileBrokerBar (top) + MobileCapitalCard
+          (below the portfolio hero) instead. Kite stays wired in for
+          market data/historical regardless of which broker is active —
+          Groww's own 1-minute history only covers 3 months, it can't
+          replace that. ── */}
+      <div className="hidden sm:block sm:order-[40]">
+        <BrokerCapitalCard
+          settings={settings} growwStatus={growwStatus} growwConnecting={growwConnecting}
+          connectGroww={connectGroww} setActiveBroker={setActiveBroker} saving={saving}
+          realFunds={realFunds} growwRealFunds={growwRealFunds}
+          showAllModes={showAllModes} setShowAllModes={setShowAllModes}
+        />
+      </div>
 
       {descOpen && (
-        <p className="text-[11px] text-muted mb-3 max-w-[80ch] px-1">
+        <p className="hidden sm:block sm:order-[50] text-[11px] text-muted mb-3 max-w-[80ch] px-1">
           Defined-risk options selling (Iron Condor / Bull Put Spread / Bear Call Spread), decided from a live chain: skew-based
           strategy selection, strike optimization ranked by expected value per unit of risk, expiry selection, and a 0-100 trade
           quality score gate. Runs on its own 30-minute cron against live Kite data — this page only displays the result, it
@@ -1020,7 +1187,7 @@ export default function OptionsAutoTrader() {
       )}
 
       {killSwitchResult && (
-        <div className="flex items-start gap-2.5 px-4 py-3 rounded-[var(--radius-md)] mb-4" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+        <div className="flex items-start gap-2.5 px-4 py-3 rounded-[var(--radius-md)] mb-4 order-[50] sm:order-[60]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
           <Shield size={15} weight="bold" className="shrink-0 mt-px text-loss" />
           <div className="text-[12px] flex-1">{killSwitchResult.ok === false ? `Kill switch failed: ${killSwitchResult.message}` : killSwitchResult.message}</div>
           <button onClick={() => setKillSwitchResult(null)} className="text-[11px] text-muted shrink-0">Dismiss</button>
@@ -1028,7 +1195,7 @@ export default function OptionsAutoTrader() {
       )}
 
       {dailyStats?.locked && (
-        <div className="flex items-start gap-2.5 px-4 py-3 rounded-[var(--radius-md)] mb-4" style={{ border: "1px solid var(--c-warn)", background: "var(--c-warn-soft)" }}>
+        <div className="flex items-start gap-2.5 px-4 py-3 rounded-[var(--radius-md)] mb-4 order-[50] sm:order-[70]" style={{ border: "1px solid var(--c-warn)", background: "var(--c-warn-soft)" }}>
           <Info size={15} weight="duotone" className="shrink-0 mt-px text-warn" />
           <div className="text-[12px] flex-1 text-ink2">
             <span className="font-semibold">Daily risk lock engaged</span> ({dailyStats.lock_reason}) — new entries are refused for the rest of today.
@@ -1041,7 +1208,7 @@ export default function OptionsAutoTrader() {
       )}
 
       {/* ── Settings: collapsed by default, risk-parameter fields only (mode moved above, always visible) ── */}
-      <div className="rounded-[var(--radius-md)] mb-4" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+      <div className="rounded-[var(--radius-md)] mb-4 order-[80] sm:order-[80]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
         <button onClick={() => setSettingsOpen((v) => !v)} className="w-full flex items-center gap-3 sm:flex-wrap p-3 text-left">
           <Gear size={14} weight="bold" className="text-muted shrink-0" />
           <span className="text-[11.5px] font-semibold">Risk &amp; Strategy Settings</span>
@@ -1083,37 +1250,43 @@ export default function OptionsAutoTrader() {
       </div>
 
       {loading ? (
-        <div className="rounded-[var(--radius-lg)] h-[92px] mb-4 skeleton" />
+        <div className="rounded-[var(--radius-lg)] h-[92px] mb-4 skeleton order-[60] sm:order-[90]" />
       ) : error ? (
-        <div className="flex gap-2.5 px-4 py-3.5 rounded-[var(--radius-md)]" style={{ border: "1px solid var(--c-warn)", background: "var(--c-warn-soft)" }}>
+        <div className="flex gap-2.5 px-4 py-3.5 rounded-[var(--radius-md)] order-[60] sm:order-[90]" style={{ border: "1px solid var(--c-warn)", background: "var(--c-warn-soft)" }}>
           <Info size={16} weight="duotone" className="shrink-0 mt-px text-warn" />
           <p className="text-[12.5px] text-ink2">{error}</p>
         </div>
       ) : (
         <>
-          <RiskCommandBar positions={visiblePositions} settings={settings} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} realFunds={realFunds} growwRealFunds={growwRealFunds} />
+          <div className="order-[60] sm:order-[90]">
+            <RiskCommandBar positions={visiblePositions} settings={settings} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} realFunds={realFunds} growwRealFunds={growwRealFunds} />
+          </div>
 
-          {visiblePositions.active.length === 0 && visiblePositions.closed.length === 0 ? (
-            <EmptyState
-              label="No active positions"
-              sub={`The scanner is monitoring NIFTY, BANKNIFTY and SENSEX. New ${settings?.execution_mode === "AUTO" ? "AUTO" : settings?.execution_mode === "SHADOW" ? "SHADOW" : "PAPER"} positions appear automatically when a candidate qualifies.`}
-              live={settings?.execution_mode && settings.execution_mode !== "OFF"}
-            />
-          ) : (
-            <AnimatePresence mode="wait">
-              {mobileTab === "activity" ? null : mobileTab === "calendar" ? (
-                <motion.div key="calendar" initial={{ opacity: 0, x: 12 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -12 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }} className="sm:hidden">
-                  <PnLCalendar positions={visiblePositions} hideAmounts={hideAmounts} />
-                </motion.div>
-              ) : (
-                <motion.div key="portfolio" initial={{ opacity: 0, x: -12 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 12 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}>
-                  <MobilePortfolio positions={visiblePositions} hideAmounts={hideAmounts} />
-                </motion.div>
-              )}
-            </AnimatePresence>
-          )}
+          <MobileCapitalCard settings={settings} realFunds={realFunds} growwRealFunds={growwRealFunds} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} />
 
-          <div className="hidden sm:flex items-center gap-3 mb-2">
+          <div className="order-[90] sm:order-[100]">
+            {visiblePositions.active.length === 0 && visiblePositions.closed.length === 0 ? (
+              <EmptyState
+                label="No active positions"
+                sub={`The scanner is monitoring NIFTY, BANKNIFTY and SENSEX. New ${settings?.execution_mode === "AUTO" ? "AUTO" : settings?.execution_mode === "SHADOW" ? "SHADOW" : "PAPER"} positions appear automatically when a candidate qualifies.`}
+                live={settings?.execution_mode && settings.execution_mode !== "OFF"}
+              />
+            ) : (
+              <AnimatePresence mode="wait">
+                {mobileTab === "activity" ? null : mobileTab === "calendar" ? (
+                  <motion.div key="calendar" initial={{ opacity: 0, x: 12 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -12 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }} className="sm:hidden">
+                    <PnLCalendar positions={visiblePositions} hideAmounts={hideAmounts} />
+                  </motion.div>
+                ) : (
+                  <motion.div key="portfolio" initial={{ opacity: 0, x: -12 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 12 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}>
+                    <MobilePortfolio positions={visiblePositions} hideAmounts={hideAmounts} />
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            )}
+          </div>
+
+          <div className="hidden sm:flex items-center gap-3 mb-2 sm:order-[110]">
             <h2 className="text-[13px] font-bold">
               Open Positions {visiblePositions.active.length > 0 ? <span className="font-normal text-muted">({visiblePositions.active.length} active)</span> : null}
             </h2>
@@ -1123,12 +1296,12 @@ export default function OptionsAutoTrader() {
             </button>
           </div>
           {showDesktopCalendar && (
-            <div className="hidden sm:block mb-4">
+            <div className="hidden sm:block mb-4 sm:order-[120]">
               <PnLCalendar positions={visiblePositions} hideAmounts={hideAmounts} />
             </div>
           )}
           {visiblePositions.active.length === 0 && visiblePositions.closed.length === 0 ? null : (
-            <div className="hidden sm:block overflow-x-auto rounded-[var(--radius-lg)]" style={{ border: "1px solid var(--c-line)" }}>
+            <div className="hidden sm:block overflow-x-auto rounded-[var(--radius-lg)] sm:order-[130]" style={{ border: "1px solid var(--c-line)" }}>
               <table className="w-full text-[12px]">
                 <thead>
                   <tr className="text-muted text-left" style={{ background: "var(--c-surface-2)" }}>
@@ -1149,11 +1322,11 @@ export default function OptionsAutoTrader() {
             </div>
           )}
 
-          <div className="hidden sm:block">
+          <div className="hidden sm:block sm:order-[140]">
             <ActivityLog timeline={timeline} />
           </div>
           {mobileTab === "activity" && (
-            <div className="sm:hidden">
+            <div className="sm:hidden order-[90]">
               <ActivityLog timeline={timeline} />
             </div>
           )}
@@ -1161,18 +1334,22 @@ export default function OptionsAutoTrader() {
       )}
 
       <div className="sm:hidden fixed bottom-0 inset-x-0 z-40 flex" style={{ borderTop: "1px solid var(--c-line)", background: "var(--c-surface)", paddingBottom: "env(safe-area-inset-bottom, 0px)" }}>
-        <button onClick={() => setMobileTab("portfolio")} className="flex-1 flex flex-col items-center gap-0.5 py-2" style={{ color: mobileTab === "portfolio" ? "var(--c-accent)" : "var(--c-muted)", minHeight: 44 }}>
-          <Wallet size={18} weight={mobileTab === "portfolio" ? "fill" : "regular"} />
-          <span className="text-[10px] font-medium">Portfolio</span>
-        </button>
-        <button onClick={() => setMobileTab("calendar")} className="flex-1 flex flex-col items-center gap-0.5 py-2" style={{ color: mobileTab === "calendar" ? "var(--c-accent)" : "var(--c-muted)", minHeight: 44 }}>
-          <CalendarBlank size={18} weight={mobileTab === "calendar" ? "fill" : "regular"} />
-          <span className="text-[10px] font-medium">Calendar</span>
-        </button>
-        <button onClick={() => setMobileTab("activity")} className="flex-1 flex flex-col items-center gap-0.5 py-2" style={{ color: mobileTab === "activity" ? "var(--c-accent)" : "var(--c-muted)", minHeight: 44 }}>
-          <Bell size={18} weight={mobileTab === "activity" ? "fill" : "regular"} />
-          <span className="text-[10px] font-medium">Activity</span>
-        </button>
+        {[
+          { key: "portfolio", label: "Portfolio", Icon: Wallet },
+          { key: "calendar", label: "Calendar", Icon: CalendarBlank },
+          { key: "activity", label: "Activity", Icon: Bell },
+        ].map(({ key, label, Icon }) => {
+          const active = mobileTab === key;
+          return (
+            <button key={key} onClick={() => setMobileTab(key)} className="relative flex-1 flex flex-col items-center gap-0.5 py-2" style={{ color: active ? "var(--c-accent)" : "var(--c-muted)", minHeight: 44 }}>
+              {active && (
+                <motion.span layoutId="mobile-nav-indicator" className="absolute top-0 rounded-full" style={{ width: 28, height: 2.5, background: "var(--c-accent)" }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }} />
+              )}
+              <Icon size={18} weight={active ? "fill" : "regular"} />
+              <span className="text-[10px] font-medium">{label}</span>
+            </button>
+          );
+        })}
       </div>
     </div>
   );

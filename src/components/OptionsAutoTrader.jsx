@@ -463,6 +463,12 @@ function RiskCommandBar({ positions, settings, hideAmounts, setHideAmounts, real
   const totalMargin = positions.active.reduce((s, p) => s + (Number(p.margin_required) || 0), 0);
   const totalUnrealized = positions.active.reduce((s, p) => s + (Number(p.unrealized_pnl) || 0), 0);
   const totalRealizedToday = positions.closed.filter((p) => p.exit_date === todayIST).reduce((s, p) => s + (Number(p.realized_pnl) || 0), 0);
+  // All-time realized across every closed position this view currently
+  // holds (same list positions.closed already is — capped at the API's
+  // 200 most recent closed rows, see PnLCalendar's own note on that same
+  // limitation) + current unrealized on whatever's still open now.
+  const totalRealizedAllTime = positions.closed.reduce((s, p) => s + (Number(p.realized_pnl) || 0), 0);
+  const totalReturns = totalRealizedAllTime + totalUnrealized;
   const maxLossAtRisk = positions.active.reduce((s, p) => s + (Number(p.max_loss) || 0), 0);
   const todaysPnl = totalUnrealized + totalRealizedToday;
   const fmt = (n) => (hideAmounts ? "••••••" : inr(n));
@@ -487,6 +493,15 @@ function RiskCommandBar({ positions, settings, hideAmounts, setHideAmounts, real
           </div>
           <div className={`font-display text-[30px] sm:text-[34px] font-bold n leading-none ${todaysPnl >= 0 ? "text-gain" : "text-loss"}`}>
             {todaysPnl >= 0 ? "+" : ""}{fmt(todaysPnl)}
+          </div>
+        </div>
+
+        <div className="hidden sm:block w-px self-stretch" style={{ background: "var(--c-line)" }} />
+
+        <div className="min-w-[140px]">
+          <div className="text-[10.5px] font-semibold text-muted tracking-wide mb-0.5">TOTAL RETURNS</div>
+          <div className={`font-display text-[20px] sm:text-[22px] font-bold n leading-none ${totalReturns >= 0 ? "text-gain" : "text-loss"}`}>
+            {totalReturns >= 0 ? "+" : ""}{fmt(totalReturns)}
           </div>
         </div>
 

@@ -31,14 +31,19 @@ function MarketStrip({ indices }) {
   const rows = indices.filter((idx) => idx.lastPrice != null);
   if (!rows.length) return null;
   return (
-    <div className="hidden sm:flex items-center gap-1 flex-wrap px-3 py-2 mb-3 rounded-[var(--radius-md)] sm:order-[20]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+    <div className="oat-glass hidden sm:flex items-center gap-1 flex-wrap px-3 py-2 mb-3 rounded-[var(--radius-md)] sm:order-[20]">
       <span className="live-dot shrink-0" aria-hidden="true" />
       {rows.map((idx, i) => {
         const positive = (idx.change ?? 0) >= 0;
         return (
           <div key={idx.symbol} className="flex items-baseline gap-1.5 px-2.5 py-0.5" style={{ borderLeft: i > 0 ? "1px solid var(--c-line)" : "none" }}>
             <span className="text-[11px] font-semibold text-muted tracking-wide">{INDEX_LABEL[idx.symbol] ?? idx.symbol}</span>
-            <span className="text-[13.5px] font-bold n">{idx.lastPrice.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</span>
+            <AnimatePresence mode="wait">
+              <motion.span key={idx.lastPrice} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.22, ease: [0.2, 0.8, 0.2, 1] }}
+                className="text-[13.5px] font-bold n">
+                {idx.lastPrice.toLocaleString("en-IN", { maximumFractionDigits: 2 })}
+              </motion.span>
+            </AnimatePresence>
             <span className={`text-[10.5px] font-semibold n flex items-center gap-0.5 ${positive ? "text-gain" : "text-loss"}`}>
               {positive ? "▲" : "▼"} {Math.abs(idx.change ?? 0).toFixed(2)} ({Math.abs(idx.changePct ?? 0).toFixed(2)}%)
             </span>
@@ -196,7 +201,7 @@ function UtilityBar({
 
   return (
     <div className="hidden sm:block sm:order-[30] mb-3">
-      <div className="flex items-center gap-4 flex-wrap py-2 px-3 rounded-[var(--radius-md)]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+      <div className="oat-glass flex items-center gap-4 flex-wrap py-2 px-3 rounded-[var(--radius-md)]">
         {/* Broker */}
         <div className="flex items-center gap-2">
           <span className="text-[10.5px] font-semibold text-muted shrink-0">Broker</span>
@@ -241,7 +246,16 @@ function UtilityBar({
                 onClick={() => setExecutionMode(m)} disabled={saving} className="seg"
                 style={
                   mode !== m ? undefined
-                    : m === "AUTO" ? { background: MODE_COLOR.AUTO.bg, color: MODE_COLOR.AUTO.fg }
+                    // AUTO's selected state gets a subtle gradient fill + soft
+                    // glow instead of a flat solid — the one "important live
+                    // state" the redesign brief allows a glow on. Every other
+                    // mode keeps the shared segmented-control's plain
+                    // white-pill/colored-text look, restrained on purpose.
+                    : m === "AUTO" ? {
+                        background: `linear-gradient(135deg, var(--oat-accent), var(--oat-accent-2))`,
+                        color: MODE_COLOR.AUTO.fg,
+                        boxShadow: "0 2px 10px rgba(90,85,247,0.35), inset 0 1px 0 rgba(255,255,255,0.25)",
+                      }
                     : { color: MODE_COLOR[m].fg }
                 }>
                 {m}
@@ -361,23 +375,26 @@ function formatDateTime(iso) {
 function ActivityLog({ timeline }) {
   return (
     <>
-      <h2 className="text-[13px] font-bold mt-5 mb-2">Activity Log</h2>
+      <h2 className="text-[13px] font-bold mt-5 mb-2.5">Activity Log</h2>
       {timeline.length === 0 ? (
         <p className="text-[12.5px] text-muted py-6 text-center">No activity yet.</p>
       ) : (
-        <div className="rounded-[var(--radius-md)] overflow-hidden" style={{ border: "1px solid var(--c-line)" }}>
+        <div className="oat-timeline flex flex-col gap-3 pl-1">
           {timeline.map((e, i) => {
             const isError = e.level === "error";
             return (
-              <div
-                key={i}
-                className="flex items-start gap-2.5 px-3 py-2"
-                style={{ borderTop: i > 0 ? "1px solid var(--c-line)" : "none", background: "var(--c-surface)" }}
-              >
-                {isError ? <Info size={13} weight="bold" className="shrink-0 mt-px text-loss" /> : <Bell size={13} weight="bold" className="shrink-0 mt-px text-muted" />}
-                <span className="text-[11px] text-faint n shrink-0 w-[62px]">{new Date(e.time).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</span>
-                <span className={`text-[11.5px] ${isError ? "text-loss" : "text-ink2"}`}>{e.message}</span>
-              </div>
+              <motion.div key={i} initial={{ opacity: 0, x: -4 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.18, delay: Math.min(i, 8) * 0.02, ease: [0.2, 0.8, 0.2, 1] }}
+                className="flex items-start gap-3">
+                <span className="oat-timeline-dot shrink-0 mt-0.5" style={isError ? { borderColor: "var(--oat-danger)" } : undefined}>
+                  <span style={{ width: 4, height: 4, borderRadius: "50%", background: isError ? "var(--oat-danger)" : "var(--c-muted)" }} />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-[10.5px] text-faint n shrink-0">{new Date(e.time).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</span>
+                  </div>
+                  <span className={`text-[11.5px] ${isError ? "text-loss" : "text-ink2"}`}>{e.message}</span>
+                </div>
+              </motion.div>
             );
           })}
         </div>
@@ -396,14 +413,31 @@ function ScoreChip({ score }) {
   const tone = scoreTone(s);
   const color = tone === "muted" ? "var(--c-text-2)" : `var(--c-${tone})`;
   return (
-    <span className="inline-flex items-center gap-1 text-[11px] font-semibold n" style={{ color }}>
-      {s}
-      <span className="text-[9.5px] font-bold tracking-wide opacity-80">{scoreLabel(s)}</span>
-    </span>
+    <div>
+      <span className="inline-flex items-center gap-1 text-[11px] font-semibold n" style={{ color }}>
+        {s}
+        <span className="text-[9.5px] font-bold tracking-wide opacity-80">{scoreLabel(s)}</span>
+      </span>
+      <div className="oat-score-bar mt-1 w-[42px]">
+        <span style={{ width: `${Math.min(100, Math.max(0, s))}%`, background: color }} />
+      </div>
+    </div>
   );
 }
 
 /** ACTIVE gets a small live dot; anything closed gets a muted status word — color is never the only signal (text is always present too). */
+/** Quiet glyph for a closed position's exit reason — purely a label prefix,
+ * derived from the exact same exitReason string already shown as text, so
+ * an unrecognized reason still displays correctly with no glyph rather
+ * than a guessed one. */
+function exitGlyph(exitReason) {
+  if (!exitReason) return null;
+  if (exitReason.includes("PROFIT")) return "✓ ";
+  if (exitReason.includes("STOP_LOSS") || exitReason.includes("BREACH")) return "× ";
+  if (exitReason.includes("TIME_EXIT") || exitReason.includes("SESSION_END") || exitReason.includes("DATA_END")) return "◷ ";
+  return null;
+}
+
 function StatusMark({ status, exitReason }) {
   if (status === "ACTIVE") {
     return (
@@ -414,8 +448,8 @@ function StatusMark({ status, exitReason }) {
     );
   }
   return (
-    <span className={`text-[11px] ${toneClass(STATUS_TONE[status] ?? "muted")}`}>
-      {status}{exitReason ? ` · ${exitReason}` : ""}
+    <span className={`text-[11px] ${toneClass(STATUS_TONE[status] ?? "muted")}`} style={status === "CLOSED" ? { opacity: 0.72 } : undefined}>
+      {status}{exitReason ? ` · ${exitGlyph(exitReason) ?? ""}${exitReason}` : ""}
     </span>
   );
 }
@@ -482,24 +516,27 @@ function RiskCommandBar({ positions, settings, hideAmounts, setHideAmounts, real
   const brokerCapital = isLive ? activeRealFunds?.availableFunds ?? null : null;
 
   return (
-    <div className="rounded-[var(--radius-md)] mb-4 px-4 py-3.5 sm:px-5" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)", boxShadow: "var(--e-1)" }}>
-      <div className="flex items-start sm:items-center gap-4 sm:gap-8 flex-wrap">
+    <div className="oat-hero rounded-[var(--radius-lg)] mb-4 px-4 py-4 sm:px-6 sm:py-5" style={{ border: "1px solid var(--c-line)", boxShadow: "var(--e-2)" }}>
+      <div className="relative flex items-start sm:items-center gap-4 sm:gap-8 flex-wrap">
         <div className="min-w-[140px]">
           <div className="flex items-center gap-2 mb-0.5">
-            <span className="text-[10.5px] font-semibold text-muted tracking-wide">TODAY'S P&amp;L</span>
+            <span className="text-[10.5px] font-semibold text-muted tracking-wide">TODAY</span>
             <motion.button whileHover={{ scale: 1.12 }} whileTap={{ scale: 0.9 }} onClick={() => setHideAmounts((v) => !v)} className="text-muted" aria-label="Toggle amount visibility">
               {hideAmounts ? <EyeSlash size={13} weight="regular" /> : <Eye size={13} weight="regular" />}
             </motion.button>
           </div>
-          <div className={`font-display text-[30px] sm:text-[34px] font-bold n leading-none ${todaysPnl >= 0 ? "text-gain" : "text-loss"}`}>
-            {todaysPnl >= 0 ? "+" : ""}{fmt(todaysPnl)}
-          </div>
+          <AnimatePresence mode="wait">
+            <motion.div key={hideAmounts ? "hidden" : todaysPnl} initial={{ opacity: 0, y: 3 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2, ease: [0.2, 0.8, 0.2, 1] }}
+              className={`font-display text-[32px] sm:text-[38px] font-bold n leading-none ${todaysPnl >= 0 ? "text-gain" : "text-loss"}`}>
+              {todaysPnl >= 0 ? "+" : ""}{fmt(todaysPnl)}
+            </motion.div>
+          </AnimatePresence>
         </div>
 
         <div className="hidden sm:block w-px self-stretch" style={{ background: "var(--c-line)" }} />
 
         <div className="min-w-[140px]">
-          <div className="text-[10.5px] font-semibold text-muted tracking-wide mb-0.5">TOTAL RETURNS</div>
+          <div className="text-[10.5px] font-semibold text-muted tracking-wide mb-0.5">TOTAL RETURN</div>
           <div className={`font-display text-[20px] sm:text-[22px] font-bold n leading-none ${totalReturns >= 0 ? "text-gain" : "text-loss"}`}>
             {totalReturns >= 0 ? "+" : ""}{fmt(totalReturns)}
           </div>
@@ -515,13 +552,18 @@ function RiskCommandBar({ positions, settings, hideAmounts, setHideAmounts, real
           {riskPct !== null && (
             <RiskMetric label="Risk Utilization" value={`${riskPct.toFixed(1)}%`} tone={riskPct > 80 ? "loss" : riskPct > 50 ? "warn" : "gain"} />
           )}
-          {isLive && brokerCapital != null && (
-            <RiskMetric label="Broker Capital" value={fmt(brokerCapital)} />
-          )}
         </div>
+
+        {isLive && brokerCapital != null && (
+          <div className="oat-tile rounded-[var(--radius-md)] px-3.5 py-2.5 w-full sm:w-auto">
+            <div className="text-[9.5px] font-semibold text-muted tracking-wide mb-0.5">LIVE CAPITAL</div>
+            <div className="font-display text-[17px] font-bold n leading-tight text-ink">{fmt(brokerCapital)}</div>
+            <span className="text-[9px] font-bold" style={{ color: "var(--oat-accent)" }}>{isGrowwBroker ? "GROWW" : "KITE"}</span>
+          </div>
+        )}
       </div>
 
-      <div className="text-[10px] text-faint mt-2.5 pt-2.5" style={{ borderTop: "1px solid var(--c-line)" }}>
+      <div className="relative text-[10px] text-faint mt-3 pt-3" style={{ borderTop: "1px solid var(--oat-hairline)" }}>
         {isLive ? "LIVE" : isShadow ? "SHADOW" : "PAPER"} positions ({positions.active.length}{settings?.max_positions ? ` / ${settings.max_positions} max` : ""})
       </div>
     </div>
@@ -862,7 +904,7 @@ function PositionRow({ p }) {
 
   return (
     <>
-      <tr style={{ borderTop: "1px solid var(--c-line)" }} className="row-hover">
+      <tr style={{ borderTop: "1px solid var(--c-line)" }} className="oat-row" data-selected={expanded}>
         <td className="py-2.5 pl-4 pr-2">
           <button onClick={() => setExpanded((v) => !v)} className="flex items-center gap-1.5 text-left">
             <div>
@@ -1130,18 +1172,23 @@ export default function OptionsAutoTrader() {
     // this same desktop stack squeezed narrower. Desktop's order-[N] values
     // exactly mirror this file's own source order, so desktop is a no-op
     // here — only the unprefixed (mobile) values actually move anything.
-    <div className="flex flex-col px-3 sm:px-6 pt-3 pb-20 sm:pb-6 max-w-[1560px] mx-auto relative" style={{ paddingTop: "max(0.75rem, env(safe-area-inset-top, 0px))" }}>
+    <div className="oat-page flex flex-col px-3 sm:px-6 pt-3 pb-20 sm:pb-6 max-w-[1560px] mx-auto relative" style={{ paddingTop: "max(0.75rem, env(safe-area-inset-top, 0px))" }}>
       <MobileBrokerBar
         settings={settings} growwStatus={growwStatus} growwConnecting={growwConnecting}
         connectGroww={connectGroww} setActiveBroker={setActiveBroker} saving={saving}
       />
 
-      {/* ── Header: title, mode badge, kill switch — one row, no wasted height ── */}
-      <div className="flex items-center justify-between gap-3 mb-3 order-[20] sm:order-[10]">
+      {/* ── Header: title, mode badge, kill switch — floats slightly above
+          the page with a soft hairline beneath, reads as a command bar
+          rather than a plain heading row. ── */}
+      <div className="flex items-center justify-between gap-3 mb-3 pb-3 order-[20] sm:order-[10]" style={{ borderBottom: "1px solid var(--oat-hairline)" }}>
         <div className="flex items-center gap-2 min-w-0">
           <ChartLineUp size={17} weight="bold" className="text-accent shrink-0" />
           <h1 className="font-display text-[17px] sm:text-[20px] font-bold tracking-[-0.01em] truncate">Options Auto-Trader</h1>
-          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-[var(--radius-sm)] shrink-0 inline-flex items-center gap-1" style={{ background: modeColor.bg, color: modeColor.fg }}>
+          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-[var(--radius-sm)] shrink-0 inline-flex items-center gap-1"
+            style={settings?.execution_mode === "AUTO"
+              ? { background: `linear-gradient(135deg, var(--oat-accent), var(--oat-accent-2))`, color: modeColor.fg, boxShadow: "0 2px 8px rgba(90,85,247,0.35)" }
+              : { background: modeColor.bg, color: modeColor.fg }}>
             {settings?.execution_mode === "AUTO" && <span className="live-dot" style={{ background: "currentColor" }} aria-hidden="true" />}
             {settings?.execution_mode ?? "…"}
           </span>
@@ -1179,7 +1226,11 @@ export default function OptionsAutoTrader() {
                   // uses) — it needs its own background override here since
                   // MODE_COLOR.AUTO.fg is a light "ink" color meant for that
                   // fill, not for text on the default white active-pill.
-                  : mode === "AUTO" ? { background: MODE_COLOR.AUTO.bg, color: MODE_COLOR.AUTO.fg, minHeight: 38 }
+                  : mode === "AUTO" ? {
+                      background: `linear-gradient(135deg, var(--oat-accent), var(--oat-accent-2))`,
+                      color: MODE_COLOR.AUTO.fg, minHeight: 38,
+                      boxShadow: "0 2px 10px rgba(90,85,247,0.35), inset 0 1px 0 rgba(255,255,255,0.25)",
+                    }
                   : { color: MODE_COLOR[mode].fg, minHeight: 38 }
               }>
               {mode}
@@ -1206,11 +1257,17 @@ export default function OptionsAutoTrader() {
         settingsOpen={settingsOpen} setSettingsOpen={setSettingsOpen}
         showAllModes={showAllModes} setShowAllModes={setShowAllModes}
       />
-      {settingsOpen && (
-        <div className="hidden sm:block sm:order-[35] mb-3 p-3 rounded-[var(--radius-md)]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
-          <SettingsFields draft={draft} setField={setField} saving={saving} saveSettings={saveSettings} />
-        </div>
-      )}
+      <AnimatePresence initial={false}>
+        {settingsOpen && (
+          <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.28, ease: [0.2, 0.8, 0.2, 1] }}
+            className="hidden sm:block sm:order-[35] overflow-hidden">
+            <div className="mb-3 p-3 rounded-[var(--radius-md)]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+              <SettingsFields draft={draft} setField={setField} saving={saving} saveSettings={saveSettings} />
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {killSwitchResult && (
         <div className="flex items-start gap-2.5 px-4 py-3 rounded-[var(--radius-md)] mb-4 order-[50] sm:order-[60]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
@@ -1246,11 +1303,16 @@ export default function OptionsAutoTrader() {
           {settingsOpen ? <CaretUp size={14} className="text-muted shrink-0" /> : <CaretDown size={14} className="text-muted shrink-0" />}
         </button>
 
-        {settingsOpen && (
-          <div className="px-3 pb-3 pt-1" style={{ borderTop: "1px solid var(--c-line)" }}>
-            <SettingsFields draft={draft} setField={setField} saving={saving} saveSettings={saveSettings} />
-          </div>
-        )}
+        <AnimatePresence initial={false}>
+          {settingsOpen && (
+            <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.24, ease: [0.2, 0.8, 0.2, 1] }} className="overflow-hidden">
+              <div className="px-3 pb-3 pt-1" style={{ borderTop: "1px solid var(--c-line)" }}>
+                <SettingsFields draft={draft} setField={setField} saving={saving} saveSettings={saveSettings} />
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {loading ? (
@@ -1308,7 +1370,7 @@ export default function OptionsAutoTrader() {
             <div className="hidden sm:block overflow-x-auto rounded-[var(--radius-md)] sm:order-[130]" style={{ border: "1px solid var(--c-line)" }}>
               <table className="w-full text-[12px]">
                 <thead>
-                  <tr className="text-muted text-left" style={{ background: "var(--c-surface-2)" }}>
+                  <tr className="oat-sticky-head text-muted text-left">
                     <th className="font-medium py-2 pl-4 pr-2">Instrument</th>
                     <th className="font-medium py-2 pr-3">Trade Taken</th>
                     <th className="font-medium py-2 pr-3 text-right">Credit / Payoff</th>

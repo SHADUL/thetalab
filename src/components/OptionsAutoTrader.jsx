@@ -140,43 +140,6 @@ function MobileBrokerBar({ settings, growwStatus, growwConnecting, connectGroww,
 }
 
 /**
- * Mobile-only live capital card — the same figures the desktop
- * BrokerCapitalCard's right side shows, restyled as its own compact
- * premium account card with a privacy eye-toggle (reuses the SAME
- * hideAmounts state the portfolio hero card's toggle already uses, so
- * one switch masks every rupee figure on the page consistently rather
- * than inventing a second, independent hide state).
- */
-function MobileCapitalCard({ settings, realFunds, growwRealFunds, hideAmounts, setHideAmounts }) {
-  const isAuto = settings?.execution_mode === "AUTO";
-  if (!isAuto) return null;
-  const isGroww = (settings?.active_broker ?? "KITE") === "GROWW";
-  const funds = isGroww ? growwRealFunds : realFunds;
-  const noSessionLabel = isGroww ? "No Groww session" : "No Kite session";
-  const noSessionCode = isGroww ? "no_groww_session" : "no_kite_session";
-  const hasBalance = funds?.availableFunds != null;
-  return (
-    <div className="sm:hidden rounded-[var(--radius-lg)] mb-3 p-4 order-[70]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)", boxShadow: "var(--e-1)" }}>
-      <div className="flex items-center justify-between gap-2 mb-1.5">
-        <span className="text-[10px] font-semibold text-muted tracking-wide uppercase">Live Broker Capital</span>
-        <div className="flex items-center gap-2">
-          <span className="text-[9.5px] font-bold px-1.5 py-0.5 rounded-[4px]" style={{ background: "var(--c-accent-soft)", color: "var(--c-accent)" }}>
-            {isGroww ? "GROWW" : "KITE"}
-          </span>
-          <motion.button whileTap={{ scale: 0.9 }} onClick={() => setHideAmounts((v) => !v)} className="text-muted" aria-label="Toggle capital visibility">
-            {hideAmounts ? <EyeSlash size={14} weight="regular" /> : <Eye size={14} weight="regular" />}
-          </motion.button>
-        </div>
-      </div>
-      <div className={`font-display text-[26px] font-bold n leading-tight ${!hasBalance ? "text-faint" : "text-ink"}`}>
-        {hideAmounts ? "₹••••••••" : hasBalance ? inr(funds.availableFunds) : funds?.skipped === noSessionCode ? noSessionLabel : "—"}
-      </div>
-      <span className="text-[10.5px] text-faint">Used for AUTO sizing and real execution safety checks</span>
-    </div>
-  );
-}
-
-/**
  * Utility Bar — broker connection + execution mode + settings trigger, all
  * as one slim, flat, low-visual-weight row. Replaces what used to be two
  * separate large cards (a standalone Execution Mode card, and a
@@ -1292,8 +1255,9 @@ export default function OptionsAutoTrader() {
 
       {/* ── Utility Bar: broker + mode + settings, one slim flat row —
           desktop only. Mobile gets MobileBrokerBar (top) + the compact
-          execution-mode row above + MobileCapitalCard (below the
-          portfolio hero) instead. ── */}
+          execution-mode row above instead; live capital lives inside the
+          Today card itself (RiskCommandBar's own LIVE CAPITAL tile), not
+          a separate card. ── */}
       <UtilityBar
         settings={settings} growwStatus={growwStatus} growwConnecting={growwConnecting}
         connectGroww={connectGroww} setActiveBroker={setActiveBroker} saving={saving}
@@ -1373,10 +1337,6 @@ export default function OptionsAutoTrader() {
           <div className={mobileFullScreenTab ? "hidden sm:block sm:order-[90]" : "order-[60] sm:order-[90]"}>
             <RiskCommandBar positions={visiblePositions} settings={settings} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} realFunds={realFunds} growwRealFunds={growwRealFunds} />
           </div>
-
-          {!mobileFullScreenTab && (
-            <MobileCapitalCard settings={settings} realFunds={realFunds} growwRealFunds={growwRealFunds} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} />
-          )}
 
           <div className="order-[80] sm:order-[100]">
             {/* Desktop: unaffected by mobile's tabs — same combined

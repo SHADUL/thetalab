@@ -123,6 +123,14 @@ import { createSessionToken, buildSetCookieHeader, buildClearCookieHeader, readC
 
 const KITE_BASE = 'https://api.kite.trade';
 
+// Temporary equity floor for SHADOW mode sizing — see the header comment
+// where this is used (handlePaperScan's sizing block) for the full
+// rationale. Added 2026-09-29; remove once no longer needed (the real
+// account balance will simply exceed this once funded, so nothing breaks
+// if this constant is left in place indefinitely — it just stops
+// mattering).
+const SHADOW_EQUITY_FLOOR_RUPEES = 250_000;
+
 // Kite's standard index quote keys — all three confirmed against live
 // paper-scan runs (2026-09-21). NIFTY/SENSEX were already used elsewhere
 // in this codebase (src/lib/kiteSymbol.js); BANKNIFTY's 'NSE:NIFTY BANK'
@@ -1046,8 +1054,21 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
       // off it would let those caps drift arbitrarily far from what the
       // account can actually absorb. PAPER keeps using reserved_fund,
       // since there's no real balance to check it against.
-      equity: usesRealFunds ? (realAvailableFunds ?? 0) : Number(settings.reserved_fund) || 0,
-      availableFunds: usesRealFunds ? (realAvailableFunds ?? 0) : Number(settings.reserved_fund) || 0,
+      //
+      // SHADOW gets one deliberate exception: a temporary equity FLOOR
+      // (SHADOW_EQUITY_FLOOR_RUPEES), applied as max(real funds, floor) —
+      // added 2026-09-29 because the real account currently shows ₹0
+      // available (not yet funded; ₹1L is being loaded soon) and SHADOW
+      // sizing to zero lots on every scan was producing no forward-
+      // validation signal at all. This is a floor, not an override: once
+      // real funds exceed the floor, SHADOW automatically reverts to
+      // sizing off the real balance with no code change needed — AUTO is
+      // NEVER floored, since it fires real orders and must only ever size
+      // against what the account actually holds.
+      equity: isShadow ? Math.max(realAvailableFunds ?? 0, SHADOW_EQUITY_FLOOR_RUPEES)
+        : usesRealFunds ? (realAvailableFunds ?? 0) : Number(settings.reserved_fund) || 0,
+      availableFunds: isShadow ? Math.max(realAvailableFunds ?? 0, SHADOW_EQUITY_FLOOR_RUPEES)
+        : usesRealFunds ? (realAvailableFunds ?? 0) : Number(settings.reserved_fund) || 0,
     },
     portfolio,
     {

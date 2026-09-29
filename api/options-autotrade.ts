@@ -3066,12 +3066,48 @@ async function handleGrowwProbe(req: any, res: any, supabase: SupabaseClient) {
     results.sampleQuote = { error: err.message };
   }
 
+  let niftyRow: string[] | null = null;
   try {
     const r = await fetch('https://growwapi-assets.groww.in/instruments/instrument.csv');
     const text = await r.text();
-    results.instrumentsCsvSample = { status: r.status, firstLines: text.split('\n').slice(0, 4) };
+    const lines = text.split('\n');
+    results.instrumentsCsvSample = { status: r.status, firstLines: lines.slice(0, 4) };
+    const header = lines[0].split(',');
+    const underlyingIdx = header.indexOf('underlying_symbol');
+    const segmentIdx = header.indexOf('segment');
+    const expiryIdx = header.indexOf('expiry_date');
+    const found = lines.slice(1).find((line) => {
+      const cols = line.split(',');
+      return cols[underlyingIdx] === 'NIFTY' && cols[segmentIdx] === 'FNO' && cols[expiryIdx] && Date.parse(cols[expiryIdx]) > Date.now();
+    });
+    if (found) { niftyRow = found.split(','); results.foundNiftyOptionRow = Object.fromEntries(header.map((h, i) => [h, niftyRow![i]])); }
   } catch (err: any) {
     results.instrumentsCsvSample = { error: err.message };
+  }
+
+  // Dry-run basket-margin check for exactly one real, currently-listed NIFTY
+  // option leg — a SELL of the minimum lot, never actually submitted as an
+  // order (this endpoint only calculates margin, it doesn't place
+  // anything). Tests product='NRML' specifically since that's what this
+  // codebase's Kite basket-margin request already uses for every real
+  // F&O order (buildBasketMarginRequest) — confirming Groww accepts the
+  // same value before any real order-placement code assumes it does.
+  if (niftyRow) {
+    try {
+      const header = results.instrumentsCsvSample && typeof results.instrumentsCsvSample === 'object'
+        ? (results.instrumentsCsvSample as any).firstLines[0].split(',') : [];
+      const tradingSymbolIdx = header.indexOf('trading_symbol');
+      const lotSizeIdx = header.indexOf('lot_size');
+      const tradingSymbol = niftyRow[tradingSymbolIdx];
+      const lotSize = Number(niftyRow[lotSizeIdx]) || 75;
+      const r = await fetch('https://api.groww.in/v1/margins/detail/orders?segment=FNO', {
+        method: 'POST', headers,
+        body: JSON.stringify([{ trading_symbol: tradingSymbol, transaction_type: 'SELL', quantity: lotSize, order_type: 'MARKET', product: 'NRML', exchange: 'NSE' }]),
+      });
+      results.dryRunMarginCheck = { requestedTradingSymbol: tradingSymbol, status: r.status, body: await r.json().catch(() => null) };
+    } catch (err: any) {
+      results.dryRunMarginCheck = { error: err.message };
+    }
   }
 
   res.status(200).json({ ok: true, results });

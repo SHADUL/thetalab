@@ -625,7 +625,8 @@ function PositionCardMobile({ p, hideAmounts, isFirst }) {
   const modeColor = MODE_COLOR[p.execution_mode] ?? MODE_COLOR.PAPER;
 
   return (
-    <div className={`rounded-[var(--radius-md)] overflow-hidden ${isFirst ? "" : "mt-2.5"}`} style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+    <div className={`rounded-[var(--radius-md)] overflow-hidden ${isFirst ? "" : "mt-2.5"}`}
+      style={{ border: "1px solid var(--c-line)", background: isActive ? "rgba(6,122,85,0.03)" : "rgba(20,30,55,0.015)" }}>
       <button onClick={() => setExpanded((v) => !v)} className="w-full text-left p-3">
         <div className="flex items-center justify-between gap-2 mb-1">
           <span className="text-[14px] font-semibold truncate">{p.symbol}</span>
@@ -904,7 +905,7 @@ function PositionRow({ p }) {
 
   return (
     <>
-      <tr style={{ borderTop: "1px solid var(--c-line)" }} className="oat-row" data-selected={expanded}>
+      <tr style={{ borderTop: "1px solid var(--c-line)" }} className="oat-row" data-selected={expanded} data-status={p.status === "ACTIVE" ? "active" : "closed"}>
         <td className="py-2.5 pl-4 pr-2">
           <button onClick={() => setExpanded((v) => !v)} className="flex items-center gap-1.5 text-left">
             <div>

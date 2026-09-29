@@ -224,7 +224,7 @@ function Sparkline({ seed, positive }) {
  * reserved_fund, or the real account balance under AUTO) — no new backend
  * metric.
  */
-function RiskCommandBar({ positions, settings, hideAmounts, setHideAmounts, realFunds }) {
+function RiskCommandBar({ positions, settings, hideAmounts, setHideAmounts, realFunds, growwRealFunds }) {
   const todayIST = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
   const totalMargin = positions.active.reduce((s, p) => s + (Number(p.margin_required) || 0), 0);
   const totalUnrealized = positions.active.reduce((s, p) => s + (Number(p.unrealized_pnl) || 0), 0);
@@ -235,7 +235,9 @@ function RiskCommandBar({ positions, settings, hideAmounts, setHideAmounts, real
   const isLive = settings?.execution_mode === "AUTO";
   const isShadow = settings?.execution_mode === "SHADOW";
 
-  const capitalBase = isLive ? realFunds?.availableFunds ?? null : Number(settings?.reserved_fund) || null;
+  const isGrowwBroker = (settings?.active_broker ?? "KITE") === "GROWW";
+  const activeRealFunds = isGrowwBroker ? growwRealFunds : realFunds;
+  const capitalBase = isLive ? activeRealFunds?.availableFunds ?? null : Number(settings?.reserved_fund) || null;
   const riskPct = capitalBase && capitalBase > 0 ? (maxLossAtRisk / capitalBase) * 100 : null;
 
   return (
@@ -758,8 +760,10 @@ export default function OptionsAutoTrader() {
       const confirmed = window.confirm(
         broker === "GROWW"
           ? "Broker is set to GROWW.\n\n" +
-            "Real order placement through Groww is NOT fully enabled yet — a required safety check (broker reconciliation, which prevents a duplicate real order firing when this system's records disagree with the broker's) only exists for Kite so far. Every Groww-routed entry will currently be refused rather than place a real order.\n\n" +
-            "Switching to AUTO now will still enable real Kite closing orders for any EXISTING Kite positions, and live decisioning/sizing checks will run for real. Are you sure you want to switch to AUTO?"
+            "This places REAL orders on your real Groww account with real money — not a simulation.\n\n" +
+            "Every future scan cycle will size and fire live BUY/SELL orders the moment a candidate clears the quality gate, with no per-trade confirmation. " +
+            "Position-monitor will also place real closing orders automatically.\n\n" +
+            "Are you sure you want to switch to AUTO?"
           : "This places REAL orders on your real Zerodha (Kite) account with real money — not a simulation.\n\n" +
             "Every future scan cycle will size and fire live BUY/SELL orders the moment a candidate clears the quality gate, with no per-trade confirmation. " +
             "Position-monitor will also place real closing orders automatically.\n\n" +
@@ -885,7 +889,7 @@ export default function OptionsAutoTrader() {
             </button>
             {growwStatus?.error && <span className="text-[10.5px] text-loss">{growwStatus.error}</span>}
             <span className="text-[10px] text-faint w-full">
-              Connection only — real order placement isn't routed through Groww yet, AUTO still executes via Kite.
+              AUTO real orders route through Groww when this is selected — sized against Groww's real balance, protected by the same broker-reconciliation safety check as Kite.
             </span>
           </>
         )}
@@ -984,9 +988,6 @@ export default function OptionsAutoTrader() {
                   {funds?.availableFunds != null ? inr(funds.availableFunds) : funds?.skipped === noSessionCode ? noSessionLabel : "—"}
                 </span>
                 {funds?.utilised != null && <span className="text-[10.5px] text-ink2">({inr(funds.utilised)} utilised)</span>}
-                {isGroww && (
-                  <span className="text-[10.5px] text-ink2">— real order placement through Groww is not enabled yet, entries are refused at a safety gate</span>
-                )}
                 <label className="flex items-center gap-1.5 text-[10.5px] text-ink2 ml-auto">
                   <input type="checkbox" checked={showAllModes} onChange={(e) => setShowAllModes(e.target.checked)} />
                   Show PAPER history too
@@ -995,7 +996,7 @@ export default function OptionsAutoTrader() {
             );
           })()}
 
-          <RiskCommandBar positions={visiblePositions} settings={settings} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} realFunds={realFunds} />
+          <RiskCommandBar positions={visiblePositions} settings={settings} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} realFunds={realFunds} growwRealFunds={growwRealFunds} />
 
           {visiblePositions.active.length === 0 && visiblePositions.closed.length === 0 ? (
             <EmptyState

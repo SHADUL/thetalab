@@ -9,11 +9,16 @@ const STATUS_TONE = { ACTIVE: "muted", CLOSED: "muted", FAILED: "loss", CLOSE_FA
 
 const INDEX_LABEL = { NIFTY: "NIFTY 50", BANKNIFTY: "BANKNIFTY", SENSEX: "SENSEX" };
 
+// AUTO is deliberately NOT red — red is reserved for loss/danger/kill-switch
+// states (see the redesign's color rules). AUTO gets a solid indigo fill
+// instead: distinct enough from SHADOW's soft indigo tint to read as the
+// "armed, live" state, without borrowing the alarm color normal broker
+// capital and mode badges must never wear.
 const MODE_COLOR = {
   OFF: { fg: "var(--c-faint)", bg: "var(--c-surface-3)" },
   PAPER: { fg: "var(--c-gain)", bg: "var(--c-gain-soft)" },
   SHADOW: { fg: "var(--c-accent)", bg: "var(--c-accent-soft)" },
-  AUTO: { fg: "var(--c-loss)", bg: "var(--c-loss-soft)" },
+  AUTO: { fg: "var(--c-accent-ink)", bg: "var(--c-accent)" },
 };
 
 /**
@@ -40,6 +45,106 @@ function MarketStrip({ indices }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/**
+ * Broker & Capital — merges what used to be two separate blocks (a plain
+ * "Broker" selector row, and a full-width red-bordered "REAL ... BALANCE"
+ * banner) into one premium account-summary card. Same data/handlers as
+ * before, purely a presentation change: the balance side reads as a
+ * financial-account figure (neutral dark text, calm surface) rather than
+ * a warning — red is reserved for when something is actually wrong
+ * (no session, connection lost), never for an ordinary live balance.
+ */
+function BrokerCapitalCard({
+  settings, growwStatus, growwConnecting, connectGroww, setActiveBroker, saving,
+  realFunds, growwRealFunds, showAllModes, setShowAllModes,
+}) {
+  const activeBroker = settings?.active_broker ?? "KITE";
+  const isGroww = activeBroker === "GROWW";
+  const isAuto = settings?.execution_mode === "AUTO";
+  const funds = isGroww ? growwRealFunds : realFunds;
+  const noSessionLabel = isGroww ? "No Groww session" : "No Kite session";
+  const noSessionCode = isGroww ? "no_groww_session" : "no_kite_session";
+  const hasBalance = funds?.availableFunds != null;
+  const balanceUnavailable = isAuto && !hasBalance;
+
+  return (
+    <div className="rounded-[var(--radius-lg)] mb-3 overflow-hidden" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)", boxShadow: "var(--e-1)" }}>
+      <div className="flex flex-col lg:flex-row">
+        {/* LEFT — broker identity & connection */}
+        <div className="flex-1 p-4 flex flex-col gap-2.5 min-w-0">
+          <span className="text-[10px] font-semibold text-muted tracking-wide uppercase">Broker Connection</span>
+          <div className="flex items-center gap-2.5 flex-wrap">
+            <div className="seg-track">
+              {["KITE", "GROWW"].map((broker) => (
+                <button key={broker} role="tab" aria-selected={activeBroker === broker} data-on={activeBroker === broker}
+                  onClick={() => setActiveBroker(broker)} disabled={saving} className="seg">
+                  {broker}
+                </button>
+              ))}
+            </div>
+            {isGroww && (
+              <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold px-2.5 py-1 rounded-full"
+                style={{ background: growwStatus?.connected ? "var(--c-gain-soft)" : "var(--c-warn-soft)", color: growwStatus?.connected ? "var(--c-gain)" : "var(--c-warn)" }}>
+                <span className="live-dot" style={{ background: growwStatus?.connected ? "var(--c-gain)" : "var(--c-warn)" }} aria-hidden="true" />
+                {growwStatus?.connected ? "Connected" : "Not connected"}
+              </span>
+            )}
+            {isGroww && growwStatus?.connected && growwStatus.obtainedAt && (
+              <span className="text-[10.5px] text-faint">synced {agoLabel(growwStatus.obtainedAt)}</span>
+            )}
+          </div>
+          {isGroww && (
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <button onClick={connectGroww} disabled={growwConnecting} className="topstep text-[11px]">
+                {growwConnecting ? "Connecting…" : growwStatus?.connected ? "Reconnect Groww" : "Connect Groww"}
+              </button>
+              {growwStatus?.error && <span className="text-[10.5px] text-loss">{growwStatus.error}</span>}
+            </div>
+          )}
+          <p className="text-[10.5px] text-faint max-w-[50ch] leading-relaxed">
+            {isGroww
+              ? "AUTO real orders route through Groww when selected — sized against Groww's real balance, protected by the same broker-reconciliation safety check as Kite."
+              : "Kite supplies live market data and historical depth for every mode, and routes AUTO's real orders when selected as the active broker."}
+          </p>
+        </div>
+
+        <div className="hidden lg:block w-px self-stretch shrink-0" style={{ background: "var(--c-line)" }} />
+        <div className="lg:hidden h-px" style={{ background: "var(--c-line)" }} />
+
+        {/* RIGHT — live capital, calm by default, never alarmist */}
+        <div className="lg:w-[300px] shrink-0 p-4 flex flex-col justify-center gap-1.5" style={{ background: "var(--c-surface-2)" }}>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10px] font-semibold text-muted tracking-wide uppercase">Live Broker Capital</span>
+            <span className="text-[9.5px] font-bold px-1.5 py-0.5 rounded-[4px] shrink-0" style={{ background: "var(--c-accent-soft)", color: "var(--c-accent)" }}>
+              {isGroww ? "GROWW" : "KITE"}
+            </span>
+          </div>
+          {isAuto ? (
+            <>
+              <div className={`font-display text-[26px] font-bold n leading-tight ${balanceUnavailable ? "text-faint" : "text-ink"}`}>
+                {hasBalance ? inr(funds.availableFunds) : funds?.skipped === noSessionCode ? noSessionLabel : "—"}
+              </div>
+              {funds?.utilised != null && <span className="text-[11px] text-muted">{inr(funds.utilised)} utilised</span>}
+              <span className="text-[10px] text-faint leading-relaxed">Used for AUTO sizing and real execution safety checks</span>
+            </>
+          ) : (
+            <span className="text-[11.5px] text-faint">Shown live once AUTO is active</span>
+          )}
+        </div>
+      </div>
+
+      {isAuto && (
+        <div className="flex items-center justify-end px-4 py-2" style={{ borderTop: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+          <label className="flex items-center gap-1.5 text-[10.5px] text-ink2">
+            <input type="checkbox" checked={showAllModes} onChange={(e) => setShowAllModes(e.target.checked)} />
+            Show PAPER history too
+          </label>
+        </div>
+      )}
     </div>
   );
 }
@@ -241,7 +346,7 @@ function RiskCommandBar({ positions, settings, hideAmounts, setHideAmounts, real
   const riskPct = capitalBase && capitalBase > 0 ? (maxLossAtRisk / capitalBase) * 100 : null;
 
   return (
-    <div className="rounded-[var(--radius-lg)] mb-4 px-4 py-3.5 sm:px-5" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+    <div className="rounded-[var(--radius-lg)] mb-4 px-4 py-3.5 sm:px-5" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)", boxShadow: "var(--e-1)" }}>
       <div className="flex items-start sm:items-center gap-4 sm:gap-8 flex-wrap">
         <div className="min-w-[140px]">
           <div className="flex items-center gap-2 mb-0.5">
@@ -266,12 +371,18 @@ function RiskCommandBar({ positions, settings, hideAmounts, setHideAmounts, real
 
         {riskPct !== null && (
           <div className="w-full sm:w-auto sm:ml-auto sm:text-right">
-            <div className="text-[10.5px] font-semibold text-muted tracking-wide mb-0.5">RISK UTILIZATION</div>
+            <div className="flex items-center justify-between sm:justify-end gap-2 mb-0.5">
+              <span className="text-[10.5px] font-semibold text-muted tracking-wide">RISK UTILIZATION</span>
+              <span className="text-[11px] font-bold n" style={{ color: riskPct > 80 ? "var(--c-loss)" : riskPct > 50 ? "var(--c-warn)" : "var(--c-gain)" }}>
+                {riskPct.toFixed(1)}%
+              </span>
+            </div>
             <div className="text-[13px] font-semibold n">
               {fmt(maxLossAtRisk)} <span className="text-faint font-normal">/ {fmt(capitalBase)}</span>
             </div>
-            <div className="h-[3px] rounded-full mt-1 overflow-hidden w-full sm:w-[120px]" style={{ background: "var(--c-surface-3)" }}>
-              <div className="h-full rounded-full" style={{ width: `${Math.min(100, riskPct)}%`, background: riskPct > 80 ? "var(--c-loss)" : riskPct > 50 ? "var(--c-warn)" : "var(--c-gain)" }} />
+            <div className="h-[3px] rounded-full mt-1.5 overflow-hidden w-full sm:w-[120px]" style={{ background: "var(--c-surface-3)" }}>
+              <motion.div initial={false} animate={{ width: `${Math.min(100, riskPct)}%` }} transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
+                className="h-full rounded-full" style={{ background: riskPct > 80 ? "var(--c-loss)" : riskPct > 50 ? "var(--c-warn)" : "var(--c-gain)" }} />
             </div>
           </div>
         )}
@@ -413,12 +524,25 @@ function MobilePortfolio({ positions, hideAmounts }) {
   );
 }
 
-function EmptyState({ label, sub }) {
+function EmptyState({ label, sub, live }) {
   return (
-    <div className="rounded-[var(--radius-md)] py-8 px-4 text-center" style={{ border: "1px dashed var(--c-line-2)", background: "var(--c-surface-2)" }}>
-      <p className="text-[12.5px] font-semibold text-ink2">{label}</p>
-      {sub && <p className="text-[11.5px] text-muted mt-1 max-w-[42ch] mx-auto">{sub}</p>}
-    </div>
+    <motion.div
+      initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+      className="rounded-[var(--radius-lg)] py-9 px-5 text-center flex flex-col items-center gap-2"
+      style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}
+    >
+      <div className="w-9 h-9 rounded-full flex items-center justify-center mb-0.5" style={{ background: "var(--c-surface-3)" }}>
+        <ChartLineUp size={16} weight="bold" className="text-faint" />
+      </div>
+      <p className="text-[13px] font-semibold text-ink">{label}</p>
+      {sub && <p className="text-[11.5px] text-muted max-w-[42ch] leading-relaxed">{sub}</p>}
+      {live && (
+        <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold text-muted mt-1">
+          <span className="live-dot" style={{ background: "var(--c-gain)" }} aria-hidden="true" />
+          Scanner live — monitoring for candidates
+        </span>
+      )}
+    </motion.div>
   );
 }
 
@@ -821,7 +945,8 @@ export default function OptionsAutoTrader() {
         <div className="flex items-center gap-2 min-w-0">
           <ChartLineUp size={17} weight="bold" className="text-accent shrink-0" />
           <h1 className="font-display text-[17px] sm:text-[20px] font-bold tracking-[-0.01em] truncate">Options Auto-Trader</h1>
-          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-[var(--radius-sm)] shrink-0" style={{ background: modeColor.bg, color: modeColor.fg }}>
+          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-[var(--radius-sm)] shrink-0 inline-flex items-center gap-1" style={{ background: modeColor.bg, color: modeColor.fg }}>
+            {settings?.execution_mode === "AUTO" && <span className="live-dot" style={{ background: "currentColor" }} aria-hidden="true" />}
             {settings?.execution_mode ?? "…"}
           </span>
         </div>
@@ -841,14 +966,23 @@ export default function OptionsAutoTrader() {
       <MarketStrip indices={indices} />
 
       {/* ── Execution mode: premium segmented control, compact contextual line, info on demand ── */}
-      <div className="flex items-center gap-3 flex-wrap py-2.5 mb-3 px-3 rounded-[var(--radius-md)]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+      <div className="flex items-center gap-3 flex-wrap py-2.5 mb-3 px-3 rounded-[var(--radius-md)]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)", boxShadow: "var(--e-1)" }}>
         <span className="text-[11px] font-semibold text-muted shrink-0">Execution Mode</span>
         <div className="seg-track">
           {["OFF", "PAPER", "SHADOW", "AUTO"].map((mode) => (
             <motion.button key={mode} whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
               role="tab" aria-selected={settings?.execution_mode === mode} data-on={settings?.execution_mode === mode}
               onClick={() => setExecutionMode(mode)} disabled={saving} className="seg"
-              style={settings?.execution_mode === mode ? { color: MODE_COLOR[mode].fg } : undefined}>
+              style={
+                settings?.execution_mode !== mode ? undefined
+                  // AUTO's active segment is a solid indigo fill (not the
+                  // shared white-pill/colored-text look every other mode
+                  // uses) — it needs its own background override here since
+                  // MODE_COLOR.AUTO.fg is a light "ink" color meant for that
+                  // fill, not for text on the default white active-pill.
+                  : mode === "AUTO" ? { background: MODE_COLOR.AUTO.bg, color: MODE_COLOR.AUTO.fg }
+                  : { color: MODE_COLOR[mode].fg }
+              }>
               {mode}
             </motion.button>
           ))}
@@ -865,35 +999,16 @@ export default function OptionsAutoTrader() {
         )}
       </div>
 
-      {/* ── Broker: which account AUTO's real orders would route through.
-          Kite stays wired in for market data/historical regardless — Groww's
-          own 1-minute history only covers 3 months, it can't replace that. ── */}
-      <div className="flex items-center gap-3 flex-wrap py-2.5 mb-3 px-3 rounded-[var(--radius-md)]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
-        <span className="text-[11px] font-semibold text-muted shrink-0">Broker</span>
-        <div className="seg-track">
-          {["KITE", "GROWW"].map((broker) => (
-            <button key={broker} role="tab" aria-selected={(settings?.active_broker ?? "KITE") === broker}
-              data-on={(settings?.active_broker ?? "KITE") === broker}
-              onClick={() => setActiveBroker(broker)} disabled={saving} className="seg">
-              {broker}
-            </button>
-          ))}
-        </div>
-        {(settings?.active_broker ?? "KITE") === "GROWW" && (
-          <>
-            <span className="text-[10.5px] px-2 py-1 rounded-[var(--radius-sm)]" style={{ background: growwStatus?.connected ? "var(--c-gain-soft)" : "var(--c-warn-soft)", color: growwStatus?.connected ? "var(--c-gain)" : "var(--c-warn)" }}>
-              {growwStatus?.connected ? `Connected${growwStatus.obtainedAt ? ` · ${agoLabel(growwStatus.obtainedAt)}` : ""}` : "Not connected"}
-            </span>
-            <button onClick={connectGroww} disabled={growwConnecting} className="topstep text-[11px]">
-              {growwConnecting ? "Connecting…" : growwStatus?.connected ? "Reconnect Groww" : "Connect Groww"}
-            </button>
-            {growwStatus?.error && <span className="text-[10.5px] text-loss">{growwStatus.error}</span>}
-            <span className="text-[10px] text-faint w-full">
-              AUTO real orders route through Groww when this is selected — sized against Groww's real balance, protected by the same broker-reconciliation safety check as Kite.
-            </span>
-          </>
-        )}
-      </div>
+      {/* ── Broker & Capital: merged connection + live balance card. Kite
+          stays wired in for market data/historical regardless of which
+          broker is active — Groww's own 1-minute history only covers 3
+          months, it can't replace that. ── */}
+      <BrokerCapitalCard
+        settings={settings} growwStatus={growwStatus} growwConnecting={growwConnecting}
+        connectGroww={connectGroww} setActiveBroker={setActiveBroker} saving={saving}
+        realFunds={realFunds} growwRealFunds={growwRealFunds}
+        showAllModes={showAllModes} setShowAllModes={setShowAllModes}
+      />
 
       {descOpen && (
         <p className="text-[11px] text-muted mb-3 max-w-[80ch] px-1">
@@ -976,32 +1091,13 @@ export default function OptionsAutoTrader() {
         </div>
       ) : (
         <>
-          {settings?.execution_mode === "AUTO" && (() => {
-            const isGroww = settings?.active_broker === "GROWW";
-            const funds = isGroww ? growwRealFunds : realFunds;
-            const noSessionLabel = isGroww ? "No Groww session" : "No Kite session";
-            const noSessionCode = isGroww ? "no_groww_session" : "no_kite_session";
-            return (
-              <div className="flex items-center gap-3 flex-wrap mb-3 p-3 rounded-[var(--radius-md)]" style={{ border: "1px solid var(--c-loss)", background: "var(--c-loss-soft)" }}>
-                <span className="text-[11px] font-semibold text-loss">REAL {isGroww ? "GROWW" : "ZERODHA"} BALANCE</span>
-                <span className="text-[15px] font-bold n text-loss">
-                  {funds?.availableFunds != null ? inr(funds.availableFunds) : funds?.skipped === noSessionCode ? noSessionLabel : "—"}
-                </span>
-                {funds?.utilised != null && <span className="text-[10.5px] text-ink2">({inr(funds.utilised)} utilised)</span>}
-                <label className="flex items-center gap-1.5 text-[10.5px] text-ink2 ml-auto">
-                  <input type="checkbox" checked={showAllModes} onChange={(e) => setShowAllModes(e.target.checked)} />
-                  Show PAPER history too
-                </label>
-              </div>
-            );
-          })()}
-
           <RiskCommandBar positions={visiblePositions} settings={settings} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} realFunds={realFunds} growwRealFunds={growwRealFunds} />
 
           {visiblePositions.active.length === 0 && visiblePositions.closed.length === 0 ? (
             <EmptyState
               label="No active positions"
               sub={`The scanner is monitoring NIFTY, BANKNIFTY and SENSEX. New ${settings?.execution_mode === "AUTO" ? "AUTO" : settings?.execution_mode === "SHADOW" ? "SHADOW" : "PAPER"} positions appear automatically when a candidate qualifies.`}
+              live={settings?.execution_mode && settings.execution_mode !== "OFF"}
             />
           ) : (
             <AnimatePresence mode="wait">

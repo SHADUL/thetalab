@@ -69,7 +69,7 @@ function RotatingTicker({ indices }) {
   const idx = rows[i % rows.length];
   const positive = (idx.change ?? 0) >= 0;
   return (
-    <div className="sm:hidden flex items-center gap-1.5 px-3 py-2 mb-2.5 rounded-[var(--radius-md)] overflow-hidden order-[30]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+    <div className="sm:hidden flex items-center gap-1.5 px-3 py-2 mb-2.5 rounded-[var(--radius-md)] overflow-hidden order-[5]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
       <span className="live-dot shrink-0" aria-hidden="true" />
       <div className="relative h-[18px] flex-1 min-w-0 overflow-hidden">
         <AnimatePresence mode="wait">
@@ -451,7 +451,7 @@ function Sparkline({ seed, positive }) {
  * reserved_fund, or the real account balance under AUTO) — no new backend
  * metric.
  */
-function RiskCommandBar({ positions, settings, hideAmounts, setHideAmounts, realFunds, growwRealFunds }) {
+function RiskCommandBar({ positions, settings, hideAmounts, setHideAmounts }) {
   const todayIST = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
   const totalMargin = positions.active.reduce((s, p) => s + (Number(p.margin_required) || 0), 0);
   const totalUnrealized = positions.active.reduce((s, p) => s + (Number(p.unrealized_pnl) || 0), 0);
@@ -461,11 +461,6 @@ function RiskCommandBar({ positions, settings, hideAmounts, setHideAmounts, real
   const fmt = (n) => (hideAmounts ? "••••••" : inr(n));
   const isLive = settings?.execution_mode === "AUTO";
   const isShadow = settings?.execution_mode === "SHADOW";
-
-  const isGrowwBroker = (settings?.active_broker ?? "KITE") === "GROWW";
-  const activeRealFunds = isGrowwBroker ? growwRealFunds : realFunds;
-  const capitalBase = isLive ? activeRealFunds?.availableFunds ?? null : Number(settings?.reserved_fund) || null;
-  const riskPct = capitalBase && capitalBase > 0 ? (maxLossAtRisk / capitalBase) * 100 : null;
 
   return (
     <div className="rounded-[var(--radius-lg)] mb-4 px-4 py-3.5 sm:px-5" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)", boxShadow: "var(--e-1)" }}>
@@ -490,24 +485,6 @@ function RiskCommandBar({ positions, settings, hideAmounts, setHideAmounts, real
           <RiskMetric label="Margin Used" value={fmt(totalMargin)} />
           <RiskMetric label="Max Risk" value={fmt(maxLossAtRisk)} tone={positions.active.length ? "loss" : undefined} />
         </div>
-
-        {riskPct !== null && (
-          <div className="w-full sm:w-auto sm:ml-auto sm:text-right">
-            <div className="flex items-center justify-between sm:justify-end gap-2 mb-0.5">
-              <span className="text-[10.5px] font-semibold text-muted tracking-wide">RISK UTILIZATION</span>
-              <span className="text-[11px] font-bold n" style={{ color: riskPct > 80 ? "var(--c-loss)" : riskPct > 50 ? "var(--c-warn)" : "var(--c-gain)" }}>
-                {riskPct.toFixed(1)}%
-              </span>
-            </div>
-            <div className="text-[13px] font-semibold n">
-              {fmt(maxLossAtRisk)} <span className="text-faint font-normal">/ {fmt(capitalBase)}</span>
-            </div>
-            <div className="h-[3px] rounded-full mt-1.5 overflow-hidden w-full sm:w-[120px]" style={{ background: "var(--c-surface-3)" }}>
-              <motion.div initial={false} animate={{ width: `${Math.min(100, riskPct)}%` }} transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
-                className="h-full rounded-full" style={{ background: riskPct > 80 ? "var(--c-loss)" : riskPct > 50 ? "var(--c-warn)" : "var(--c-gain)" }} />
-            </div>
-          </div>
-        )}
       </div>
 
       <div className="text-[10px] text-faint mt-2.5 pt-2.5" style={{ borderTop: "1px solid var(--c-line)" }}>
@@ -1116,26 +1093,26 @@ export default function OptionsAutoTrader() {
       <MarketStrip indices={indices} />
       <RotatingTicker indices={indices} />
 
-      {/* ── Execution mode: premium segmented control. Desktop keeps the
-          full contextual sentence + info toggle; mobile shows only a
-          short status word — the redesign brief's rule that mobile never
-          shows long explanatory text by default. ── */}
-      <div className="flex items-center gap-3 flex-wrap py-2.5 mb-3 px-3 rounded-[var(--radius-md)] order-[40] sm:order-[30]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)", boxShadow: "var(--e-1)" }}>
-        <span className="text-[11px] font-semibold text-muted shrink-0">Execution Mode</span>
+      {/* ── Execution mode: premium segmented control. Mobile is a single
+          slim row — no label, no filled status pill, just the control and
+          a tiny muted status word — desktop keeps the fuller label +
+          sentence + info toggle since it has the room. ── */}
+      <div className="flex items-center gap-2.5 sm:gap-3 flex-wrap py-2 sm:py-2.5 mb-3 px-3 rounded-[var(--radius-md)] order-[40] sm:order-[30]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)", boxShadow: "var(--e-1)" }}>
+        <span className="hidden sm:inline text-[11px] font-semibold text-muted shrink-0">Execution Mode</span>
         <div className="seg-track flex-1 sm:flex-initial">
           {["OFF", "PAPER", "SHADOW", "AUTO"].map((mode) => (
             <motion.button key={mode} whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
               role="tab" aria-selected={settings?.execution_mode === mode} data-on={settings?.execution_mode === mode}
               onClick={() => setExecutionMode(mode)} disabled={saving} className="seg"
               style={
-                settings?.execution_mode !== mode ? { minHeight: 40 }
+                settings?.execution_mode !== mode ? { minHeight: 38 }
                   // AUTO's active segment is a solid indigo fill (not the
                   // shared white-pill/colored-text look every other mode
                   // uses) — it needs its own background override here since
                   // MODE_COLOR.AUTO.fg is a light "ink" color meant for that
                   // fill, not for text on the default white active-pill.
-                  : mode === "AUTO" ? { background: MODE_COLOR.AUTO.bg, color: MODE_COLOR.AUTO.fg, minHeight: 40 }
-                  : { color: MODE_COLOR[mode].fg, minHeight: 40 }
+                  : mode === "AUTO" ? { background: MODE_COLOR.AUTO.bg, color: MODE_COLOR.AUTO.fg, minHeight: 38 }
+                  : { color: MODE_COLOR[mode].fg, minHeight: 38 }
               }>
               {mode}
             </motion.button>
@@ -1152,11 +1129,12 @@ export default function OptionsAutoTrader() {
                 <Info size={12} weight="bold" />
               </button>
             </span>
-            {/* Mobile: one short status word only, no paragraph, no info toggle. */}
-            <span className="sm:hidden text-[10px] font-semibold px-2 py-1 rounded-[var(--radius-sm)] shrink-0" style={{ background: modeColor.bg, color: modeColor.fg }}>
-              {settings.execution_mode === "AUTO" ? "real broker orders"
-                : settings.execution_mode === "SHADOW" ? "simulated fills"
-                : "simulated fills"}
+            {/* Mobile: a plain muted status word, no filled pill — reads as
+                a caption on the control, not a second competing chip. */}
+            <span className="sm:hidden text-[10px] font-medium text-muted shrink-0 w-full text-center -mt-0.5">
+              {settings.execution_mode === "AUTO" ? "Real broker orders"
+                : settings.execution_mode === "SHADOW" ? "Simulated fills"
+                : "Simulated fills"}
             </span>
           </>
         )}
@@ -1259,7 +1237,7 @@ export default function OptionsAutoTrader() {
       ) : (
         <>
           <div className="order-[60] sm:order-[90]">
-            <RiskCommandBar positions={visiblePositions} settings={settings} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} realFunds={realFunds} growwRealFunds={growwRealFunds} />
+            <RiskCommandBar positions={visiblePositions} settings={settings} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} />
           </div>
 
           <MobileCapitalCard settings={settings} realFunds={realFunds} growwRealFunds={growwRealFunds} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} />

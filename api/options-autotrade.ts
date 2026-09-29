@@ -756,15 +756,29 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   // market-regime signals below cost zero extra requests.
   const indexKey = INDEX_QUOTE_KEY[symbol];
   const VIX_KEY = 'NSE:INDIA VIX';
+  // A Kite call failing here is routine, not exceptional — by far the most
+  // common cause is a session token that hasn't been reconnected yet this
+  // morning (Kite tokens expire daily), and this is the FIRST live Kite
+  // call the whole scan makes, so an expired-but-still-present token (the
+  // `!token` check above only catches a MISSING token, not an invalid
+  // one) always fails right here. Reported as a 502 for a while, this
+  // repeatable daily failure got the BANKNIFTY/NIFTY/SENSEX paper-scan
+  // cron-job.org jobs auto-disabled by their own failure-count policy —
+  // needing a manual re-enable every single day. Every other Kite-
+  // dependent path in this codebase (the `no_kite_session` check 60 lines
+  // up, and position-monitor's own quote-batch handling) already treats
+  // "can't reach Kite right now" as an expected 200 skip, never a hard
+  // error — this brings the spot-price fetch in line with that same
+  // convention instead of being the one exception.
   let spotData: any;
   try {
     spotData = await kiteFetch(`/quote?i=${encodeURIComponent(indexKey)}&i=${encodeURIComponent(VIX_KEY)}`, { token, apiKey });
   } catch (err: any) {
-    res.status(502).json({ ok: false, error: 'kite_error', message: err.message });
+    res.status(200).json({ ok: true, skipped: 'kite_error', message: err.message });
     return;
   }
   const spot = spotData?.[indexKey]?.last_price;
-  if (!(spot > 0)) { res.status(502).json({ ok: false, error: 'no_spot_price' }); return; }
+  if (!(spot > 0)) { res.status(200).json({ ok: true, skipped: 'no_spot_price' }); return; }
 
   // Real India VIX and today's gap/intraday-range — from the SAME live
   // quote response, no extra call. Null when genuinely absent (never

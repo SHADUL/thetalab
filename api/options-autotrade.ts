@@ -3076,11 +3076,24 @@ async function handleGrowwProbe(req: any, res: any, supabase: SupabaseClient) {
     const underlyingIdx = header.indexOf('underlying_symbol');
     const segmentIdx = header.indexOf('segment');
     const expiryIdx = header.indexOf('expiry_date');
-    const found = lines.slice(1).find((line) => {
-      const cols = line.split(',');
-      return cols[underlyingIdx] === 'NIFTY' && cols[segmentIdx] === 'FNO' && cols[expiryIdx] && Date.parse(cols[expiryIdx]) > Date.now();
+    const strikeIdx = header.indexOf('strike_price');
+    const typeIdx = header.indexOf('instrument_type');
+    // Nearest unexpired expiry, and the strike closest to a realistic
+    // current NIFTY spot (~22,700, from this same probe's real quote
+    // endpoint moments ago) — a random far-dated/deep-strike contract
+    // (the first prior run happened to pick) may genuinely have no
+    // computable margin regardless of request-shape correctness.
+    const approxSpot = 22700;
+    const candidates = lines.slice(1)
+      .map((line) => line.split(','))
+      .filter((cols) => cols[underlyingIdx] === 'NIFTY' && cols[segmentIdx] === 'FNO' && cols[typeIdx] === 'PE' && cols[expiryIdx] && Date.parse(cols[expiryIdx]) > Date.now());
+    candidates.sort((a, b) => {
+      const expiryDiff = Date.parse(a[expiryIdx]) - Date.parse(b[expiryIdx]);
+      if (expiryDiff !== 0) return expiryDiff;
+      return Math.abs(Number(a[strikeIdx]) - approxSpot) - Math.abs(Number(b[strikeIdx]) - approxSpot);
     });
-    if (found) { niftyRow = found.split(','); results.foundNiftyOptionRow = Object.fromEntries(header.map((h, i) => [h, niftyRow![i]])); }
+    const found = candidates[0];
+    if (found) { niftyRow = found; results.foundNiftyOptionRow = Object.fromEntries(header.map((h, i) => [h, niftyRow![i]])); }
   } catch (err: any) {
     results.instrumentsCsvSample = { error: err.message };
   }

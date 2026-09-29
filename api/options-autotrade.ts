@@ -739,7 +739,11 @@ function isMarketOpenIST(now = new Date()): boolean {
   const day = ist.getDay();
   if (day === 0 || day === 6) return false;
   const minutes = ist.getHours() * 60 + ist.getMinutes();
-  return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
+  // NSE/BSE F&O close was extended from 15:30 to 15:40 IST effective
+  // 2026-08-03 (aligning with the new cash-segment Closing Auction
+  // Session) — this must track the real exchange close, not a stale
+  // pre-August value.
+  return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 40;
 }
 
 /** Smallest gap between consecutive sorted strikes — self-derived rather than a hardcoded per-symbol constant, since it's already present in the synced instrument data. */

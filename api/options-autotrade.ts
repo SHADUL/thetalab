@@ -79,6 +79,7 @@ import { classifyMarketRegime, type MarketRegimeResult } from '../src/quant/anal
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
+import { ProxyAgent } from 'undici';
 import { decideTrade, type DecisionThresholds } from '../src/quant/strategies/decisionGate.ts';
 import { computePositionSize, type PortfolioState, type OpenPositionSummary } from '../src/quant/strategies/positionSizing.ts';
 import { runPreTradeValidation } from '../src/quant/execution/preTradeValidation.ts';
@@ -342,14 +343,44 @@ function makeLiveOrderPlacer(token: string, apiKey: string): LiveOrderPlacer {
 // choice into Groww's own naming.
 const GROWW_EXCHANGE_FOR_KITE_EXCHANGE: Record<string, string> = { NFO: 'NSE', BFO: 'BSE' };
 
-/** Raw fetch wrapper for Groww's REST API — same throw-on-error, return-payload-only shape as kiteFetch, for the same reason (every caller gets one consistent try/catch pattern instead of re-checking `status`/`error` at every call site). */
+/**
+ * SEBI's algo-trading rules (effective 2026-04-01) require order-placement
+ * API calls to originate from a pre-registered, whitelisted static IP —
+ * Vercel's serverless functions don't have one by default, so real Groww
+ * calls (funds, margin, order placement, positions/orders for
+ * reconciliation) are routed through a purchased static-IP proxy instead.
+ * Built once and reused (undici recommends one long-lived ProxyAgent, not
+ * one per request) — `null` when the proxy isn't configured, in which case
+ * growwFetch falls back to a direct call (still safe: Groww's own API
+ * rejects it with a clear "no registered IPs" error, exactly as it did
+ * before this proxy existed, rather than failing in some new, confusing
+ * way).
+ */
+let growwProxyAgent: ProxyAgent | null | undefined;
+function getGrowwProxyAgent(): ProxyAgent | null {
+  if (growwProxyAgent !== undefined) return growwProxyAgent;
+  const host = process.env.GROWW_PROXY_HOST;
+  const port = process.env.GROWW_PROXY_PORT;
+  const username = process.env.GROWW_PROXY_USERNAME;
+  const password = process.env.GROWW_PROXY_PASSWORD;
+  if (!host || !port || !username || !password) {
+    growwProxyAgent = null;
+    return null;
+  }
+  growwProxyAgent = new ProxyAgent(`https://${encodeURIComponent(username)}:${encodeURIComponent(password)}@${host}:${port}`);
+  return growwProxyAgent;
+}
+
+/** Raw fetch wrapper for Groww's REST API — same throw-on-error, return-payload-only shape as kiteFetch, for the same reason (every caller gets one consistent try/catch pattern instead of re-checking `status`/`error` at every call site). Routed through the static-IP proxy (see getGrowwProxyAgent) since this is exactly the traffic SEBI's IP-whitelisting rule applies to. */
 async function growwFetch(path: string, opts: { method?: string; token: string; jsonBody?: unknown }): Promise<any> {
   const { method = 'GET', token, jsonBody } = opts;
+  const dispatcher = getGrowwProxyAgent();
   const resp = await fetch(`https://api.groww.in${path}`, {
     method,
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: jsonBody !== undefined ? JSON.stringify(jsonBody) : undefined,
-  });
+    ...(dispatcher ? { dispatcher } : {}),
+  } as RequestInit);
   const json = await resp.json().catch(() => null);
   if (!resp.ok || json?.status === 'FAILURE') {
     throw new Error(json?.error?.message || `Groww API error (${resp.status}) on ${path}`);

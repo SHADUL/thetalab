@@ -172,100 +172,107 @@ function MobileCapitalCard({ settings, realFunds, growwRealFunds, hideAmounts, s
 }
 
 /**
- * Broker & Capital — merges what used to be two separate blocks (a plain
- * "Broker" selector row, and a full-width red-bordered "REAL ... BALANCE"
- * banner) into one premium account-summary card. Same data/handlers as
- * before, purely a presentation change: the balance side reads as a
- * financial-account figure (neutral dark text, calm surface) rather than
- * a warning — red is reserved for when something is actually wrong
- * (no session, connection lost), never for an ordinary live balance.
+ * Utility Bar — broker connection + execution mode + settings trigger, all
+ * as one slim, flat, low-visual-weight row. Replaces what used to be two
+ * separate large cards (a standalone Execution Mode card, and a
+ * BrokerCapitalCard combining broker connection with a big "Live Broker
+ * Capital" panel): operational controls that aren't the reason the user
+ * opened this page shouldn't out-weigh the portfolio/positions content
+ * below them. Live capital itself now lives inside RiskCommandBar as one
+ * more metric alongside P&L/margin/risk, not a separate showcase panel.
+ * Desktop only — mobile keeps its own MobileBrokerBar (top) + compact
+ * execution-mode row, already tuned for a small screen's different
+ * information order.
  */
-function BrokerCapitalCard({
+function UtilityBar({
   settings, growwStatus, growwConnecting, connectGroww, setActiveBroker, saving,
-  realFunds, growwRealFunds, showAllModes, setShowAllModes,
+  setExecutionMode, settingsOpen, setSettingsOpen, showAllModes, setShowAllModes,
 }) {
+  const [brokerInfoOpen, setBrokerInfoOpen] = useState(false);
   const activeBroker = settings?.active_broker ?? "KITE";
   const isGroww = activeBroker === "GROWW";
-  const isAuto = settings?.execution_mode === "AUTO";
-  const funds = isGroww ? growwRealFunds : realFunds;
-  const noSessionLabel = isGroww ? "No Groww session" : "No Kite session";
-  const noSessionCode = isGroww ? "no_groww_session" : "no_kite_session";
-  const hasBalance = funds?.availableFunds != null;
-  const balanceUnavailable = isAuto && !hasBalance;
+  const mode = settings?.execution_mode;
+  const modeCaption = mode === "AUTO" ? "real broker orders" : mode === "SHADOW" ? "simulated fills" : mode === "PAPER" ? "simulated fills" : null;
 
   return (
-    <div className="rounded-[var(--radius-lg)] mb-3 overflow-hidden" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)", boxShadow: "var(--e-1)" }}>
-      <div className="flex flex-col lg:flex-row">
-        {/* LEFT — broker identity & connection */}
-        <div className="flex-1 p-4 flex flex-col gap-2.5 min-w-0">
-          <span className="text-[10px] font-semibold text-muted tracking-wide uppercase">Broker Connection</span>
-          <div className="flex items-center gap-2.5 flex-wrap">
-            <div className="seg-track">
-              {["KITE", "GROWW"].map((broker) => (
-                <button key={broker} role="tab" aria-selected={activeBroker === broker} data-on={activeBroker === broker}
-                  onClick={() => setActiveBroker(broker)} disabled={saving} className="seg">
-                  {broker}
-                </button>
-              ))}
-            </div>
-            {isGroww && (
-              <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold px-2.5 py-1 rounded-full"
-                style={{ background: growwStatus?.connected ? "var(--c-gain-soft)" : "var(--c-warn-soft)", color: growwStatus?.connected ? "var(--c-gain)" : "var(--c-warn)" }}>
-                <span className="live-dot" style={{ background: growwStatus?.connected ? "var(--c-gain)" : "var(--c-warn)" }} aria-hidden="true" />
-                {growwStatus?.connected ? "Connected" : "Not connected"}
-              </span>
-            )}
-            {isGroww && growwStatus?.connected && growwStatus.obtainedAt && (
-              <span className="text-[10.5px] text-faint">synced {agoLabel(growwStatus.obtainedAt)}</span>
-            )}
+    <div className="hidden sm:block sm:order-[30] mb-3">
+      <div className="flex items-center gap-4 flex-wrap py-2 px-3 rounded-[var(--radius-md)]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+        {/* Broker */}
+        <div className="flex items-center gap-2">
+          <span className="text-[10.5px] font-semibold text-muted shrink-0">Broker</span>
+          <div className="seg-track">
+            {["KITE", "GROWW"].map((broker) => (
+              <button key={broker} role="tab" aria-selected={activeBroker === broker} data-on={activeBroker === broker}
+                onClick={() => setActiveBroker(broker)} disabled={saving} className="seg">
+                {broker}
+              </button>
+            ))}
           </div>
           {isGroww && (
-            <div className="flex items-center gap-2.5 flex-wrap">
-              <button onClick={connectGroww} disabled={growwConnecting} className="topstep text-[11px]">
-                {growwConnecting ? "Connecting…" : growwStatus?.connected ? "Reconnect Groww" : "Connect Groww"}
-              </button>
-              {growwStatus?.error && <span className="text-[10.5px] text-loss">{growwStatus.error}</span>}
-            </div>
-          )}
-          <p className="text-[10.5px] text-faint max-w-[50ch] leading-relaxed">
-            {isGroww
-              ? "AUTO real orders route through Groww when selected — sized against Groww's real balance, protected by the same broker-reconciliation safety check as Kite."
-              : "Kite supplies live market data and historical depth for every mode, and routes AUTO's real orders when selected as the active broker."}
-          </p>
-        </div>
-
-        <div className="hidden lg:block w-px self-stretch shrink-0" style={{ background: "var(--c-line)" }} />
-        <div className="lg:hidden h-px" style={{ background: "var(--c-line)" }} />
-
-        {/* RIGHT — live capital, calm by default, never alarmist */}
-        <div className="lg:w-[300px] shrink-0 p-4 flex flex-col justify-center gap-1.5" style={{ background: "var(--c-surface-2)" }}>
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-[10px] font-semibold text-muted tracking-wide uppercase">Live Broker Capital</span>
-            <span className="text-[9.5px] font-bold px-1.5 py-0.5 rounded-[4px] shrink-0" style={{ background: "var(--c-accent-soft)", color: "var(--c-accent)" }}>
-              {isGroww ? "GROWW" : "KITE"}
+            <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold px-2 py-0.5 rounded-full"
+              style={{ background: growwStatus?.connected ? "var(--c-gain-soft)" : "var(--c-warn-soft)", color: growwStatus?.connected ? "var(--c-gain)" : "var(--c-warn)" }}>
+              <span className="live-dot" style={{ background: growwStatus?.connected ? "var(--c-gain)" : "var(--c-warn)" }} aria-hidden="true" />
+              {growwStatus?.connected ? "Connected" : "Not connected"}
             </span>
-          </div>
-          {isAuto ? (
-            <>
-              <div className={`font-display text-[26px] font-bold n leading-tight ${balanceUnavailable ? "text-faint" : "text-ink"}`}>
-                {hasBalance ? inr(funds.availableFunds) : funds?.skipped === noSessionCode ? noSessionLabel : "—"}
-              </div>
-              {funds?.utilised != null && <span className="text-[11px] text-muted">{inr(funds.utilised)} utilised</span>}
-              <span className="text-[10px] text-faint leading-relaxed">Used for AUTO sizing and real execution safety checks</span>
-            </>
-          ) : (
-            <span className="text-[11.5px] text-faint">Shown live once AUTO is active</span>
           )}
+          {isGroww && growwStatus?.connected && growwStatus.obtainedAt && (
+            <span className="text-[10.5px] text-faint">synced {agoLabel(growwStatus.obtainedAt)}</span>
+          )}
+          {isGroww && (
+            <button onClick={connectGroww} disabled={growwConnecting} className="text-[10.5px] font-medium text-accent hover:opacity-70">
+              {growwConnecting ? "Connecting…" : growwStatus?.connected ? "Reconnect" : "Connect"}
+            </button>
+          )}
+          {isGroww && growwStatus?.error && <span className="text-[10.5px] text-loss">{growwStatus.error}</span>}
+          <button onClick={() => setBrokerInfoOpen((v) => !v)} className="text-faint hover:text-muted" aria-label="About broker routing" title="About broker routing">
+            <Info size={12} weight="bold" />
+          </button>
         </div>
+
+        <div className="hidden lg:block w-px h-5" style={{ background: "var(--c-line)" }} />
+
+        {/* Mode */}
+        <div className="flex items-center gap-2">
+          <span className="text-[10.5px] font-semibold text-muted shrink-0">Mode</span>
+          <div className="seg-track">
+            {["OFF", "PAPER", "SHADOW", "AUTO"].map((m) => (
+              <motion.button key={m} whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+                role="tab" aria-selected={mode === m} data-on={mode === m}
+                onClick={() => setExecutionMode(m)} disabled={saving} className="seg"
+                style={
+                  mode !== m ? undefined
+                    : m === "AUTO" ? { background: MODE_COLOR.AUTO.bg, color: MODE_COLOR.AUTO.fg }
+                    : { color: MODE_COLOR[m].fg }
+                }>
+                {m}
+              </motion.button>
+            ))}
+          </div>
+          {modeCaption && <span className="text-[10.5px] text-muted whitespace-nowrap">{mode} · {modeCaption}</span>}
+        </div>
+
+        <div className="flex-1" />
+
+        {mode && mode !== "OFF" && (
+          <label className="flex items-center gap-1.5 text-[10.5px] text-muted">
+            <input type="checkbox" checked={showAllModes} onChange={(e) => setShowAllModes(e.target.checked)} />
+            Show other modes
+          </label>
+        )}
+
+        <button onClick={() => setSettingsOpen((v) => !v)} className="flex items-center gap-1.5 text-[11px] font-medium text-muted hover:text-ink">
+          <Gear size={13} weight="bold" />
+          Settings
+          {settingsOpen ? <CaretUp size={11} /> : <CaretDown size={11} />}
+        </button>
       </div>
 
-      {isAuto && (
-        <div className="flex items-center justify-end px-4 py-2" style={{ borderTop: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
-          <label className="flex items-center gap-1.5 text-[10.5px] text-ink2">
-            <input type="checkbox" checked={showAllModes} onChange={(e) => setShowAllModes(e.target.checked)} />
-            Show PAPER history too
-          </label>
-        </div>
+      {brokerInfoOpen && (
+        <p className="text-[10.5px] text-muted mt-1.5 px-1 max-w-[70ch] leading-relaxed">
+          {isGroww
+            ? "AUTO real orders route through Groww when selected — sized against Groww's real balance, protected by the same broker-reconciliation safety check as Kite."
+            : "Kite supplies live market data and historical depth for every mode, and routes AUTO's real orders when selected as the active broker."}
+        </p>
       )}
     </div>
   );
@@ -358,7 +365,7 @@ function ActivityLog({ timeline }) {
       {timeline.length === 0 ? (
         <p className="text-[12.5px] text-muted py-6 text-center">No activity yet.</p>
       ) : (
-        <div className="rounded-[var(--radius-lg)] overflow-hidden" style={{ border: "1px solid var(--c-line)" }}>
+        <div className="rounded-[var(--radius-md)] overflow-hidden" style={{ border: "1px solid var(--c-line)" }}>
           {timeline.map((e, i) => {
             const isError = e.level === "error";
             return (
@@ -451,7 +458,7 @@ function Sparkline({ seed, positive }) {
  * reserved_fund, or the real account balance under AUTO) — no new backend
  * metric.
  */
-function RiskCommandBar({ positions, settings, hideAmounts, setHideAmounts }) {
+function RiskCommandBar({ positions, settings, hideAmounts, setHideAmounts, realFunds, growwRealFunds }) {
   const todayIST = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
   const totalMargin = positions.active.reduce((s, p) => s + (Number(p.margin_required) || 0), 0);
   const totalUnrealized = positions.active.reduce((s, p) => s + (Number(p.unrealized_pnl) || 0), 0);
@@ -462,8 +469,14 @@ function RiskCommandBar({ positions, settings, hideAmounts, setHideAmounts }) {
   const isLive = settings?.execution_mode === "AUTO";
   const isShadow = settings?.execution_mode === "SHADOW";
 
+  const isGrowwBroker = (settings?.active_broker ?? "KITE") === "GROWW";
+  const activeRealFunds = isGrowwBroker ? growwRealFunds : realFunds;
+  const capitalBase = isLive ? activeRealFunds?.availableFunds ?? null : Number(settings?.reserved_fund) || null;
+  const riskPct = capitalBase && capitalBase > 0 ? (maxLossAtRisk / capitalBase) * 100 : null;
+  const brokerCapital = isLive ? activeRealFunds?.availableFunds ?? null : null;
+
   return (
-    <div className="rounded-[var(--radius-lg)] mb-4 px-4 py-3.5 sm:px-5" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)", boxShadow: "var(--e-1)" }}>
+    <div className="rounded-[var(--radius-md)] mb-4 px-4 py-3.5 sm:px-5" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)", boxShadow: "var(--e-1)" }}>
       <div className="flex items-start sm:items-center gap-4 sm:gap-8 flex-wrap">
         <div className="min-w-[140px]">
           <div className="flex items-center gap-2 mb-0.5">
@@ -484,6 +497,12 @@ function RiskCommandBar({ positions, settings, hideAmounts, setHideAmounts }) {
           <RiskMetric label="Unrealized" value={fmt(totalUnrealized)} tone={totalUnrealized >= 0 ? "gain" : "loss"} signed />
           <RiskMetric label="Margin Used" value={fmt(totalMargin)} />
           <RiskMetric label="Max Risk" value={fmt(maxLossAtRisk)} tone={positions.active.length ? "loss" : undefined} />
+          {riskPct !== null && (
+            <RiskMetric label="Risk Utilization" value={`${riskPct.toFixed(1)}%`} tone={riskPct > 80 ? "loss" : riskPct > 50 ? "warn" : "gain"} />
+          )}
+          {isLive && brokerCapital != null && (
+            <RiskMetric label="Broker Capital" value={fmt(brokerCapital)} />
+          )}
         </div>
       </div>
 
@@ -494,8 +513,41 @@ function RiskCommandBar({ positions, settings, hideAmounts, setHideAmounts }) {
   );
 }
 
+/** Shared risk/strategy parameter fields — rendered from two different
+ * triggers (the mobile Settings accordion, and desktop's UtilityBar
+ * "Settings" button) but the exact same fields/handlers either way. */
+function SettingsFields({ draft, setField, saving, saveSettings }) {
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+      {EDITABLE_GROUPS.map((group) => (
+        <div key={group.title} className="p-2.5 rounded-[var(--radius-sm)]" style={{ background: "var(--c-surface-2)" }}>
+          <div className="text-[10.5px] font-semibold text-muted mb-1.5">{group.title}</div>
+          <div className="flex flex-col gap-1.5">
+            {group.fields.map((f) => (
+              <label key={f.key} className="flex items-center justify-between gap-2 text-[11px]">
+                <span className="text-ink2">{f.label}</span>
+                <input
+                  type="number" step={f.step} min={f.min} max={f.max}
+                  value={draft[f.key] ?? ""}
+                  onChange={(e) => setField(f.key, e.target.value)}
+                  className="w-[76px] px-1.5 py-0.5 rounded-[6px] n text-[11px] text-right"
+                  style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}
+                />
+              </label>
+            ))}
+          </div>
+        </div>
+      ))}
+      <div className="col-span-full flex items-center gap-2.5 mt-1">
+        <button onClick={saveSettings} disabled={saving} className="topstep text-[11.5px]">{saving ? "Saving…" : "Save Settings"}</button>
+        <span className="text-[10.5px] text-faint">Last saved values are pre-filled above — unsaved edits are only local until you click Save.</span>
+      </div>
+    </div>
+  );
+}
+
 function RiskMetric({ label, value, tone, signed }) {
-  const color = tone === "gain" ? "var(--c-gain)" : tone === "loss" ? "var(--c-loss)" : "var(--c-text)";
+  const color = tone === "gain" ? "var(--c-gain)" : tone === "loss" ? "var(--c-loss)" : tone === "warn" ? "var(--c-warn)" : "var(--c-text)";
   return (
     <div>
       <div className="text-[10.5px] text-muted mb-0.5 whitespace-nowrap">{label}</div>
@@ -644,7 +696,7 @@ function EmptyState({ label, sub, live }) {
   return (
     <motion.div
       initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-      className="rounded-[var(--radius-lg)] py-9 px-5 text-center flex flex-col items-center gap-2"
+      className="rounded-[var(--radius-md)] py-9 px-5 text-center flex flex-col items-center gap-2"
       style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}
     >
       <div className="w-9 h-9 rounded-full flex items-center justify-center mb-0.5" style={{ background: "var(--c-surface-3)" }}>
@@ -811,8 +863,11 @@ function PositionRow({ p }) {
           </button>
         </td>
         <td className="py-2.5 pr-3 text-[11px]">
-          <div className="n">{p.expiry ?? "—"}</div>
-          <div className="text-[10px] text-faint n">{formatDateTime(p.created_at) ?? "—"}</div>
+          {/* Trade-taken date is primary here (bold, dark) — far more
+              relevant to a quick scan of "what's happening" than expiry;
+              expiry is still right here, just visually secondary. */}
+          <div className="n font-medium text-ink">{formatDateTime(p.created_at) ?? "—"}</div>
+          <div className="text-[10px] text-faint n">Exp {p.expiry ?? "—"}</div>
         </td>
         <td className="py-2.5 pr-3 text-right">
           <div className="n text-[11.5px]">{inr(p.net_credit)}</div>
@@ -886,7 +941,6 @@ export default function OptionsAutoTrader() {
   const [dailyStats, setDailyStats] = useState(null);
   const [clearingLock, setClearingLock] = useState(false);
   const [mobileTab, setMobileTab] = useState("portfolio"); // portfolio | calendar | activity
-  const [descOpen, setDescOpen] = useState(false);
   const [hideAmounts, setHideAmounts] = useState(false);
   const [realFunds, setRealFunds] = useState(null);
   const [growwRealFunds, setGrowwRealFunds] = useState(null);
@@ -1093,13 +1147,12 @@ export default function OptionsAutoTrader() {
       <MarketStrip indices={indices} />
       <RotatingTicker indices={indices} />
 
-      {/* ── Execution mode: premium segmented control. Mobile is a single
-          slim row — no label, no filled status pill, just the control and
-          a tiny muted status word — desktop keeps the fuller label +
-          sentence + info toggle since it has the room. ── */}
-      <div className="flex items-center gap-2.5 sm:gap-3 flex-wrap py-2 sm:py-2.5 mb-3 px-3 rounded-[var(--radius-md)] order-[40] sm:order-[30]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)", boxShadow: "var(--e-1)" }}>
-        <span className="hidden sm:inline text-[11px] font-semibold text-muted shrink-0">Execution Mode</span>
-        <div className="seg-track flex-1 sm:flex-initial">
+      {/* ── Execution mode: mobile-only compact segmented control — a
+          single slim row, no label, no filled status pill. Desktop's mode
+          control lives in UtilityBar below instead (broker + mode +
+          settings together, one slim utility row, not two stacked cards). ── */}
+      <div className="sm:hidden flex items-center gap-2.5 flex-wrap py-2 mb-3 px-3 rounded-[var(--radius-md)] order-[40]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)", boxShadow: "var(--e-1)" }}>
+        <div className="seg-track flex-1">
           {["OFF", "PAPER", "SHADOW", "AUTO"].map((mode) => (
             <motion.button key={mode} whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
               role="tab" aria-selected={settings?.execution_mode === mode} data-on={settings?.execution_mode === mode}
@@ -1119,49 +1172,29 @@ export default function OptionsAutoTrader() {
           ))}
         </div>
         {settings?.execution_mode && settings.execution_mode !== "OFF" && (
-          <>
-            {/* Desktop: full sentence + expandable "what is this" info. */}
-            <span className="hidden sm:inline-flex text-[10.5px] font-semibold px-2 py-1 rounded-[var(--radius-sm)] items-center gap-1.5" style={{ background: modeColor.bg, color: modeColor.fg }}>
-              {settings.execution_mode === "AUTO" ? "Live decisions · real broker orders"
-                : settings.execution_mode === "SHADOW" ? "Live decisions · simulated fills · zero broker orders"
-                : "Live decisions · paper fills · zero broker orders"}
-              <button onClick={() => setDescOpen((v) => !v)} className="opacity-70 hover:opacity-100" aria-label="More about this mode" title="What is this?">
-                <Info size={12} weight="bold" />
-              </button>
-            </span>
-            {/* Mobile: a plain muted status word, no filled pill — reads as
-                a caption on the control, not a second competing chip. */}
-            <span className="sm:hidden text-[10px] font-medium text-muted shrink-0 w-full text-center -mt-0.5">
-              {settings.execution_mode === "AUTO" ? "Real broker orders"
-                : settings.execution_mode === "SHADOW" ? "Simulated fills"
-                : "Simulated fills"}
-            </span>
-          </>
+          <span className="text-[10px] font-medium text-muted shrink-0 w-full text-center -mt-0.5">
+            {settings.execution_mode === "AUTO" ? "Real broker orders"
+              : settings.execution_mode === "SHADOW" ? "Simulated fills"
+              : "Simulated fills"}
+          </span>
         )}
       </div>
 
-      {/* ── Broker & Capital: merged connection + live balance card, desktop
-          only — mobile gets MobileBrokerBar (top) + MobileCapitalCard
-          (below the portfolio hero) instead. Kite stays wired in for
-          market data/historical regardless of which broker is active —
-          Groww's own 1-minute history only covers 3 months, it can't
-          replace that. ── */}
-      <div className="hidden sm:block sm:order-[40]">
-        <BrokerCapitalCard
-          settings={settings} growwStatus={growwStatus} growwConnecting={growwConnecting}
-          connectGroww={connectGroww} setActiveBroker={setActiveBroker} saving={saving}
-          realFunds={realFunds} growwRealFunds={growwRealFunds}
-          showAllModes={showAllModes} setShowAllModes={setShowAllModes}
-        />
-      </div>
-
-      {descOpen && (
-        <p className="hidden sm:block sm:order-[50] text-[11px] text-muted mb-3 max-w-[80ch] px-1">
-          Defined-risk options selling (Iron Condor / Bull Put Spread / Bear Call Spread), decided from a live chain: skew-based
-          strategy selection, strike optimization ranked by expected value per unit of risk, expiry selection, and a 0-100 trade
-          quality score gate. Runs on its own 30-minute cron against live Kite data — this page only displays the result, it
-          doesn't trigger a scan. PAPER and SHADOW modes: no real order is ever placed.
-        </p>
+      {/* ── Utility Bar: broker + mode + settings, one slim flat row —
+          desktop only. Mobile gets MobileBrokerBar (top) + the compact
+          execution-mode row above + MobileCapitalCard (below the
+          portfolio hero) instead. ── */}
+      <UtilityBar
+        settings={settings} growwStatus={growwStatus} growwConnecting={growwConnecting}
+        connectGroww={connectGroww} setActiveBroker={setActiveBroker} saving={saving}
+        setExecutionMode={setExecutionMode}
+        settingsOpen={settingsOpen} setSettingsOpen={setSettingsOpen}
+        showAllModes={showAllModes} setShowAllModes={setShowAllModes}
+      />
+      {settingsOpen && (
+        <div className="hidden sm:block sm:order-[35] mb-3 p-3 rounded-[var(--radius-md)]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+          <SettingsFields draft={draft} setField={setField} saving={saving} saveSettings={saveSettings} />
+        </div>
       )}
 
       {killSwitchResult && (
@@ -1185,50 +1218,28 @@ export default function OptionsAutoTrader() {
         </div>
       )}
 
-      {/* ── Settings: collapsed by default, risk-parameter fields only (mode moved above, always visible) ── */}
-      <div className="rounded-[var(--radius-md)] mb-4 order-[80] sm:order-[80]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
-        <button onClick={() => setSettingsOpen((v) => !v)} className="w-full flex items-center gap-3 sm:flex-wrap p-3 text-left">
+      {/* ── Settings: mobile-only accordion (desktop's trigger lives in
+          UtilityBar, fields render just below it there) — collapsed by
+          default, risk-parameter fields only. Ordered AFTER positions on
+          mobile per the redesign brief (operational detail, not primary
+          content the user opens the page to see). ── */}
+      <div className="sm:hidden rounded-[var(--radius-md)] mb-4 order-[90]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+        <button onClick={() => setSettingsOpen((v) => !v)} className="w-full flex items-center gap-3 p-3 text-left">
           <Gear size={14} weight="bold" className="text-muted shrink-0" />
           <span className="text-[11.5px] font-semibold">Risk &amp; Strategy Settings</span>
-          <span className="hidden sm:inline text-[10.5px] text-faint">Reserved fund {inr(settings?.reserved_fund ?? 0)}</span>
           <span className="flex-1" />
           {settingsOpen ? <CaretUp size={14} className="text-muted shrink-0" /> : <CaretDown size={14} className="text-muted shrink-0" />}
         </button>
 
         {settingsOpen && (
           <div className="px-3 pb-3 pt-1" style={{ borderTop: "1px solid var(--c-line)" }}>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
-              {EDITABLE_GROUPS.map((group) => (
-                <div key={group.title} className="p-2.5 rounded-[var(--radius-sm)]" style={{ background: "var(--c-surface-2)" }}>
-                  <div className="text-[10.5px] font-semibold text-muted mb-1.5">{group.title}</div>
-                  <div className="flex flex-col gap-1.5">
-                    {group.fields.map((f) => (
-                      <label key={f.key} className="flex items-center justify-between gap-2 text-[11px]">
-                        <span className="text-ink2">{f.label}</span>
-                        <input
-                          type="number" step={f.step} min={f.min} max={f.max}
-                          value={draft[f.key] ?? ""}
-                          onChange={(e) => setField(f.key, e.target.value)}
-                          className="w-[76px] px-1.5 py-0.5 rounded-[6px] n text-[11px] text-right"
-                          style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}
-                        />
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="flex items-center gap-2.5 mt-3">
-              <button onClick={saveSettings} disabled={saving} className="topstep text-[11.5px]">{saving ? "Saving…" : "Save Settings"}</button>
-              <span className="text-[10.5px] text-faint">Last saved values are pre-filled above — unsaved edits are only local until you click Save.</span>
-            </div>
+            <SettingsFields draft={draft} setField={setField} saving={saving} saveSettings={saveSettings} />
           </div>
         )}
       </div>
 
       {loading ? (
-        <div className="rounded-[var(--radius-lg)] h-[92px] mb-4 skeleton order-[60] sm:order-[90]" />
+        <div className="rounded-[var(--radius-md)] h-[92px] mb-4 skeleton order-[60] sm:order-[90]" />
       ) : error ? (
         <div className="flex gap-2.5 px-4 py-3.5 rounded-[var(--radius-md)] order-[60] sm:order-[90]" style={{ border: "1px solid var(--c-warn)", background: "var(--c-warn-soft)" }}>
           <Info size={16} weight="duotone" className="shrink-0 mt-px text-warn" />
@@ -1237,12 +1248,12 @@ export default function OptionsAutoTrader() {
       ) : (
         <>
           <div className="order-[60] sm:order-[90]">
-            <RiskCommandBar positions={visiblePositions} settings={settings} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} />
+            <RiskCommandBar positions={visiblePositions} settings={settings} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} realFunds={realFunds} growwRealFunds={growwRealFunds} />
           </div>
 
           <MobileCapitalCard settings={settings} realFunds={realFunds} growwRealFunds={growwRealFunds} hideAmounts={hideAmounts} setHideAmounts={setHideAmounts} />
 
-          <div className="order-[90] sm:order-[100]">
+          <div className="order-[80] sm:order-[100]">
             {visiblePositions.active.length === 0 && visiblePositions.closed.length === 0 ? (
               <EmptyState
                 label="No active positions"
@@ -1279,12 +1290,12 @@ export default function OptionsAutoTrader() {
             </div>
           )}
           {visiblePositions.active.length === 0 && visiblePositions.closed.length === 0 ? null : (
-            <div className="hidden sm:block overflow-x-auto rounded-[var(--radius-lg)] sm:order-[130]" style={{ border: "1px solid var(--c-line)" }}>
+            <div className="hidden sm:block overflow-x-auto rounded-[var(--radius-md)] sm:order-[130]" style={{ border: "1px solid var(--c-line)" }}>
               <table className="w-full text-[12px]">
                 <thead>
                   <tr className="text-muted text-left" style={{ background: "var(--c-surface-2)" }}>
                     <th className="font-medium py-2 pl-4 pr-2">Instrument</th>
-                    <th className="font-medium py-2 pr-3">Expiry / Entry</th>
+                    <th className="font-medium py-2 pr-3">Trade Taken</th>
                     <th className="font-medium py-2 pr-3 text-right">Credit / Payoff</th>
                     <th className="font-medium py-2 pr-3 text-right">Margin</th>
                     <th className="font-medium py-2 pr-3">Risk : Reward</th>

@@ -507,6 +507,94 @@ function makeGrowwOrderPlacer(token: string): LiveOrderPlacer {
 }
 
 /**
+ * Real, non-zero-quantity F&O positions via Groww's own book — confirmed
+ * shape against the live connected account (handleGrowwProbe):
+ * GET /v1/positions/user?segment=FNO returns { payload: { positions: [] } },
+ * a real array under a wrapper key, NOT the singular object the community
+ * SDK's TypeScript typing implied (that typing was explicitly not trusted
+ * for this money-critical code — see this file's Groww section header).
+ *
+ * Sign convention: Groww's per-symbol row carries separate
+ * debit_quantity/credit_quantity counters rather than Kite's single signed
+ * quantity, so net signed quantity is derived as
+ * (debit_quantity - credit_quantity) — positive meaning net long, mirroring
+ * Kite's convention so reconcile() (brokerReconciliation.ts) needs no
+ * broker-specific branch. UNVERIFIED against a real non-zero position (the
+ * live account had zero positions when this was built) — worth a second
+ * look the first time a real Groww position actually exists.
+ */
+async function fetchGrowwBrokerPositions(token: string): Promise<BrokerPosition[] | null> {
+  try {
+    const payload = await growwFetch('/v1/positions/user?segment=FNO', { token });
+    const positions: any[] = payload?.positions ?? [];
+    return positions
+      .map((p) => ({
+        tradingsymbol: String(p.trading_symbol),
+        quantity: (Number(p.debit_quantity) || 0) - (Number(p.credit_quantity) || 0),
+      }))
+      .filter((p) => p.quantity !== 0);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Maps Groww's real OrderStatus enum (confirmed from Groww's own published
+ * SDK source — see queryGrowwOrderDetail above) onto this codebase's
+ * generic BrokerOrderStatus. CANCELLATION_REQUESTED is deliberately mapped
+ * to OPEN, not CANCELLED — the cancellation hasn't actually been confirmed
+ * yet, so treating it as already-cancelled would be assuming an outcome
+ * that hasn't happened.
+ */
+function mapGrowwOrderStatus(rawStatus: string | undefined, filledQuantity: number, requestedQuantity: number): BrokerOrder['status'] {
+  switch (rawStatus) {
+    case 'REJECTED': case 'FAILED': return 'REJECTED';
+    case 'CANCELLED': return 'CANCELLED';
+    case 'TRIGGER_PENDING': return 'TRIGGER PENDING';
+    case 'COMPLETED': case 'EXECUTED':
+      if (filledQuantity > 0 && filledQuantity === requestedQuantity) return 'COMPLETE';
+      if (filledQuantity > 0 && filledQuantity < requestedQuantity) return 'PARTIALLY FILLED';
+      return 'UNKNOWN';
+    case 'NEW': case 'ACKED': case 'APPROVED': case 'MODIFICATION_REQUESTED':
+    case 'DELIVERY_AWAITED': case 'CANCELLATION_REQUESTED':
+      return 'OPEN';
+    default:
+      return 'UNKNOWN';
+  }
+}
+
+/**
+ * Today's F&O orders via Groww's own book — confirmed shape
+ * (GET /v1/order/list?segment=FNO&page=&page_size=) returns
+ * { payload: { order_list: [] } }. Unlike Kite's /orders (inherently
+ * scoped to the current trading day), Groww's endpoint has no date-range
+ * parameter, so this filters client-side by trade_date, bounded to one
+ * page of 100 rows — a real limitation for a personal account's order
+ * volume, not a fabricated one.
+ */
+async function fetchGrowwBrokerOrdersToday(token: string, todayIST: string): Promise<BrokerOrder[] | null> {
+  try {
+    const payload = await growwFetch(`/v1/order/list?segment=FNO&page=0&page_size=100`, { token });
+    const orders: any[] = payload?.order_list ?? [];
+    return orders
+      .filter((o) => String(o.trade_date ?? '').slice(0, 10) === todayIST)
+      .map((o) => {
+        const filledQuantity = Number(o.filled_quantity) || 0;
+        const requestedQuantity = Number(o.quantity) || 0;
+        return {
+          orderId: String(o.groww_order_id),
+          tradingsymbol: String(o.trading_symbol),
+          status: mapGrowwOrderStatus(o.order_status, filledQuantity, requestedQuantity),
+          transactionType: o.transaction_type === 'SELL' ? 'SELL' as const : 'BUY' as const,
+          quantity: requestedQuantity, filledQuantity,
+        };
+      });
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Real available funds for F&O (the "equity" segment covers NFO/BFO
  * derivatives on Kite) — checked independently of the user-set
  * reserved_fund setting, which is a self-declared allocation, not a live
@@ -575,13 +663,20 @@ async function fetchBrokerOrdersToday(token: string, apiKey: string): Promise<Br
     and any still-open (non-terminal) order intents, ALL account-wide (not
     scoped to one symbol) — a broker-state disagreement on ANY symbol blocks
     ALL new AUTO entries, per Task 3's "BLOCK ALL NEW AUTO ENTRIES". */
-async function fetchDbReconciliationInputs(supabase: SupabaseClient): Promise<{
+async function fetchDbReconciliationInputs(supabase: SupabaseClient, broker: 'KITE' | 'GROWW'): Promise<{
   dbActivePositions: DbPositionSummary[]; dbPendingReconciliation: DbPositionSummary[];
   openIntents: Array<{ id: string; symbol: string; status: 'CLAIMED' | 'EXECUTING' | 'ABANDONED'; intentKey: string; ageMs: number }>;
 }> {
+  // Scoped to the broker actually asking (a position's `broker` is
+  // recorded once at open and never changes — see migration 015 — so this
+  // is the correct join key, not the current active_broker setting). This
+  // matters as soon as ANY Groww position exists: without this filter,
+  // Kite's own reconciliation branch would try to match a Groww-held leg
+  // against Kite's order/position book and misclassify it as
+  // DB_POSITION_MISSING_AT_BROKER, wrongly blocking all Kite AUTO entries.
   const toSummaries = async (statuses: string[]): Promise<DbPositionSummary[]> => {
     const { data: positions } = await supabase.from('options_autotrade_positions')
-      .select('id,symbol,expiry').in('status', statuses).eq('execution_mode', 'AUTO');
+      .select('id,symbol,expiry').in('status', statuses).eq('execution_mode', 'AUTO').eq('broker', broker);
     const rows = positions ?? [];
     if (!rows.length) return [];
     const ids = rows.map((p: any) => p.id);
@@ -1298,25 +1393,48 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
 
   // Broker reconciliation gate (QUANT_AUDIT.md Task 3) — AUTO only, and
   // account-wide (not scoped to this one symbol): a disagreement between
-  // this system's own records and Kite's actual order/position book on
-  // ANY symbol blocks EVERY new AUTO entry this cycle, regardless of
-  // which symbol is being scanned right now. This never touches an
-  // existing position — it only refuses to add MORE exposure while the
-  // broker's true state is uncertain.
+  // this system's own records and the active broker's actual order/
+  // position book on ANY symbol blocks EVERY new AUTO entry this cycle,
+  // regardless of which symbol is being scanned right now. This never
+  // touches an existing position — it only refuses to add MORE exposure
+  // while the broker's true state is uncertain.
   //
-  // This gate only knows how to reconcile against KITE's order/position
-  // book. A real order routed through Groww has NO equivalent
-  // reconciliation check built yet — rather than silently skip this
-  // protection for Groww (which would mean a real Groww order could fire
-  // with zero duplicate-order safety net), this fails closed: refuses
-  // every Groww-routed AUTO entry at this gate until a real Groww
-  // reconciliation path exists, exactly like an unreachable broker would.
+  // This gate reconciles against whichever broker is actually routing real
+  // orders this cycle — Kite's own order/position book for Kite, Groww's
+  // own for Groww (see fetchGrowwBrokerPositions/fetchGrowwBrokerOrdersToday
+  // above) — using the SAME unmodified reconcile() function either way.
   if (routesRealOrdersThroughGroww) {
-    await log('error', `AUTO (Groww): no broker-reconciliation check exists for Groww yet — refusing this entry rather than placing a real order with no duplicate-order safety net.`);
-    res.status(200).json({ ok: true, action: decision.action, opened: false, skipped: 'groww_reconciliation_not_implemented', diagnostics });
-    return;
-  }
-  if (isLive) {
+    if (!growwToken) {
+      await event('BROKER_STATE_AMBIGUOUS', { reason: 'no_groww_session' });
+      await log('error', `AUTO (Groww): no Groww session — refusing all new Groww AUTO entries this cycle.`);
+      res.status(200).json({ ok: true, action: decision.action, opened: false, skipped: 'broker_state_unavailable', diagnostics });
+      return;
+    }
+    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const [brokerPositions, brokerOrders] = await Promise.all([
+      fetchGrowwBrokerPositions(growwToken),
+      fetchGrowwBrokerOrdersToday(growwToken, todayIST),
+    ]);
+    if (brokerPositions === null || brokerOrders === null) {
+      await event('BROKER_STATE_AMBIGUOUS', { reason: 'fetch_failed' });
+      await log('error', `AUTO (Groww): could not verify broker positions/orders for reconciliation — refusing all new AUTO entries this cycle.`);
+      res.status(200).json({ ok: true, action: decision.action, opened: false, skipped: 'broker_state_unavailable', diagnostics });
+      return;
+    }
+    const { dbActivePositions, dbPendingReconciliation, openIntents } = await fetchDbReconciliationInputs(supabase, 'GROWW');
+    const reconciliation = reconcile({ dbActivePositions, dbPendingReconciliation, openIntents, brokerPositions, brokerOrders });
+    if (reconciliation.status === 'MISMATCH' || reconciliation.status === 'RECONCILIATION_REQUIRED') {
+      await event('RECONCILIATION_REQUIRED', { reconciliationStatus: reconciliation.status, findingCount: reconciliation.findings.length });
+      await log('error', `AUTO (Groww): broker reconciliation is ${reconciliation.status} — BLOCKING all new AUTO entries until resolved.`,
+        { findings: reconciliation.findings });
+      res.status(200).json({
+        ok: true, action: decision.action, opened: false, skipped: 'reconciliation_required',
+        reconciliation, diagnostics,
+      });
+      return;
+    }
+    await event('BROKER_RECONCILED', { reconciliationStatus: reconciliation.status });
+  } else if (isLive) {
     const [brokerPositions, brokerOrders] = await Promise.all([
       fetchBrokerPositions(token, apiKey),
       fetchBrokerOrdersToday(token, apiKey),
@@ -1327,7 +1445,7 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
       res.status(200).json({ ok: true, action: decision.action, opened: false, skipped: 'broker_state_unavailable', diagnostics });
       return;
     }
-    const { dbActivePositions, dbPendingReconciliation, openIntents } = await fetchDbReconciliationInputs(supabase);
+    const { dbActivePositions, dbPendingReconciliation, openIntents } = await fetchDbReconciliationInputs(supabase, 'KITE');
     const reconciliation = reconcile({ dbActivePositions, dbPendingReconciliation, openIntents, brokerPositions, brokerOrders });
     if (reconciliation.status === 'MISMATCH' || reconciliation.status === 'RECONCILIATION_REQUIRED') {
       await event('RECONCILIATION_REQUIRED', { reconciliationStatus: reconciliation.status, findingCount: reconciliation.findings.length });

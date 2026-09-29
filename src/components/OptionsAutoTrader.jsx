@@ -668,7 +668,7 @@ function PositionCardMobile({ p, hideAmounts, isFirst }) {
     <div className={`rounded-[var(--radius-md)] overflow-hidden ${isFirst ? "" : "mt-2.5"}`}
       style={{
         border: "1px solid var(--c-line)",
-        background: isActive ? "var(--c-surface)" : "rgba(20,30,55,0.045)",
+        background: isActive ? "var(--c-surface)" : "rgba(20,30,55,0.022)",
         boxShadow: isActive ? "inset 2px 0 0 rgba(10,143,98,0.4)" : "none",
       }}>
       <button onClick={() => setExpanded((v) => !v)} className="w-full text-left p-3">

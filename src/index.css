@@ -1036,7 +1036,7 @@ tr.is-atm-row .ch-cell { border-top: 1px solid color-mix(in srgb, var(--c-accent
   box-shadow: inset 2px 0 0 rgba(10, 143, 98, 0.4);
 }
 .oat-row[data-status="closed"]:not(:hover):not([data-selected="true"]) {
-  background: rgba(20, 30, 55, 0.045);
+  background: rgba(20, 30, 55, 0.022);
 }
 
 .oat-sticky-head {

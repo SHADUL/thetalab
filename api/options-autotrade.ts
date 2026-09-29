@@ -79,7 +79,7 @@ import { classifyMarketRegime, type MarketRegimeResult } from '../src/quant/anal
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
-import { ProxyAgent } from 'undici';
+import { ProxyAgent, fetch as undiciFetch } from 'undici';
 import { decideTrade, type DecisionThresholds } from '../src/quant/strategies/decisionGate.ts';
 import { computePositionSize, type PortfolioState, type OpenPositionSummary } from '../src/quant/strategies/positionSizing.ts';
 import { runPreTradeValidation } from '../src/quant/execution/preTradeValidation.ts';
@@ -371,16 +371,35 @@ function getGrowwProxyAgent(): ProxyAgent | null {
   return growwProxyAgent;
 }
 
-/** Raw fetch wrapper for Groww's REST API — same throw-on-error, return-payload-only shape as kiteFetch, for the same reason (every caller gets one consistent try/catch pattern instead of re-checking `status`/`error` at every call site). Routed through the static-IP proxy (see getGrowwProxyAgent) since this is exactly the traffic SEBI's IP-whitelisting rule applies to. */
+/**
+ * Raw fetch wrapper for Groww's REST API — same throw-on-error, return-
+ * payload-only shape as kiteFetch, for the same reason (every caller gets
+ * one consistent try/catch pattern instead of re-checking `status`/`error`
+ * at every call site). Routed through the static-IP proxy (see
+ * getGrowwProxyAgent) since this is exactly the traffic SEBI's
+ * IP-whitelisting rule applies to.
+ *
+ * Uses undici's OWN `fetch`, never Node's global `fetch`, whenever a
+ * dispatcher is passed — Node's global fetch runs on an INTERNAL undici
+ * instance bundled into the runtime, which is a different module instance
+ * from the separately npm-installed `undici` package this file's
+ * ProxyAgent comes from. Passing a `dispatcher` built from one undici
+ * instance into the other's fetch throws `UND_ERR_INVALID_ARG: invalid
+ * onRequestStart method` — confirmed by reproducing it locally. Both the
+ * ProxyAgent and the fetch call must come from the same undici instance.
+ */
 async function growwFetch(path: string, opts: { method?: string; token: string; jsonBody?: unknown }): Promise<any> {
   const { method = 'GET', token, jsonBody } = opts;
   const dispatcher = getGrowwProxyAgent();
-  const resp = await fetch(`https://api.groww.in${path}`, {
+  const init = {
     method,
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: jsonBody !== undefined ? JSON.stringify(jsonBody) : undefined,
     ...(dispatcher ? { dispatcher } : {}),
-  } as RequestInit);
+  };
+  const resp = dispatcher
+    ? await undiciFetch(`https://api.groww.in${path}`, init as Parameters<typeof undiciFetch>[1])
+    : await fetch(`https://api.groww.in${path}`, init as RequestInit);
   const json = await resp.json().catch(() => null);
   if (!resp.ok || json?.status === 'FAILURE') {
     throw new Error(json?.error?.message || `Groww API error (${resp.status}) on ${path}`);

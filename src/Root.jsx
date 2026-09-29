@@ -58,25 +58,31 @@ export default function Root() {
         <span className="text-[12px] font-bold tracking-[-0.02em]">
           theta<span className="text-accent">lab</span>
         </span>
-        <select className="inst-sel n sm:hidden" aria-label="Section" value={section}
-          onChange={(e) => setSection(e.target.value)}>
-          {SECTIONS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
-        </select>
+        {/* A selector for exactly one option is just noise — hide it
+            entirely while ONLY_OPTIONS_AUTO is on, same one-flag revert. */}
+        {SECTIONS.length > 1 && (
+          <>
+            <select className="inst-sel n sm:hidden" aria-label="Section" value={section}
+              onChange={(e) => setSection(e.target.value)}>
+              {SECTIONS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+            </select>
 
-        {/* Wrapped in a plain div rather than putting "hidden sm:flex" directly
-            on .seg-track — that class sets its own unconditional `display:
-            flex` in index.css at equal specificity to Tailwind's `.hidden`,
-            so whichever rule loads later in the stylesheet wins regardless
-            of breakpoint. A wrapper with no competing custom class sidesteps
-            the fight entirely. */}
-        <div className="hidden sm:block">
-          <div className="seg-track" role="tablist" aria-label="Section">
-            {SECTIONS.map((s) => (
-              <button key={s.value} role="tab" aria-selected={section === s.value} data-on={section === s.value}
-                onClick={() => setSection(s.value)} className="seg">{s.label}</button>
-            ))}
-          </div>
-        </div>
+            {/* Wrapped in a plain div rather than putting "hidden sm:flex" directly
+                on .seg-track — that class sets its own unconditional `display:
+                flex` in index.css at equal specificity to Tailwind's `.hidden`,
+                so whichever rule loads later in the stylesheet wins regardless
+                of breakpoint. A wrapper with no competing custom class sidesteps
+                the fight entirely. */}
+            <div className="hidden sm:block">
+              <div className="seg-track" role="tablist" aria-label="Section">
+                {SECTIONS.map((s) => (
+                  <button key={s.value} role="tab" aria-selected={section === s.value} data-on={section === s.value}
+                    onClick={() => setSection(s.value)} className="seg">{s.label}</button>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
       </div>
       <div className="flex-1 min-h-0">
         {section === "options" ? <App />

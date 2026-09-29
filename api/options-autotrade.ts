@@ -951,8 +951,19 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   // through this same conversion, not compare the raw epoch value.
   const expiryDateStr = new Date(decision.expiryEvaluation.expiry).toISOString().slice(0, 10);
 
-  // 5. Portfolio state from currently ACTIVE paper positions.
-  const { data: openRows } = await supabase.from('options_autotrade_positions').select('*').eq('status', 'ACTIVE');
+  // 5. Portfolio state from currently ACTIVE positions IN THIS SAME MODE
+  // only. AUTO/PAPER/SHADOW are independent simulated books everywhere
+  // else in this file (separate P&L, separate daily-stats risk lock,
+  // separate telemetry) — this query previously had no execution_mode
+  // filter at all (a leftover from before SHADOW/AUTO existed, per its
+  // own now-stale "ACTIVE paper positions" comment), which meant PAPER's
+  // open positions were silently counting against SHADOW's (and AUTO's)
+  // portfolio-risk caps — maxPortfolioRiskPct, maxMarginUtilizationPct,
+  // maxCorrelatedGroupRiskPct, maxPositions — below. Found 2026-09-29 when
+  // 2 ACTIVE PAPER positions (₹2,44,864 margin) were blocking every SHADOW
+  // entry via maxMarginUtilization, despite zero ACTIVE SHADOW positions
+  // existing.
+  const { data: openRows } = await supabase.from('options_autotrade_positions').select('*').eq('status', 'ACTIVE').eq('execution_mode', modeLabel);
   const openPositions: OpenPositionSummary[] = (openRows ?? []).map((p: any) => ({
     underlyingGroup: p.symbol,
     maxLoss: Number(p.max_loss) || 0,

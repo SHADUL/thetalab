@@ -3475,6 +3475,23 @@ async function handleGrowwProbe(req: any, res: any, supabase: SupabaseClient) {
     }
   }
 
+  // Real, read-only checks for the reconciliation gate build-out — need
+  // the ACTUAL response shape (array vs. single object, wrapper key) for
+  // both endpoints before writing any reconciliation code against them.
+  try {
+    const r = await fetch('https://api.groww.in/v1/positions/user?segment=FNO', { headers });
+    results.userPositions = { status: r.status, body: await r.json().catch(() => null) };
+  } catch (err: any) {
+    results.userPositions = { error: err.message };
+  }
+
+  try {
+    const r = await fetch('https://api.groww.in/v1/order/list?segment=FNO&page=0&page_size=25', { headers });
+    results.orderList = { status: r.status, body: await r.json().catch(() => null) };
+  } catch (err: any) {
+    results.orderList = { error: err.message };
+  }
+
   res.status(200).json({ ok: true, results });
 }
 

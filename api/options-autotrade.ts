@@ -3513,6 +3513,18 @@ async function handleGrowwRealFunds(req: any, res: any, supabase: SupabaseClient
  * months total, it cannot replace the multi-year archive this app
  * already backfilled from Kite.
  */
+/**
+ * This used to be a plain, unproxied fetch — it kept working fine even
+ * after growwFetch's other real calls (funds, margin, orders) started
+ * needing the static-IP proxy, so it was deliberately left alone rather
+ * than routed through a proxy it didn't yet need (see this file's
+ * earlier history). That stopped being true at some point on
+ * 2026-09-30: the daily cron reconnect started failing with a flat
+ * HTTP 403 on this exact endpoint — consistent with Groww extending its
+ * SEBI-mandated static-IP enforcement (the same rule growwFetch already
+ * works around) to the token-mint endpoint too, not just order
+ * placement. Now routed through the same proxy for the same reason.
+ */
 async function mintGrowwAccessToken(): Promise<{ accessToken: string } | { error: string }> {
   const apiKey = process.env.GROWW_API_KEY;
   const apiSecret = process.env.GROWW_API_SECRET;
@@ -3522,11 +3534,16 @@ async function mintGrowwAccessToken(): Promise<{ accessToken: string } | { error
   const checksum = createHash('sha256').update(apiSecret + timestamp).digest('hex');
 
   try {
-    const resp = await fetch('https://api.groww.in/v1/token/api/access', {
+    const dispatcher = getGrowwProxyAgent();
+    const init = {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ key_type: 'approval', checksum, timestamp }),
-    });
+      ...(dispatcher ? { dispatcher } : {}),
+    };
+    const resp = dispatcher
+      ? await undiciFetch('https://api.groww.in/v1/token/api/access', init as Parameters<typeof undiciFetch>[1])
+      : await fetch('https://api.groww.in/v1/token/api/access', init as RequestInit);
     const body = await resp.json().catch(() => null);
     const accessToken = body?.token ?? body?.data?.token ?? body?.access_token ?? body?.data?.access_token;
     if (!resp.ok || !accessToken) {

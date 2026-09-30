@@ -1966,6 +1966,10 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
   const kitePriceSymbolFor = (p: any, l: any): string | null =>
     p.broker === 'GROWW' ? (kiteSymbolByGrowwLeg.get(`${p.id}|${l.id}`) ?? null) : l.tradingsymbol;
 
+  /** Real net credit actually collected at entry, from each leg's own recorded fill_price — the true broker-filled premium, not the scan-time quote (p.max_profit/net_credit). Same sign convention as cost-to-close: a SELL leg's fill is a credit (+), a BUY leg's fill is a debit (-). Only meaningful for AUTO, whose legs hold a real order's fill_price — PAPER/SHADOW never place a real order, so their fill_price is just the quote used to compute max_profit already, and max_profit remains their correct baseline. */
+  const actualFillCreditFromLegs = (legs: any[]): number =>
+    legs.reduce((sum, l) => sum + (l.side === 'SELL' ? 1 : -1) * Number(l.fill_price) * l.quantity, 0);
+
   // Batch every quote this run needs across ALL open positions at once —
   // every leg's (Kite) tradingsymbol plus each distinct symbol's index
   // quote key — rather than one Kite call per position, so API usage
@@ -2041,11 +2045,22 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
     }
 
     // Live mark-to-market P&L — persisted for EVERY position re-quoted this
-    // cycle, independent of whether it also triggers an exit below. Same
-    // formula the exit engine itself uses (maxProfit - currentCostToClose);
-    // this just records it rather than discarding it once the exit
-    // decision is made.
-    const unrealizedPnl = (Number(p.max_profit) || 0) - currentCostToClose;
+    // cycle, independent of whether it also triggers an exit below.
+    //
+    // AUTO positions use REAL entry fills (legs.fill_price, from the real
+    // broker order) as the credit baseline, not p.max_profit — max_profit
+    // is the scan-time theoretical premium, and a real order can fill far
+    // off that quote (confirmed live: a BANKNIFTY spread planned for
+    // ₹79.20/share of credit actually filled at ₹18.00/share — using
+    // max_profit there overstated P&L by ~₹14,700). PAPER/SHADOW never
+    // place a real order, so their fill_price already tracks the quote
+    // used for max_profit and max_profit remains the correct baseline —
+    // same formula the exit engine (evaluateExit) uses for its own
+    // theoretical profit-target math, untouched here.
+    const entryCreditBaseline = p.execution_mode === 'AUTO'
+      ? actualFillCreditFromLegs(legs)
+      : (Number(p.max_profit) || 0);
+    const unrealizedPnl = entryCreditBaseline - currentCostToClose;
     const { error: markErr } = await supabase.from('options_autotrade_positions').update({
       unrealized_pnl: unrealizedPnl, unrealized_pnl_updated_at: new Date().toISOString(),
     }).eq('id', p.id);
@@ -2131,7 +2146,7 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
         await log('error', `Position #${p.id}: marked CLOSE_FAILED — at least one real closing order did not confirm. This position will NOT be retried automatically; verify against the broker and resolve manually.`, undefined, p.execution_mode);
         continue;
       }
-      realizedPnl = (Number(p.max_profit) || 0) - actualCostToClose;
+      realizedPnl = actualFillCreditFromLegs(legs) - actualCostToClose;
     } else if (p.execution_mode === 'SHADOW') {
       // SHADOW exit (lifecycle-completion phase, Task 4/5/6/9/10). Same
       // trigger (evaluateExit, above) and same re-quoted quoteMap as every

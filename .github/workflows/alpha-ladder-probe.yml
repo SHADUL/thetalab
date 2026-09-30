@@ -4,10 +4,14 @@ name: Nifty Alpha Ladder Market-Data Probe
 # NIFTY_ALPHA_LADDER_MARKET_DATA_CAPABILITY_REPORT.md — never places,
 # modifies or cancels any order. Manual-dispatch only, kept for on-demand
 # re-verification (e.g. if Kite's depth/historical API shape ever changes).
-# Reuses the same OPTIONS_AUTOTRADE_CRON_SECRET shared-secret gate every
-# other server-triggered resource in this repo already uses — an
-# infrastructure concern, not strategy logic, so sharing it does not couple
-# Nifty Alpha Ladder's business logic to Options Auto-Trader's.
+#
+# Served from api/options-autotrade.ts, NOT a standalone
+# api/nifty-alpha-ladder.ts file — a standalone 12th Vercel function
+# confirmed live this session to break deployment on this project's Hobby
+# plan (built clean, failed at Vercel's "Deploying outputs" stage). This is
+# a shared-deployment-unit workaround only; the resource itself is fully
+# isolated Nifty Alpha Ladder code, same as VWAP Scalper's own resources
+# already coexisting in that file.
 on:
   workflow_dispatch: {}
 
@@ -17,6 +21,6 @@ jobs:
     steps:
       - name: Call the Nifty Alpha Ladder probe endpoint
         run: |
-          curl -sf -X GET "https://thetalab-beta.vercel.app/api/nifty-alpha-ladder?resource=probe" \
+          curl -sf -X GET "https://thetalab-beta.vercel.app/api/options-autotrade?resource=alpha-ladder-probe" \
             -H "Authorization: Bearer ${{ secrets.OPTIONS_AUTOTRADE_CRON_SECRET }}" \
             -w "\nHTTP %{http_code}\n"

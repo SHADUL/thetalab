@@ -3964,5 +3964,154 @@ export default async function handler(req: any, res: any) {
   if (resource === 'vwap-archive-backfill') return handleVwapArchiveBackfill(req, res, supabase);
   if (resource === 'start-forward-validation') return handleStartForwardValidation(req, res, supabase);
   if (resource === 'stop-forward-validation') return handleStopForwardValidation(req, res, supabase);
+  if (resource === 'alpha-ladder-probe') return handleAlphaLadderProbe(req, res, supabase);
   res.status(400).json({ error: 'bad_request', message: 'Unknown or missing ?resource=.' });
+}
+
+/* ================================================================== */
+/* Nifty Alpha Ladder (hedged133) — src/nifty-alpha-ladder/            */
+/*                                                                      */
+/* A third, completely separate strategy folded into this same file    */
+/* for the exact reason VWAP Scalper already is (see that section's own */
+/* header above): Vercel's Hobby plan hard-caps a deployment at 12      */
+/* serverless functions, confirmed the hard way this session — a        */
+/* twelfth standalone api/nifty-alpha-ladder.ts file deployed clean at   */
+/* the build step but failed at Vercel's "Deploying outputs" stage with  */
+/* no further detail, and reverting to zero new files immediately fixed  */
+/* it. Every handler below is fully additive and touches NO existing     */
+/* Options Auto-Trader or VWAP Scalper code, state, or table — it only   */
+/* shares this one physical deployment unit, exactly like VWAP Scalper   */
+/* already does. Business logic, database tables (alpha_ladder_*) and    */
+/* the always-on market-stream worker (Railway) remain fully isolated.   */
+/* ================================================================== */
+
+/**
+ * Read-only Kite capability probe (A1/A7 empirical resolution, spec §18 of
+ * NIFTY_ALPHA_LADDER_SPEC_RECONSTRUCTION.md and the Milestone 3
+ * instructions) — NEVER places, modifies or cancels anything. Resolves the
+ * nearest NIFTY future from Kite's own NFO instrument dump, inspects its
+ * live quote's depth shape (level count, whether an order-count field is
+ * present), resolves INDIA VIX's instrument_token from Kite's own NSE dump
+ * (never hardcoded), and checks historical-candle availability at
+ * 15minute/minute/day intervals.
+ */
+async function handleAlphaLadderProbe(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const apiKey = process.env.KITE_API_KEY;
+  if (!apiKey) { res.status(500).json({ error: 'server_misconfigured' }); return; }
+  const { data: session } = await supabase.from('kite_session').select('access_token').eq('id', 1).maybeSingle();
+  const token = session?.access_token;
+  if (!token) { res.status(200).json({ ok: true, skipped: 'no_kite_session' }); return; }
+
+  function unquote(cell: string): string {
+    return cell.length >= 2 && cell[0] === '"' && cell[cell.length - 1] === '"' ? cell.slice(1, -1) : cell;
+  }
+
+  function parseNiftyFutures(csvText: string): Array<{ tradingsymbol: string; instrument_token: number; expiry: string; lot_size: number | null }> {
+    const lines = csvText.split('\n');
+    if (!lines.length) return [];
+    const header = lines[0].split(',').map((c) => unquote(c.trim()));
+    const iToken = header.indexOf('instrument_token');
+    const iSymbol = header.indexOf('tradingsymbol');
+    const fromEnd = (name: string) => header.length - 1 - [...header].reverse().indexOf(name);
+    const iName = fromEnd('name');
+    const iExpiry = fromEnd('expiry');
+    const iLot = fromEnd('lot_size');
+    const iType = fromEnd('instrument_type');
+    const out: Array<{ tradingsymbol: string; instrument_token: number; expiry: string; lot_size: number | null }> = [];
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line.trim()) continue;
+      const cells = line.split(',').map((c) => unquote(c.trim()));
+      const back = (idx: number) => cells[cells.length - (header.length - idx)];
+      if (back(iName) !== 'NIFTY' || back(iType) !== 'FUT') continue;
+      out.push({ tradingsymbol: cells[iSymbol], instrument_token: Number(cells[iToken]), expiry: back(iExpiry), lot_size: Number(back(iLot)) || null });
+    }
+    return out.sort((a, b) => Date.parse(a.expiry) - Date.parse(b.expiry));
+  }
+
+  function findIndiaVixToken(csvText: string): { instrument_token: number; tradingsymbol: string } | null {
+    const lines = csvText.split('\n');
+    if (!lines.length) return null;
+    const header = lines[0].split(',').map((c) => unquote(c.trim()));
+    const iToken = header.indexOf('instrument_token');
+    const iSymbol = header.indexOf('tradingsymbol');
+    const iName = header.indexOf('name');
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line.trim()) continue;
+      const cells = line.split(',').map((c) => unquote(c.trim()));
+      if ((cells[iName] || '').toUpperCase() === 'INDIA VIX') return { instrument_token: Number(cells[iToken]), tradingsymbol: cells[iSymbol] };
+    }
+    return null;
+  }
+
+  async function kiteFetchLocal(path: string): Promise<any> {
+    const resp = await fetch(`https://api.kite.trade${path}`, { headers: { Authorization: `token ${apiKey}:${token}`, 'X-Kite-Version': '3' } });
+    const body = await resp.json().catch(() => null);
+    if (!resp.ok) throw new Error(`Kite ${path} -> HTTP ${resp.status}: ${JSON.stringify(body)}`);
+    return body;
+  }
+
+  const results: Record<string, unknown> = {};
+
+  let nearestFuture: ReturnType<typeof parseNiftyFutures>[number] | undefined;
+  try {
+    const resp = await fetch('https://api.kite.trade/instruments/NFO', { headers: { Authorization: `token ${apiKey}:${token}` } });
+    const csv = await resp.text();
+    const futures = parseNiftyFutures(csv);
+    const todayISO = new Date().toISOString().slice(0, 10);
+    nearestFuture = futures.find((f) => f.expiry >= todayISO);
+    results.niftyFutures = { status: resp.status, count: futures.length, nearest: nearestFuture ?? null };
+  } catch (err: any) {
+    results.niftyFutures = { error: err.message };
+  }
+
+  if (nearestFuture) {
+    try {
+      const quote = await kiteFetchLocal(`/quote?i=${encodeURIComponent(`NFO:${nearestFuture.tradingsymbol}`)}`);
+      const row = quote?.data?.[`NFO:${nearestFuture.tradingsymbol}`];
+      results.futuresQuote = {
+        hasDepth: Boolean(row?.depth),
+        bidLevels: row?.depth?.buy?.length ?? 0,
+        askLevels: row?.depth?.sell?.length ?? 0,
+        sampleBidLevel: row?.depth?.buy?.[0] ?? null,
+        sampleAskLevel: row?.depth?.sell?.[0] ?? null,
+        hasOrderCountField: row?.depth?.buy?.[0] ? 'orders' in row.depth.buy[0] : null,
+        lastPrice: row?.last_price ?? null,
+        lastTradeTime: row?.last_trade_time ?? null,
+      };
+    } catch (err: any) {
+      results.futuresQuote = { error: err.message };
+    }
+  }
+
+  let vixToken: { instrument_token: number; tradingsymbol: string } | null = null;
+  try {
+    const resp = await fetch('https://api.kite.trade/instruments/NSE', { headers: { Authorization: `token ${apiKey}:${token}` } });
+    const csv = await resp.text();
+    vixToken = findIndiaVixToken(csv);
+    results.vixInstrument = { status: resp.status, found: vixToken };
+  } catch (err: any) {
+    results.vixInstrument = { error: err.message };
+  }
+
+  if (vixToken) {
+    const today = new Date();
+    const from = new Date(today.getTime() - 2 * 86_400_000).toISOString().slice(0, 10);
+    const to = today.toISOString().slice(0, 10);
+    const vixHistorical: Record<string, unknown> = {};
+    for (const interval of ['15minute', 'minute', 'day']) {
+      try {
+        const candles = await kiteFetchLocal(`/instruments/historical/${vixToken.instrument_token}/${interval}?from=${from}&to=${to}`);
+        const rows: any[] = candles?.data?.candles ?? [];
+        vixHistorical[interval] = { count: rows.length, firstTwo: rows.slice(0, 2), lastTwo: rows.slice(-2) };
+      } catch (err: any) {
+        vixHistorical[interval] = { error: err.message };
+      }
+    }
+    results.vixHistorical = vixHistorical;
+  }
+
+  res.status(200).json({ ok: true, probedAt: new Date().toISOString(), results });
 }

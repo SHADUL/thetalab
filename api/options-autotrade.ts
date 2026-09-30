@@ -3544,10 +3544,15 @@ async function mintGrowwAccessToken(): Promise<{ accessToken: string } | { error
     const resp = dispatcher
       ? await undiciFetch('https://api.groww.in/v1/token/api/access', init as Parameters<typeof undiciFetch>[1])
       : await fetch('https://api.groww.in/v1/token/api/access', init as RequestInit);
-    const body = await resp.json().catch(() => null);
+    const rawText = await resp.text();
+    const body = (() => { try { return JSON.parse(rawText); } catch { return null; } })();
     const accessToken = body?.token ?? body?.data?.token ?? body?.access_token ?? body?.data?.access_token;
     if (!resp.ok || !accessToken) {
-      return { error: body?.message ?? `Groww token exchange failed (HTTP ${resp.status}).` };
+      // Surface Groww's ACTUAL response body verbatim (truncated) rather
+      // than a generic "HTTP 403" — this is what let a previous 403 here
+      // sit undiagnosed instead of pointing straight at the real cause.
+      const detail = body?.message ?? (rawText ? rawText.slice(0, 300) : null);
+      return { error: `Groww token exchange failed (HTTP ${resp.status})${detail ? `: ${detail}` : '.'}` };
     }
     return { accessToken };
   } catch (err: any) {

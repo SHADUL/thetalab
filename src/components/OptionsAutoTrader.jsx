@@ -104,6 +104,78 @@ function RotatingTicker({ indices }) {
 }
 
 /**
+ * One profile's own expandable section (migration 019): its own on/off
+ * switch right in the collapsed header, plus — once expanded — its own
+ * today's P&L, active-position count and lock state. Replaces the earlier
+ * single shared row of three small pills: the user asked to be able to
+ * "go inside one or two sections and turn it on and off" rather than
+ * flip switches on a compact strip with no detail behind them.
+ */
+function ProfileToggleCard({ profile, enabled, onToggle, saving, stats, activeCount, hideAmounts }) {
+  const [open, setOpen] = useState(false);
+  const color = MODE_COLOR[profile];
+  const fmt = (n) => (hideAmounts ? "••••••" : inr(n));
+  const realizedPnlToday = Number(stats?.realized_pnl) || 0;
+  return (
+    <div className="rounded-[var(--radius-md)] overflow-hidden flex-1 min-w-[150px]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+      <button type="button" onClick={() => setOpen((v) => !v)} className="w-full flex items-center gap-2 px-3 py-2.5 text-left">
+        <span className="text-[11.5px] font-bold flex-1 truncate">{profile}</span>
+        {stats?.locked && (
+          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0" style={{ background: "var(--c-warn-soft)", color: "var(--c-warn)" }}>LOCKED</span>
+        )}
+        <motion.button
+          whileTap={{ scale: 0.94 }}
+          onClick={(e) => { e.stopPropagation(); onToggle(!enabled); }}
+          disabled={saving} role="switch" aria-checked={enabled}
+          aria-label={`Turn ${profile} ${enabled ? "off" : "on"}`}
+          className="relative rounded-full shrink-0"
+          style={{
+            width: 34, height: 20,
+            background: enabled ? (profile === "AUTO" ? `linear-gradient(135deg, var(--oat-accent), var(--oat-accent-2))` : color.bg) : "var(--c-surface-3)",
+          }}
+        >
+          <motion.span animate={{ x: enabled ? 15 : 1 }} transition={{ type: "spring", stiffness: 500, damping: 32 }}
+            className="absolute top-[2px] rounded-full shadow-sm" style={{ width: 16, height: 16, background: "#fff" }} />
+        </motion.button>
+        {open ? <CaretUp size={11} weight="bold" className="text-faint shrink-0" /> : <CaretDown size={11} weight="bold" className="text-faint shrink-0" />}
+      </button>
+      {open && (
+        <div className="flex items-center gap-3 flex-wrap px-3 pb-2.5 pt-0.5 text-[10.5px] text-muted" style={{ borderTop: "1px solid var(--c-line)" }}>
+          <span>Today <strong className={`n ${realizedPnlToday >= 0 ? "text-gain" : "text-loss"}`}>{fmt(realizedPnlToday)}</strong></span>
+          <span>Active <strong className="n">{activeCount}</strong></span>
+          <span className="ml-auto">{profile === "AUTO" ? "Real broker orders" : "Simulated fills"}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Independent PAPER/SHADOW/AUTO execution profiles (migration 019) — any
+ * subset can be enabled at once, each running its own full scan/entry/exit
+ * cycle server-side. Shared between mobile and desktop (a responsive
+ * flex-wrap row), so this section only needs to be built once.
+ */
+function ExecutionProfilesPanel({ enabledProfiles, setProfileEnabled, saving, dailyStatsByMode, positions, hideAmounts }) {
+  return (
+    <div className="flex items-stretch gap-2 flex-wrap py-2 mb-3 order-[40]">
+      {["PAPER", "SHADOW", "AUTO"].map((profile) => (
+        <ProfileToggleCard
+          key={profile}
+          profile={profile}
+          enabled={enabledProfiles.includes(profile)}
+          onToggle={(v) => setProfileEnabled(profile, v)}
+          saving={saving}
+          stats={dailyStatsByMode[profile]}
+          activeCount={positions.active.filter((p) => (p.execution_mode ?? "PAPER") === profile).length}
+          hideAmounts={hideAmounts}
+        />
+      ))}
+    </div>
+  );
+}
+
+/**
  * Mobile-only top utility row — surfaces the broker toggle and connection
  * health BEFORE the page title, since on a small screen "which broker/
  * account am I about to trade real money on" is the first thing worth
@@ -154,7 +226,7 @@ function MobileBrokerBar({ settings, growwStatus, growwConnecting, connectGroww,
  */
 function UtilityBar({
   settings, growwStatus, growwConnecting, connectGroww, setActiveBroker, saving,
-  setProfileEnabled, enabledProfiles, settingsOpen, setSettingsOpen, showAllModes, setShowAllModes,
+  enabledProfiles, settingsOpen, setSettingsOpen, showAllModes, setShowAllModes,
 }) {
   const [brokerInfoOpen, setBrokerInfoOpen] = useState(false);
   const activeBroker = settings?.active_broker ?? "KITE";
@@ -196,44 +268,6 @@ function UtilityBar({
         </div>
 
         <div className="hidden lg:block w-px h-5" style={{ background: "var(--c-line)" }} />
-
-        {/* Execution profiles — independent on/off switches (migration 019):
-            any subset of PAPER/SHADOW/AUTO can be enabled at once, each
-            running its own full independent scan/entry/exit cycle. */}
-        <div className="flex items-center gap-2">
-          <span className="text-[10.5px] font-semibold text-muted shrink-0">Profiles</span>
-          <div className="seg-track">
-            {["PAPER", "SHADOW", "AUTO"].map((profile) => {
-              const on = enabledProfiles.includes(profile);
-              return (
-                <motion.button key={profile} whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
-                  role="switch" aria-checked={on}
-                  onClick={() => setProfileEnabled(profile, !on)} disabled={saving} className="seg"
-                  style={
-                    !on ? undefined
-                      // AUTO's on state gets a subtle gradient fill + soft
-                      // glow instead of a flat solid — the one "important live
-                      // state" the redesign brief allows a glow on. Every other
-                      // profile keeps the shared segmented-control's plain
-                      // white-pill/colored-text look, restrained on purpose.
-                      : profile === "AUTO" ? {
-                          background: `linear-gradient(135deg, var(--oat-accent), var(--oat-accent-2))`,
-                          color: MODE_COLOR.AUTO.fg,
-                          boxShadow: "0 2px 10px rgba(90,85,247,0.35), inset 0 1px 0 rgba(255,255,255,0.25)",
-                        }
-                      : { background: MODE_COLOR[profile].bg, color: MODE_COLOR[profile].fg }
-                  }>
-                  {profile}
-                </motion.button>
-              );
-            })}
-          </div>
-          {enabledProfiles.length > 0 && (
-            <span className="text-[10.5px] text-muted whitespace-nowrap">
-              {enabledProfiles.includes("AUTO") ? "real broker orders" : "simulated fills"}
-            </span>
-          )}
-        </div>
 
         <div className="flex-1" />
 
@@ -1056,6 +1090,7 @@ export default function OptionsAutoTrader() {
   const [killSwitchBusy, setKillSwitchBusy] = useState(false);
   const [killSwitchResult, setKillSwitchResult] = useState(null);
   const [dailyStats, setDailyStats] = useState(null);
+  const [dailyStatsByMode, setDailyStatsByMode] = useState({ PAPER: null, SHADOW: null, AUTO: null });
   const [clearingLock, setClearingLock] = useState(false);
   const [mobileTab, setMobileTab] = useState("portfolio"); // portfolio | trades | calendar | activity
   const [hideAmounts, setHideAmounts] = useState(false);
@@ -1078,8 +1113,14 @@ export default function OptionsAutoTrader() {
       fetch("/api/options-autotrade?resource=indices").then((r) => r.json()),
       fetch("/api/options-autotrade?resource=groww-status").then((r) => r.json()),
       fetch("/api/options-autotrade?resource=groww-real-funds").then((r) => r.json()),
+      // One per profile (migration 019 gave daily_stats an execution_mode
+      // dimension) — each profile's own card shows its own P&L/lock state,
+      // never a shared one.
+      fetch("/api/options-autotrade?resource=daily-stats&mode=PAPER").then((r) => r.json()),
+      fetch("/api/options-autotrade?resource=daily-stats&mode=SHADOW").then((r) => r.json()),
+      fetch("/api/options-autotrade?resource=daily-stats&mode=AUTO").then((r) => r.json()),
     ])
-      .then(([s, posBody, logBody, dailyBody, fundsBody, indicesBody, growwBody, growwFundsBody]) => {
+      .then(([s, posBody, logBody, dailyBody, fundsBody, indicesBody, growwBody, growwFundsBody, paperDaily, shadowDaily, autoDaily]) => {
         if (s?.error) { setError(s.message || s.error); return; }
         setError(null);
         setSettings(s);
@@ -1087,6 +1128,7 @@ export default function OptionsAutoTrader() {
         setPositions({ active: posBody.active ?? [], closed: posBody.closed ?? [] });
         setLogEntries(logBody.entries ?? []);
         setDailyStats(dailyBody);
+        setDailyStatsByMode({ PAPER: paperDaily, SHADOW: shadowDaily, AUTO: autoDaily });
         setRealFunds(fundsBody);
         setIndices(indicesBody?.indices ?? []);
         setGrowwStatus(growwBody);
@@ -1141,9 +1183,11 @@ export default function OptionsAutoTrader() {
         closed: positions.closed.filter((p) => enabledProfiles.includes(p.execution_mode ?? "PAPER")),
       };
 
-  const clearDailyLock = () => {
+  const clearDailyLock = (mode) => {
     setClearingLock(true);
-    fetch("/api/options-autotrade?resource=clear-daily-lock", { method: "POST" })
+    fetch("/api/options-autotrade?resource=clear-daily-lock", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode }),
+    })
       .then((r) => r.json())
       .then(() => load())
       .catch(() => {})
@@ -1299,43 +1343,27 @@ export default function OptionsAutoTrader() {
       <MarketStrip indices={indices} />
       {!mobileFullScreenTab && <RotatingTicker indices={indices} />}
 
-      {/* ── Execution profiles: mobile-only independent on/off switches —
-          PAPER/SHADOW/AUTO can each be toggled on at once (migration 019
-          replaced the old mutually-exclusive segmented control). Desktop's
-          equivalent lives in UtilityBar below. ── */}
+      {/* ── Execution profiles: independent, expandable PAPER/SHADOW/AUTO
+          sections — shared between mobile and desktop. Each one carries its
+          own on/off switch plus (expanded) its own today's P&L, active-
+          position count and lock state — see ProfileToggleCard's own
+          header for why this replaced the earlier compact pill row. ── */}
       {!mobileFullScreenTab && (
-      <div className="sm:hidden flex items-center gap-2 flex-wrap py-2 mb-3 px-3 rounded-[var(--radius-md)] order-[40]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)", boxShadow: "var(--e-1)" }}>
-        {["PAPER", "SHADOW", "AUTO"].map((profile) => {
-          const on = enabledProfiles.includes(profile);
-          return (
-            <motion.button key={profile} whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
-              role="switch" aria-checked={on}
-              onClick={() => setProfileEnabled(profile, !on)} disabled={saving} className="seg flex-1"
-              style={
-                !on ? { minHeight: 38 }
-                  : profile === "AUTO" ? {
-                      background: `linear-gradient(135deg, var(--oat-accent), var(--oat-accent-2))`,
-                      color: MODE_COLOR.AUTO.fg, minHeight: 38,
-                      boxShadow: "0 2px 10px rgba(90,85,247,0.35), inset 0 1px 0 rgba(255,255,255,0.25)",
-                    }
-                  : { background: MODE_COLOR[profile].bg, color: MODE_COLOR[profile].fg, minHeight: 38 }
-              }>
-              {profile} {on ? "ON" : "OFF"}
-            </motion.button>
-          );
-        })}
-      </div>
+        <ExecutionProfilesPanel
+          enabledProfiles={enabledProfiles} setProfileEnabled={setProfileEnabled} saving={saving}
+          dailyStatsByMode={dailyStatsByMode} positions={positions} hideAmounts={hideAmounts}
+        />
       )}
 
-      {/* ── Utility Bar: broker + mode + settings, one slim flat row —
-          desktop only. Mobile gets MobileBrokerBar (top) + the compact
-          execution-mode row above instead; live capital lives inside the
-          Today card itself (RiskCommandBar's own LIVE CAPITAL tile), not
-          a separate card. ── */}
+      {/* ── Utility Bar: broker + settings, one slim flat row — desktop
+          only. Mobile gets MobileBrokerBar (top) + the execution-profiles
+          panel above instead; live capital lives inside the Today card
+          itself (RiskCommandBar's own LIVE CAPITAL tile), not a separate
+          card. ── */}
       <UtilityBar
         settings={settings} growwStatus={growwStatus} growwConnecting={growwConnecting}
         connectGroww={connectGroww} setActiveBroker={setActiveBroker} saving={saving}
-        setProfileEnabled={setProfileEnabled} enabledProfiles={enabledProfiles}
+        enabledProfiles={enabledProfiles}
         settingsOpen={settingsOpen} setSettingsOpen={setSettingsOpen}
         showAllModes={showAllModes} setShowAllModes={setShowAllModes}
       />
@@ -1359,18 +1387,25 @@ export default function OptionsAutoTrader() {
         </div>
       )}
 
-      {dailyStats?.locked && (
-        <div className="flex items-start gap-2.5 px-4 py-3 rounded-[var(--radius-md)] mb-4 order-[50] sm:order-[70]" style={{ border: "1px solid var(--c-warn)", background: "var(--c-warn-soft)" }}>
-          <Info size={15} weight="duotone" className="shrink-0 mt-px text-warn" />
-          <div className="text-[12px] flex-1 text-ink2">
-            <span className="font-semibold">Daily risk lock engaged</span> ({dailyStats.lock_reason}) — new entries are refused for the rest of today.
-            Realized P&L today: {inr(dailyStats.realized_pnl ?? 0)}, consecutive losses: {dailyStats.consecutive_losses ?? 0}.
+      {/* Separate per-profile risk lock (migration 019) — PAPER/SHADOW/AUTO
+          each get their own banner+Clear Lock now, since they no longer
+          share one daily_stats row. */}
+      {["PAPER", "SHADOW", "AUTO"].map((profile) => {
+        const stats = dailyStatsByMode[profile];
+        if (!stats?.locked) return null;
+        return (
+          <div key={profile} className="flex items-start gap-2.5 px-4 py-3 rounded-[var(--radius-md)] mb-4 order-[50] sm:order-[70]" style={{ border: "1px solid var(--c-warn)", background: "var(--c-warn-soft)" }}>
+            <Info size={15} weight="duotone" className="shrink-0 mt-px text-warn" />
+            <div className="text-[12px] flex-1 text-ink2">
+              <span className="font-semibold">{profile} daily risk lock engaged</span> ({stats.lock_reason}) — new {profile} entries are refused for the rest of today.
+              Realized P&L today: {inr(stats.realized_pnl ?? 0)}, consecutive losses: {stats.consecutive_losses ?? 0}.
+            </div>
+            <button onClick={() => clearDailyLock(profile)} disabled={clearingLock} className="topstep text-[11px] shrink-0">
+              {clearingLock ? "Clearing…" : "Clear Lock"}
+            </button>
           </div>
-          <button onClick={clearDailyLock} disabled={clearingLock} className="topstep text-[11px] shrink-0">
-            {clearingLock ? "Clearing…" : "Clear Lock"}
-          </button>
-        </div>
-      )}
+        );
+      })}
 
       {/* ── Settings: mobile-only accordion (desktop's trigger lives in
           UtilityBar, fields render just below it there) — collapsed by

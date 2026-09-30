@@ -414,7 +414,25 @@ function exitGlyph(exitReason) {
   return null;
 }
 
-function StatusMark({ status, exitReason }) {
+// The close DECISION is made off a live quote snapshot, then a real
+// MARKET order fills moments later — on a fast-moving or thin chain
+// those can genuinely disagree (confirmed live: position #39 closed on
+// a PROFIT_TARGET signal, but the real closing fill came in worse than
+// the quote it decided on, realizing an actual loss). exitReason
+// describes why the system decided to close, not a promise about the
+// outcome — realized_pnl is the only authoritative number. This just
+// flags it visibly rather than letting "✓ PROFIT_TARGET" sit next to a
+// real loss looking like a contradiction nobody explained.
+function exitSlipped(exitReason, realizedPnl) {
+  if (!exitReason || realizedPnl == null) return false;
+  const favorable = exitReason.includes("PROFIT");
+  const unfavorable = exitReason.includes("STOP_LOSS") || exitReason.includes("BREACH");
+  if (favorable) return realizedPnl < 0;
+  if (unfavorable) return realizedPnl > 0;
+  return false;
+}
+
+function StatusMark({ status, exitReason, realizedPnl }) {
   if (status === "ACTIVE") {
     return (
       <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold" style={{ color: "var(--c-gain)" }}>
@@ -423,9 +441,13 @@ function StatusMark({ status, exitReason }) {
       </span>
     );
   }
+  const slipped = exitSlipped(exitReason, realizedPnl);
   return (
     <span className={`text-[11px] ${toneClass(STATUS_TONE[status] ?? "muted")}`} style={status === "CLOSED" ? { opacity: 0.72 } : undefined}>
       {status}{exitReason ? ` · ${exitGlyph(exitReason) ?? ""}${exitReason}` : ""}
+      {slipped && (
+        <span title="Decided on a live quote, but the real closing fill came in worse than that quote — the actual P&L disagrees with this reason." className="text-loss font-semibold" style={{ opacity: 1 }}> ⚠ slipped on execution</span>
+      )}
     </span>
   );
 }
@@ -661,7 +683,7 @@ function PositionCardMobile({ p, hideAmounts, isFirst }) {
               {p.execution_mode === "AUTO" ? "LIVE" : p.execution_mode ?? "PAPER"}
             </span>
           </div>
-          <StatusMark status={p.status} exitReason={p.exit_reason} />
+          <StatusMark status={p.status} exitReason={p.exit_reason} realizedPnl={p.realized_pnl} />
         </div>
         <div className="flex items-center justify-between gap-3 mt-2 pt-2" style={{ borderTop: "1px solid var(--c-line)" }}>
           <div className="flex items-baseline gap-2.5 text-[11px] min-w-0">
@@ -951,7 +973,7 @@ function PositionRow({ p }) {
         <td className="py-2.5 pr-3 text-right text-[11.5px] n">{p.margin_required != null ? inr(p.margin_required) : "—"}</td>
         <td className="py-2.5 pr-3 text-[11.5px] n">{rr !== null ? `1 : ${rr.toFixed(2)}` : "—"}</td>
         <td className="py-2.5 pr-3"><ScoreChip score={p.quality_score} /></td>
-        <td className="py-2.5 pr-3"><StatusMark status={p.status} exitReason={p.exit_reason} /></td>
+        <td className="py-2.5 pr-3"><StatusMark status={p.status} exitReason={p.exit_reason} realizedPnl={p.realized_pnl} /></td>
         <td className={`py-2.5 pr-4 text-right n text-[12px] font-semibold ${pnl == null ? "text-faint" : pnl >= 0 ? "text-gain" : "text-loss"}`}>
           {pnl != null ? `${pnl >= 0 ? "+" : ""}${inr(pnl)}` : "—"}
           {p.status === "ACTIVE" && p.unrealized_pnl != null && (

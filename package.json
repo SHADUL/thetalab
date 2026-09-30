@@ -20,7 +20,9 @@
     "options-auto:test": "node --experimental-strip-types --test src/options-auto/__tests__/*.test.ts",
     "options-auto:typecheck": "tsc --project src/options-auto/tsconfig.json",
     "vwap-scalper:test": "node --experimental-strip-types --test src/vwap-scalper/__tests__/*.test.ts",
-    "vwap-scalper:typecheck": "tsc --project src/vwap-scalper/tsconfig.json"
+    "vwap-scalper:typecheck": "tsc --project src/vwap-scalper/tsconfig.json",
+    "alpha-ladder:test": "node --experimental-strip-types --test src/nifty-alpha-ladder/__tests__/*.test.ts",
+    "alpha-ladder:typecheck": "tsc --project src/nifty-alpha-ladder/tsconfig.json"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1141.0",

@@ -64,6 +64,33 @@ test('MISMATCH: broker holds an unrecognized LONG position (orphan hedge)', () =
   assert.ok(result.findings.some((f) => f.code === 'ORPHAN_HEDGE'));
 });
 
+test('MATCHED: an orphan short on the manually-allowed list is informational, not blocking', () => {
+  const result = reconcile({
+    ...EMPTY,
+    brokerPositions: [{ tradingsymbol: 'NIFTY26S3023000PE', quantity: -75 }],
+    manuallyAllowedTradingsymbols: ['NIFTY26S3023000PE'],
+  });
+  assert.equal(result.status, 'MATCHED');
+  const finding = result.findings.find((f) => f.code === 'MANUALLY_ALLOWED_POSITION');
+  assert.ok(finding, JSON.stringify(result.findings));
+  assert.equal(finding.severity, 'info');
+  assert.ok(!result.findings.some((f) => f.code === 'ORPHAN_SHORT'));
+});
+
+test('MISMATCH: the manually-allowed list only excuses the listed symbol — a second, unlisted orphan still blocks', () => {
+  const result = reconcile({
+    ...EMPTY,
+    brokerPositions: [
+      { tradingsymbol: 'NIFTY26S3023000PE', quantity: -75 }, // allowed
+      { tradingsymbol: 'NIFTY26S3025000CE', quantity: 75 }, // NOT allowed
+    ],
+    manuallyAllowedTradingsymbols: ['NIFTY26S3023000PE'],
+  });
+  assert.equal(result.status, 'MISMATCH');
+  assert.ok(result.findings.some((f) => f.code === 'ORPHAN_HEDGE'));
+  assert.ok(!result.findings.some((f) => f.code === 'ORPHAN_SHORT'));
+});
+
 test('MISMATCH: unexpected quantity at the broker', () => {
   const broker = brokerPositionsFor(IC_POSITION);
   broker[0] = { ...broker[0], quantity: -150 }; // DB expects 75, broker shows 150

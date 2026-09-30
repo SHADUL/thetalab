@@ -1490,7 +1490,10 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
       return;
     }
     const { dbActivePositions, dbPendingReconciliation, openIntents } = await fetchDbReconciliationInputs(supabase, 'GROWW');
-    const reconciliation = reconcile({ dbActivePositions, dbPendingReconciliation, openIntents, brokerPositions, brokerOrders });
+    const reconciliation = reconcile({
+      dbActivePositions, dbPendingReconciliation, openIntents, brokerPositions, brokerOrders,
+      manuallyAllowedTradingsymbols: settings.manually_allowed_tradingsymbols ?? [],
+    });
     if (reconciliation.status === 'MISMATCH' || reconciliation.status === 'RECONCILIATION_REQUIRED') {
       await event('RECONCILIATION_REQUIRED', { reconciliationStatus: reconciliation.status, findingCount: reconciliation.findings.length });
       await log('error', `AUTO (Groww): broker reconciliation is ${reconciliation.status} — BLOCKING all new AUTO entries until resolved.`,
@@ -1514,7 +1517,10 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
       return;
     }
     const { dbActivePositions, dbPendingReconciliation, openIntents } = await fetchDbReconciliationInputs(supabase, 'KITE');
-    const reconciliation = reconcile({ dbActivePositions, dbPendingReconciliation, openIntents, brokerPositions, brokerOrders });
+    const reconciliation = reconcile({
+      dbActivePositions, dbPendingReconciliation, openIntents, brokerPositions, brokerOrders,
+      manuallyAllowedTradingsymbols: settings.manually_allowed_tradingsymbols ?? [],
+    });
     if (reconciliation.status === 'MISMATCH' || reconciliation.status === 'RECONCILIATION_REQUIRED') {
       await event('RECONCILIATION_REQUIRED', { reconciliationStatus: reconciliation.status, findingCount: reconciliation.findings.length });
       await log('error', `AUTO: broker reconciliation is ${reconciliation.status} — BLOCKING all new AUTO entries until resolved.`,
@@ -2984,10 +2990,22 @@ async function handleSettings(req: any, res: any, supabase: SupabaseClient) {
         return;
       }
     }
+    // Broker-reconciliation allowlist — a known, deliberately-manual
+    // position at the broker, by its own tradingsymbol (not one of a
+    // fixed enum like paused_symbols, since it's an arbitrary contract
+    // string, e.g. "NIFTY26O1323100PE") — see brokerReconciliation.ts's
+    // manuallyAllowedTradingsymbols doc for why this exists.
+    if (body.manually_allowed_tradingsymbols !== undefined) {
+      if (!Array.isArray(body.manually_allowed_tradingsymbols) || body.manually_allowed_tradingsymbols.some((s: unknown) => typeof s !== 'string' || s.length === 0)) {
+        res.status(400).json({ error: 'bad_request', message: `manually_allowed_tradingsymbols must be an array of non-empty tradingsymbol strings.` });
+        return;
+      }
+    }
     const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (body.execution_mode !== undefined) update.execution_mode = body.execution_mode;
     if (body.active_broker !== undefined) update.active_broker = body.active_broker;
     if (body.paused_symbols !== undefined) update.paused_symbols = body.paused_symbols;
+    if (body.manually_allowed_tradingsymbols !== undefined) update.manually_allowed_tradingsymbols = body.manually_allowed_tradingsymbols;
     for (const key of EDITABLE_SETTINGS_FIELDS) {
       if (body[key] !== undefined) {
         const n = Number(body[key]);

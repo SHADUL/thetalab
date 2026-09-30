@@ -72,7 +72,8 @@ export interface ReconciliationFinding {
     | 'QUANTITY_MISMATCH' | 'SIDE_MISMATCH'
     | 'ORPHAN_HEDGE' | 'ORPHAN_SHORT'
     | 'OPEN_ORDER_UNTRACKED' | 'PARTIALLY_FILLED_ORDER' | 'REJECTED_ORDER' | 'CANCELLED_ORDER'
-    | 'AMBIGUOUS_ORDER_STATUS' | 'ABANDONED_INTENT' | 'KNOWN_RECONCILIATION_PENDING';
+    | 'AMBIGUOUS_ORDER_STATUS' | 'ABANDONED_INTENT' | 'KNOWN_RECONCILIATION_PENDING'
+    | 'MANUALLY_ALLOWED_POSITION';
   severity: 'info' | 'blocking';
   message: string;
 }
@@ -87,6 +88,20 @@ export interface ReconciliationInput {
   openIntents: OpenIntentSummary[];
   brokerPositions: BrokerPosition[];
   brokerOrders: BrokerOrder[];
+  /**
+   * Tradingsymbols the human has explicitly told this system are a known,
+   * deliberately-manual position at the broker (placed outside this
+   * codebase entirely) — never inferred or auto-detected. A broker
+   * position on one of these symbols with no matching DB record is
+   * downgraded from a blocking ORPHAN_HEDGE/ORPHAN_SHORT to an informational
+   * MANUALLY_ALLOWED_POSITION finding, so it stops blocking every new AUTO
+   * entry account-wide. This is deliberately an ALLOWLIST, not a general
+   * "ignore anything unrecognized" escape hatch: a genuinely unexpected
+   * orphan (anything not on this list) still blocks exactly as before —
+   * the whole point is distinguishing "I know about this, it's mine" from
+   * "something happened that this system can't explain."
+   */
+  manuallyAllowedTradingsymbols?: string[];
 }
 
 export interface ReconciliationResult {
@@ -175,8 +190,18 @@ export function reconcile(input: ReconciliationInput): ReconciliationResult {
   }
 
   // Broker says a position is open; does the DB know about it at all?
+  const manuallyAllowed = new Set(input.manuallyAllowedTradingsymbols ?? []);
   for (const [symbol, broker] of brokerBySymbol) {
     if (!dbLegsBySymbol.has(symbol)) {
+      if (manuallyAllowed.has(symbol)) {
+        const side = sideOf(broker.quantity);
+        findings.push({
+          code: 'MANUALLY_ALLOWED_POSITION', severity: 'info',
+          message: `Broker holds a position in ${symbol} (${side} ${Math.abs(broker.quantity)}) with no matching ` +
+            `ACTIVE position in the database, but it's on the manually-allowed list — not blocking.`,
+        });
+        continue;
+      }
       // Classify as an orphaned hedge (a long leg with no corresponding
       // short in our records — usually harmless directionally, but still
       // unaccounted capital) vs. an orphaned short (a naked, unbounded-risk

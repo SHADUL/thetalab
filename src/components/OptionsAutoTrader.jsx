@@ -335,6 +335,19 @@ function formatDateTime(iso) {
   return `${date} ${time}`;
 }
 
+// A leg's own P&L, real either way — never an even split of the position
+// total (that would fabricate a number this leg didn't actually produce).
+// Closed: fill_price vs the leg's own recorded exit_fill_price, exact.
+// Still open: fill_price vs last_quoted_price, the live price
+// position-monitor's own re-quote pass persists per leg (same quote it
+// already uses for the position-level unrealized_pnl) — null (shown as
+// "—") until at least one re-quote pass has run since this leg opened.
+function legPnl(l) {
+  const exitPrice = l.exit_fill_price ?? l.last_quoted_price;
+  if (exitPrice == null || l.fill_price == null) return null;
+  return (l.side === "SELL" ? 1 : -1) * (Number(l.fill_price) - Number(exitPrice)) * Number(l.quantity);
+}
+
 function ActivityLog({ timeline }) {
   return (
     <>
@@ -689,14 +702,21 @@ function PositionCardMobile({ p, hideAmounts, isFirst }) {
               <div className="text-[10.5px] font-semibold text-muted mb-1">Legs</div>
               <table className="w-full text-[11px]">
                 <tbody>
-                  {legs.map((l) => (
-                    <tr key={l.id} style={{ borderTop: "1px solid var(--c-line)" }}>
-                      <td className="py-1 pr-2 font-medium">{l.side}</td>
-                      <td className="py-1 pr-2">{l.strike}{l.option_right}</td>
-                      <td className="py-1 pr-2 text-right n">{l.quantity}</td>
-                      <td className="py-1 text-right n">{fmt(l.fill_price)}</td>
-                    </tr>
-                  ))}
+                  {legs.map((l) => {
+                    const pnl = legPnl(l);
+                    const legPositive = (pnl ?? 0) >= 0;
+                    return (
+                      <tr key={l.id} style={{ borderTop: "1px solid var(--c-line)" }}>
+                        <td className="py-1 pr-2 font-medium">{l.side}</td>
+                        <td className="py-1 pr-2">{l.strike}{l.option_right}</td>
+                        <td className="py-1 pr-2 text-right n">{l.quantity}</td>
+                        <td className="py-1 pr-2 text-right n">{fmt(l.fill_price)}</td>
+                        <td className={`py-1 text-right n font-medium ${pnl == null ? "text-faint" : legPositive ? "text-gain" : "text-loss"}`}>
+                          {pnl != null ? `${legPositive ? "+" : ""}${fmt(pnl)}` : "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -947,16 +967,23 @@ function PositionRow({ p }) {
                 <div className="text-[10.5px] font-semibold text-muted mb-1">Legs</div>
                 <table className="w-full text-[11px]">
                   <tbody>
-                    {legs.map((l) => (
-                      <tr key={l.id}>
-                        <td className="py-0.5 pr-2 font-medium">{l.side}</td>
-                        <td className="py-0.5 pr-2">{l.strike}{l.option_right}</td>
-                        <td className="py-0.5 pr-2 text-faint n">{l.tradingsymbol}</td>
-                        <td className="py-0.5 pr-2 text-right n">{l.quantity}</td>
-                        <td className="py-0.5 pr-2 text-right n">{inr(l.fill_price)}</td>
-                        <td className="py-0.5 text-[10px] text-faint">{l.status}</td>
-                      </tr>
-                    ))}
+                    {legs.map((l) => {
+                      const legP = legPnl(l);
+                      const legPositive = (legP ?? 0) >= 0;
+                      return (
+                        <tr key={l.id}>
+                          <td className="py-0.5 pr-2 font-medium">{l.side}</td>
+                          <td className="py-0.5 pr-2">{l.strike}{l.option_right}</td>
+                          <td className="py-0.5 pr-2 text-faint n">{l.tradingsymbol}</td>
+                          <td className="py-0.5 pr-2 text-right n">{l.quantity}</td>
+                          <td className="py-0.5 pr-2 text-right n">{inr(l.fill_price)}</td>
+                          <td className={`py-0.5 pr-2 text-right n font-medium ${legP == null ? "text-faint" : legPositive ? "text-gain" : "text-loss"}`}>
+                            {legP != null ? `${legPositive ? "+" : ""}${inr(legP)}` : "—"}
+                          </td>
+                          <td className="py-0.5 text-[10px] text-faint">{l.status}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

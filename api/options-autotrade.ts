@@ -2049,13 +2049,22 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
 
     let currentCostToClose = 0;
     let missingQuote = false;
+    const legQuoteUpdates: Array<{ id: number; price: number }> = [];
     for (const l of legs) {
       const kiteSymbol = kitePriceSymbolFor(p, l);
       const price = kiteSymbol ? midOrLastPrice(quoteMap.get(`${exchange}:${kiteSymbol}`)) : null;
       if (price == null) { missingQuote = true; continue; }
       currentCostToClose += (l.side === 'SELL' ? 1 : -1) * price * l.quantity;
+      legQuoteUpdates.push({ id: l.id, price });
     }
     if (missingQuote) { await log('error', `Position #${p.id}: could not re-quote every leg — skipped this cycle.`, undefined, p.execution_mode); continue; }
+    // Per-leg live price — same quote already fetched above for
+    // currentCostToClose, just persisted per-leg rather than only kept as
+    // the position-level aggregate, so the dashboard can show each leg's
+    // OWN P&L (fill_price vs this) in the position-detail dropdown.
+    const nowIso = new Date().toISOString();
+    await Promise.all(legQuoteUpdates.map((u) =>
+      supabase.from('options_autotrade_legs').update({ last_quoted_price: u.price, last_quoted_at: nowIso }).eq('id', u.id)));
 
     // Sanity bound: for ANY defined-risk structure, maxProfit + maxLoss IS
     // the strike-width-implied theoretical ceiling on cost-to-close (it's

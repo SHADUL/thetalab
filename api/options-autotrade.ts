@@ -3941,6 +3941,12 @@ export default async function handler(req: any, res: any) {
   if (resource === 'vwap-scalper-chart') return handleVwapScalperChart(req, res, supabase);
   if (resource === 'vwap-scalper-daily-stats') return handleVwapScalperDailyStats(req, res, supabase);
   if (resource === 'vwap-scalper-clear-daily-lock') return handleVwapScalperClearDailyLock(req, res, supabase);
+  if (resource === 'alpha-ladder-settings') return handleAlphaLadderSettings(req, res, supabase);
+  if (resource === 'alpha-ladder-summary') return handleAlphaLadderSummary(req, res, supabase);
+  if (resource === 'alpha-ladder-signal') return handleAlphaLadderSignal(req, res, supabase);
+  if (resource === 'alpha-ladder-positions') return handleAlphaLadderPositions(req, res, supabase);
+  if (resource === 'alpha-ladder-activity') return handleAlphaLadderActivity(req, res, supabase);
+  if (resource === 'alpha-ladder-health') return handleAlphaLadderHealth(req, res, supabase);
 
   // Cron/server-triggered resources — shared-secret gate, since these do
   // real work (live Kite calls, writing a paper position) on a schedule
@@ -4114,4 +4120,100 @@ async function handleAlphaLadderProbe(req: any, res: any, supabase: SupabaseClie
   }
 
   res.status(200).json({ ok: true, probedAt: new Date().toISOString(), results });
+}
+
+/**
+ * Browser-facing Nifty Alpha Ladder resources — all read-only reporting
+ * against alpha_ladder_* tables (migrations/001_alpha_ladder_schema.sql).
+ * No shared-secret gate, matching handleSettings' own reasoning (a plain
+ * read has no execution side effect). BLOCKED ON DB MIGRATION: every one
+ * of these will surface a `supabase_error` (the real Postgres "relation
+ * does not exist" error, an honest failure) until that migration is
+ * applied and confirmed — see the Milestone 3 report.
+ */
+async function handleAlphaLadderSettings(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method === 'GET') {
+    const { data, error } = await supabase.from('alpha_ladder_settings').select('*').eq('id', 1).maybeSingle();
+    if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
+    res.status(200).json(data ?? {});
+    return;
+  }
+  if (req.method === 'PUT' || req.method === 'POST') {
+    const body = req.body ?? {};
+    // execution_mode is SHADOW/AUTO only — there is no PAPER for this
+    // strategy at any milestone (see the implementation plan's §1). AUTO
+    // is accepted here only as a STORED preference; it has zero effect —
+    // the worker (not built) has no real-order code path to activate, and
+    // the UI itself renders AUTO as locked regardless of this value.
+    if (body.execution_mode !== undefined && !['SHADOW', 'AUTO'].includes(body.execution_mode)) {
+      res.status(400).json({ error: 'bad_request', message: 'execution_mode must be SHADOW or AUTO.' });
+      return;
+    }
+    if (body.active_broker !== undefined && !['KITE', 'GROWW'].includes(body.active_broker)) {
+      res.status(400).json({ error: 'bad_request', message: 'active_broker must be KITE or GROWW.' });
+      return;
+    }
+    const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (body.execution_mode !== undefined) update.execution_mode = body.execution_mode;
+    if (body.active_broker !== undefined) update.active_broker = body.active_broker;
+    if (body.allocated_capital !== undefined) update.allocated_capital = Number(body.allocated_capital) || 0;
+    const { data, error } = await supabase.from('alpha_ladder_settings').update(update).eq('id', 1).select('*').single();
+    if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
+    res.status(200).json(data);
+    return;
+  }
+  res.status(405).json({ error: 'method_not_allowed' });
+}
+
+/** Dashboard summary: mode, latest signal, active position (if any), latest worker health — one call for the UI's main view. */
+async function handleAlphaLadderSummary(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const [{ data: settings, error: settingsErr }, { data: latestSignal }, { data: activePosition }, { data: latestHealth }] = await Promise.all([
+    supabase.from('alpha_ladder_settings').select('*').eq('id', 1).maybeSingle(),
+    supabase.from('alpha_ladder_signals').select('*').order('created_at', { ascending: false }).limit(1).maybeSingle(),
+    supabase.from('alpha_ladder_positions').select('*, alpha_ladder_legs(*)').eq('status', 'ACTIVE').maybeSingle(),
+    supabase.from('alpha_ladder_worker_health').select('*').order('updated_at', { ascending: false }).limit(1).maybeSingle(),
+  ]);
+  if (settingsErr) { res.status(502).json({ error: 'supabase_error', message: settingsErr.message }); return; }
+  res.status(200).json({ ok: true, settings, latestSignal: latestSignal ?? null, activePosition: activePosition ?? null, latestHealth: latestHealth ?? null });
+}
+
+/** Full latest signal record (spec's own persisted field list). */
+async function handleAlphaLadderSignal(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const { data, error } = await supabase.from('alpha_ladder_signals').select('*').order('created_at', { ascending: false }).limit(1).maybeSingle();
+  if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
+  res.status(200).json({ ok: true, signal: data ?? null });
+}
+
+/** Active + recent closed positions, with legs and shadow orders. */
+async function handleAlphaLadderPositions(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const { data, error } = await supabase
+    .from('alpha_ladder_positions')
+    .select('*, alpha_ladder_legs(*, alpha_ladder_shadow_orders(*))')
+    .order('created_at', { ascending: false })
+    .limit(50);
+  if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
+  const rows = data ?? [];
+  res.status(200).json({ active: rows.filter((r: any) => r.status === 'ACTIVE'), closed: rows.filter((r: any) => r.status !== 'ACTIVE') });
+}
+
+/** Recent activity log entries (spec's audit trail). */
+async function handleAlphaLadderActivity(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const { data, error } = await supabase.from('alpha_ladder_activity_log').select('*').order('created_at', { ascending: false }).limit(100);
+  if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
+  res.status(200).json({ entries: data ?? [] });
+}
+
+/** Worker health history — for the UI's "data quality" panel and expandable diagnostics. */
+async function handleAlphaLadderHealth(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const [{ data: health, error }, { data: gaps }] = await Promise.all([
+    supabase.from('alpha_ladder_worker_health').select('*').order('updated_at', { ascending: false }).limit(20),
+    supabase.from('alpha_ladder_feed_gaps').select('*').order('created_at', { ascending: false }).limit(20),
+  ]);
+  if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
+  res.status(200).json({ health: health ?? [], gaps: gaps ?? [] });
 }

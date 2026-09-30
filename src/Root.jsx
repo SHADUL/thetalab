@@ -3,6 +3,7 @@ import App from "./App.jsx";
 import SwingScanner from "./components/SwingScanner.jsx";
 import IntradayTrader from "./components/IntradayTrader.jsx";
 import OptionsAutoTrader from "./components/OptionsAutoTrader.jsx";
+import NiftyAlphaLadder from "./components/NiftyAlphaLadder.jsx";
 import VwapScalper from "./components/VwapScalper.jsx";
 import Login from "./components/Login.jsx";
 
@@ -25,13 +26,18 @@ const ALL_SECTIONS = [
   { value: "swing", label: "Swing Scanner" },
   { value: "intraday", label: "Intraday Trader" },
   { value: "options-auto", label: "Options Auto-Trader" },
+  { value: "nifty-alpha-ladder", label: "Nifty Alpha Ladder" },
   { value: "vwap-scalper", label: "VWAP Scalper" },
 ];
 
 // TEMPORARY, per explicit request — every other section stays fully intact
 // underneath, just hidden from the nav. Flip back to false to restore them.
+// Nifty Alpha Ladder is kept visible alongside Options Auto-Trader even
+// while this flag is on, since it's a new, actively-worked-on strategy —
+// not one of the "other sections" the original request meant to hide.
 const ONLY_OPTIONS_AUTO = true;
-const SECTIONS = ONLY_OPTIONS_AUTO ? ALL_SECTIONS.filter((s) => s.value === "options-auto") : ALL_SECTIONS;
+const VISIBLE_WHILE_ONLY_OPTIONS_AUTO = new Set(["options-auto", "nifty-alpha-ladder"]);
+const SECTIONS = ONLY_OPTIONS_AUTO ? ALL_SECTIONS.filter((s) => VISIBLE_WHILE_ONLY_OPTIONS_AUTO.has(s.value)) : ALL_SECTIONS;
 
 export default function Root() {
   const [section, setSectionState] = useState(() => (ONLY_OPTIONS_AUTO ? "options-auto" : localStorage.getItem(SECTION_KEY) ?? "options"));
@@ -92,6 +98,7 @@ export default function Root() {
           : section === "swing" ? <SwingScanner />
           : section === "intraday" ? <IntradayTrader />
           : section === "options-auto" ? <OptionsAutoTrader />
+          : section === "nifty-alpha-ladder" ? <NiftyAlphaLadder />
           : <VwapScalper />}
       </div>
     </div>

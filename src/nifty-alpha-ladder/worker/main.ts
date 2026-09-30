@@ -37,6 +37,7 @@ import { deriveHealthStatus, deriveSessionQuality, canFireNewSignal } from '../l
 import { createSupabaseAlphaLadderStore } from '../persistence/store.ts';
 import { isTradingDay, isSignalWeekday } from '../calendar/signalCalendar.ts';
 import { nowIST, isWithinSignalWindow, isMarketOpen, MARKET_OPEN_MIN, SIGNAL_CUTOFF_MIN } from '../calendar/istClock.ts';
+import { fetchNfoInstrumentsCsv, parseNfoFutures, resolveNearestFuture } from '../live/futuresResolver.ts';
 
 /** Seconds from session origin (09:15 IST) to the 14:30 IST cutoff — a fixed constant every day, since both are IST clock times measured from the same origin. */
 const CUTOFF_SEC_FROM_ORIGIN = (SIGNAL_CUTOFF_MIN - MARKET_OPEN_MIN) * 60;
@@ -116,9 +117,27 @@ async function main() {
   });
 
   await depthSource.connect();
+
+  // NIFTY_NEAREST_FUTURE resolution (spec §2's chosen provider) — the
+  // socket opening is not the same as receiving any data: nothing streams
+  // until we tell Kite which token to subscribe in full mode. Missing
+  // entirely until this milestone's first real Railway deployment, where
+  // the worker connected but sat with lastSocketMessageAtMs stuck null
+  // forever because subscribe() was simply never called.
+  const nfoCsv = await fetchNfoInstrumentsCsv(apiKey, accessToken);
+  const resolvedFuture = resolveNearestFuture(parseNfoFutures(nfoCsv), 'NIFTY', todayIST);
+  if (!resolvedFuture) {
+    throw new Error(`No non-expired NIFTY future found in Kite's instrument dump as of ${todayIST} — refusing to start with no instrument to subscribe.`);
+  }
+  await depthSource.subscribe({
+    tradingsymbol: resolvedFuture.tradingsymbol, instrumentToken: resolvedFuture.instrumentToken, expiry: resolvedFuture.expiry,
+  });
+  await store.logActivity('info', `Resolved and subscribed to nearest NIFTY future: ${resolvedFuture.tradingsymbol} (token ${resolvedFuture.instrumentToken}, expiry ${resolvedFuture.expiry}).`);
+
   await store.insertWorkerHealth({
     workerInstance: WORKER_INSTANCE, connectionGeneration: depthSource.getHealth().connectionGeneration,
     status: 'STARTING', workerStartedAt: new Date().toISOString(), reconnectCount: 0,
+    currentInstrumentToken: resolvedFuture.instrumentToken, currentFutureSymbol: resolvedFuture.tradingsymbol,
   });
 
   // Persist the checkpoint on a fixed cadence — never only on clean
@@ -151,6 +170,7 @@ async function main() {
     await store.insertWorkerHealth({
       workerInstance: WORKER_INSTANCE, connectionGeneration: depthSource.getHealth().connectionGeneration,
       status: health, workerStartedAt: new Date().toISOString(), reconnectCount: depthSource.getHealth().reconnectCount,
+      currentInstrumentToken: resolvedFuture.instrumentToken, currentFutureSymbol: resolvedFuture.tradingsymbol,
     });
 
     const isSignalDay = isSignalWeekday(istCalendarDate, false); // TODO: real "did the preceding Wednesday have data" tracking — Gate 5.2's own fallback logic, not yet wired to a real prior-day check

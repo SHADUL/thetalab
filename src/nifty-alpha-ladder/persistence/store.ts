@@ -80,6 +80,8 @@ export interface WorkerHealthRow {
   status: string;
   workerStartedAt: string;
   reconnectCount: number;
+  currentInstrumentToken?: number | null;
+  currentFutureSymbol?: string | null;
 }
 
 export interface AlphaLadderStore {
@@ -311,14 +313,23 @@ export function createSupabaseAlphaLadderStore(client: SupabaseClient): AlphaLad
         .insert({
           worker_instance: row.workerInstance, connection_generation: row.connectionGeneration, status: row.status,
           worker_started_at: row.workerStartedAt, reconnect_count: row.reconnectCount,
+          current_instrument_token: row.currentInstrumentToken ?? null, current_future_symbol: row.currentFutureSymbol ?? null,
         })
         .select('*')
         .single();
-      return { id: data.id, workerInstance: data.worker_instance, connectionGeneration: data.connection_generation, status: data.status, workerStartedAt: data.worker_started_at, reconnectCount: data.reconnect_count };
+      return {
+        id: data.id, workerInstance: data.worker_instance, connectionGeneration: data.connection_generation, status: data.status,
+        workerStartedAt: data.worker_started_at, reconnectCount: data.reconnect_count,
+        currentInstrumentToken: data.current_instrument_token, currentFutureSymbol: data.current_future_symbol,
+      };
     },
     async getLatestWorkerHealth(workerInstance) {
       const { data } = await client.from('alpha_ladder_worker_health').select('*').eq('worker_instance', workerInstance).order('updated_at', { ascending: false }).limit(1).maybeSingle();
-      return data ? { id: data.id, workerInstance: data.worker_instance, connectionGeneration: data.connection_generation, status: data.status, workerStartedAt: data.worker_started_at, reconnectCount: data.reconnect_count } : null;
+      return data ? {
+        id: data.id, workerInstance: data.worker_instance, connectionGeneration: data.connection_generation, status: data.status,
+        workerStartedAt: data.worker_started_at, reconnectCount: data.reconnect_count,
+        currentInstrumentToken: data.current_instrument_token, currentFutureSymbol: data.current_future_symbol,
+      } : null;
     },
     async logActivity(level, message, detail, callId, positionId) {
       await client.from('alpha_ladder_activity_log').insert({ level, message, detail: detail ?? null, call_id: callId ?? null, position_id: positionId ?? null });

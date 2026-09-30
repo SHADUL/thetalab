@@ -154,13 +154,11 @@ function MobileBrokerBar({ settings, growwStatus, growwConnecting, connectGroww,
  */
 function UtilityBar({
   settings, growwStatus, growwConnecting, connectGroww, setActiveBroker, saving,
-  setExecutionMode, settingsOpen, setSettingsOpen, showAllModes, setShowAllModes,
+  setProfileEnabled, enabledProfiles, settingsOpen, setSettingsOpen, showAllModes, setShowAllModes,
 }) {
   const [brokerInfoOpen, setBrokerInfoOpen] = useState(false);
   const activeBroker = settings?.active_broker ?? "KITE";
   const isGroww = activeBroker === "GROWW";
-  const mode = settings?.execution_mode;
-  const modeCaption = mode === "AUTO" ? "real broker orders" : mode === "SHADOW" ? "simulated fills" : mode === "PAPER" ? "simulated fills" : null;
 
   return (
     <div className="hidden sm:block sm:order-[30] mb-3">
@@ -199,41 +197,50 @@ function UtilityBar({
 
         <div className="hidden lg:block w-px h-5" style={{ background: "var(--c-line)" }} />
 
-        {/* Mode */}
+        {/* Execution profiles — independent on/off switches (migration 019):
+            any subset of PAPER/SHADOW/AUTO can be enabled at once, each
+            running its own full independent scan/entry/exit cycle. */}
         <div className="flex items-center gap-2">
-          <span className="text-[10.5px] font-semibold text-muted shrink-0">Mode</span>
+          <span className="text-[10.5px] font-semibold text-muted shrink-0">Profiles</span>
           <div className="seg-track">
-            {["OFF", "PAPER", "SHADOW", "AUTO"].map((m) => (
-              <motion.button key={m} whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
-                role="tab" aria-selected={mode === m} data-on={mode === m}
-                onClick={() => setExecutionMode(m)} disabled={saving} className="seg"
-                style={
-                  mode !== m ? undefined
-                    // AUTO's selected state gets a subtle gradient fill + soft
-                    // glow instead of a flat solid — the one "important live
-                    // state" the redesign brief allows a glow on. Every other
-                    // mode keeps the shared segmented-control's plain
-                    // white-pill/colored-text look, restrained on purpose.
-                    : m === "AUTO" ? {
-                        background: `linear-gradient(135deg, var(--oat-accent), var(--oat-accent-2))`,
-                        color: MODE_COLOR.AUTO.fg,
-                        boxShadow: "0 2px 10px rgba(90,85,247,0.35), inset 0 1px 0 rgba(255,255,255,0.25)",
-                      }
-                    : { color: MODE_COLOR[m].fg }
-                }>
-                {m}
-              </motion.button>
-            ))}
+            {["PAPER", "SHADOW", "AUTO"].map((profile) => {
+              const on = enabledProfiles.includes(profile);
+              return (
+                <motion.button key={profile} whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+                  role="switch" aria-checked={on}
+                  onClick={() => setProfileEnabled(profile, !on)} disabled={saving} className="seg"
+                  style={
+                    !on ? undefined
+                      // AUTO's on state gets a subtle gradient fill + soft
+                      // glow instead of a flat solid — the one "important live
+                      // state" the redesign brief allows a glow on. Every other
+                      // profile keeps the shared segmented-control's plain
+                      // white-pill/colored-text look, restrained on purpose.
+                      : profile === "AUTO" ? {
+                          background: `linear-gradient(135deg, var(--oat-accent), var(--oat-accent-2))`,
+                          color: MODE_COLOR.AUTO.fg,
+                          boxShadow: "0 2px 10px rgba(90,85,247,0.35), inset 0 1px 0 rgba(255,255,255,0.25)",
+                        }
+                      : { background: MODE_COLOR[profile].bg, color: MODE_COLOR[profile].fg }
+                  }>
+                  {profile}
+                </motion.button>
+              );
+            })}
           </div>
-          {modeCaption && <span className="text-[10.5px] text-muted whitespace-nowrap">{mode} · {modeCaption}</span>}
+          {enabledProfiles.length > 0 && (
+            <span className="text-[10.5px] text-muted whitespace-nowrap">
+              {enabledProfiles.includes("AUTO") ? "real broker orders" : "simulated fills"}
+            </span>
+          )}
         </div>
 
         <div className="flex-1" />
 
-        {mode && mode !== "OFF" && (
+        {enabledProfiles.length > 0 && (
           <label className="flex items-center gap-1.5 text-[10.5px] text-muted">
             <input type="checkbox" checked={showAllModes} onChange={(e) => setShowAllModes(e.target.checked)} />
-            Show other modes
+            Show other profiles
           </label>
         )}
 
@@ -504,8 +511,14 @@ function RiskCommandBar({ positions, settings, hideAmounts, setHideAmounts, real
   const maxLossAtRisk = positions.active.reduce((s, p) => s + (Number(p.max_loss) || 0), 0);
   const todaysPnl = totalUnrealized + totalRealizedToday;
   const fmt = (n) => (hideAmounts ? "••••••" : inr(n));
-  const isLive = settings?.execution_mode === "AUTO";
-  const isShadow = settings?.execution_mode === "SHADOW";
+  // Mirrors executionProfiles.ts's derivation: once any toggle column is
+  // explicitly set, it governs; otherwise falls back to the legacy single
+  // execution_mode. (If AUTO and SHADOW are both enabled at once, this
+  // still only drives ONE capital-display branch below — a full per-
+  // profile "Today" card is a follow-up, not yet built.)
+  const settingsHasToggles = settings?.paper_enabled != null || settings?.shadow_enabled != null || settings?.auto_enabled != null;
+  const isLive = settingsHasToggles ? !!settings?.auto_enabled : settings?.execution_mode === "AUTO";
+  const isShadow = settingsHasToggles ? !!settings?.shadow_enabled : settings?.execution_mode === "SHADOW";
 
   const isGrowwBroker = (settings?.active_broker ?? "KITE") === "GROWW";
   const activeRealFunds = isGrowwBroker ? growwRealFunds : realFunds;
@@ -1104,17 +1117,28 @@ export default function OptionsAutoTrader() {
       .finally(() => setGrowwConnecting(false));
   };
 
+  // Mirrors executionProfiles.ts's derivation exactly: once any toggle
+  // column has been explicitly set, PAPER/SHADOW/AUTO become independent
+  // (any subset can be enabled at once) and the legacy single execution_mode
+  // is ignored; otherwise falls back to that one legacy mode.
+  const hasToggles = settings?.paper_enabled != null || settings?.shadow_enabled != null || settings?.auto_enabled != null;
+  const enabledProfiles = hasToggles
+    ? ["PAPER", "SHADOW", "AUTO"].filter((m) => settings?.[`${m.toLowerCase()}_enabled`])
+    : settings?.execution_mode && settings.execution_mode !== "OFF" ? [settings.execution_mode] : [];
+
   // A position's execution_mode is fixed at the moment it opened — a
-  // PAPER position stays PAPER even after the switch is later moved to
-  // AUTO. Once AUTO is active, PAPER history sitting in the same list as
-  // real positions is actively misleading (it looks like real money that
-  // isn't), so the default view filters to whichever mode is currently
-  // selected; showAllModes opts back into seeing everything together.
-  const visiblePositions = showAllModes || !settings?.execution_mode || settings.execution_mode === "OFF"
+  // PAPER position stays PAPER even after another profile is later turned
+  // on too. Once at least one profile is active, history from a
+  // profile that ISN'T currently enabled sitting in the same list is
+  // actively misleading (it can look like real money that isn't, or hide
+  // that a currently-enabled profile has no history yet), so the default
+  // view filters to whichever profile(s) are currently enabled;
+  // showAllModes opts back into seeing everything together.
+  const visiblePositions = showAllModes || enabledProfiles.length === 0
     ? positions
     : {
-        active: positions.active.filter((p) => (p.execution_mode ?? "PAPER") === settings.execution_mode),
-        closed: positions.closed.filter((p) => (p.execution_mode ?? "PAPER") === settings.execution_mode),
+        active: positions.active.filter((p) => enabledProfiles.includes(p.execution_mode ?? "PAPER")),
+        closed: positions.closed.filter((p) => enabledProfiles.includes(p.execution_mode ?? "PAPER")),
       };
 
   const clearDailyLock = () => {
@@ -1152,8 +1176,14 @@ export default function OptionsAutoTrader() {
       .finally(() => setSaving(false));
   };
 
-  const setExecutionMode = (mode) => {
-    if (mode === "AUTO") {
+  // Independent PAPER/SHADOW/AUTO toggles (migration 019) — replaces the
+  // old mutually-exclusive execution_mode segmented control. Any subset can
+  // be on at once; each enabled profile runs its own full, independent
+  // scan/entry/exit cycle server-side (see executionProfiles.ts). AUTO
+  // still gets the same real-money confirmation dialog as the legacy
+  // control when being turned ON (never when turning it off).
+  const setProfileEnabled = (profile, enabled) => {
+    if (profile === "AUTO" && enabled) {
       const broker = settings?.active_broker === "GROWW" ? "GROWW" : "KITE";
       const confirmed = window.confirm(
         broker === "GROWW"
@@ -1161,18 +1191,18 @@ export default function OptionsAutoTrader() {
             "This places REAL orders on your real Groww account with real money — not a simulation.\n\n" +
             "Every future scan cycle will size and fire live BUY/SELL orders the moment a candidate clears the quality gate, with no per-trade confirmation. " +
             "Position-monitor will also place real closing orders automatically.\n\n" +
-            "Are you sure you want to switch to AUTO?"
+            "Are you sure you want to turn AUTO on?"
           : "This places REAL orders on your real Zerodha (Kite) account with real money — not a simulation.\n\n" +
             "Every future scan cycle will size and fire live BUY/SELL orders the moment a candidate clears the quality gate, with no per-trade confirmation. " +
             "Position-monitor will also place real closing orders automatically.\n\n" +
-            "Are you sure you want to switch to AUTO?",
+            "Are you sure you want to turn AUTO on?",
       );
       if (!confirmed) return;
     }
     setSaving(true);
     fetch("/api/options-autotrade?resource=settings", {
       method: "PUT", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ execution_mode: mode }),
+      body: JSON.stringify({ [`${profile.toLowerCase()}_enabled`]: enabled }),
     })
       .then((r) => r.json())
       .then((s) => { if (!s.error) setSettings(s); })
@@ -1203,14 +1233,20 @@ export default function OptionsAutoTrader() {
   // doesn't sit in the log looking like it's still happening under AUTO.
   // Untagged entries (batch-level, or written before this column existed)
   // always show — they were never claiming to be either mode.
-  const modeFiltered = showAllModes || !settings?.execution_mode || settings.execution_mode === "OFF"
+  const modeFiltered = showAllModes || enabledProfiles.length === 0
     ? logEntries
-    : logEntries.filter((e) => !e.execution_mode || e.execution_mode === settings.execution_mode);
+    : logEntries.filter((e) => !e.execution_mode || enabledProfiles.some((m) => e.execution_mode === m || e.execution_mode?.split("+").includes(m)));
   const timeline = [
     ...modeFiltered.map((e) => ({ time: e.created_at, level: e.level, message: e.message })),
   ].slice(0, 30);
 
-  const modeColor = MODE_COLOR[settings?.execution_mode] ?? MODE_COLOR.OFF;
+  // Header badge shows every currently-enabled profile (PAPER/SHADOW/AUTO
+  // can all run at once now) — its color/pulse follows the highest-stakes
+  // one enabled (AUTO > SHADOW > PAPER), same visual priority the old
+  // single-mode badge gave AUTO.
+  const badgeMode = enabledProfiles.includes("AUTO") ? "AUTO" : enabledProfiles.includes("SHADOW") ? "SHADOW" : enabledProfiles[0];
+  const modeColor = MODE_COLOR[badgeMode] ?? MODE_COLOR.OFF;
+  const badgeLabel = enabledProfiles.length > 0 ? enabledProfiles.join(" + ") : "OFF";
   // Trades and Activity are now dedicated full-screen tabs on mobile — just
   // the header (title/mode/kill switch stay reachable everywhere) plus
   // that tab's own list, none of the ticker/mode/portfolio-hero/capital/
@@ -1240,11 +1276,11 @@ export default function OptionsAutoTrader() {
           <ChartLineUp size={17} weight="bold" className="text-accent shrink-0" />
           <h1 className="font-display text-[17px] sm:text-[20px] font-bold tracking-[-0.01em] truncate">Options Auto-Trader</h1>
           <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-[var(--radius-sm)] shrink-0 inline-flex items-center gap-1"
-            style={settings?.execution_mode === "AUTO"
+            style={badgeMode === "AUTO"
               ? { background: `linear-gradient(135deg, var(--oat-accent), var(--oat-accent-2))`, color: modeColor.fg, boxShadow: "0 2px 8px rgba(90,85,247,0.35)" }
               : { background: modeColor.bg, color: modeColor.fg }}>
-            {settings?.execution_mode === "AUTO" && <span className="live-dot" style={{ background: "currentColor" }} aria-hidden="true" />}
-            {settings?.execution_mode ?? "…"}
+            {badgeMode === "AUTO" && <span className="live-dot" style={{ background: "currentColor" }} aria-hidden="true" />}
+            {settings ? badgeLabel : "…"}
           </span>
         </div>
         <motion.button
@@ -1263,42 +1299,31 @@ export default function OptionsAutoTrader() {
       <MarketStrip indices={indices} />
       {!mobileFullScreenTab && <RotatingTicker indices={indices} />}
 
-      {/* ── Execution mode: mobile-only compact segmented control — a
-          single slim row, no label, no filled status pill. Desktop's mode
-          control lives in UtilityBar below instead (broker + mode +
-          settings together, one slim utility row, not two stacked cards). ── */}
+      {/* ── Execution profiles: mobile-only independent on/off switches —
+          PAPER/SHADOW/AUTO can each be toggled on at once (migration 019
+          replaced the old mutually-exclusive segmented control). Desktop's
+          equivalent lives in UtilityBar below. ── */}
       {!mobileFullScreenTab && (
-      <div className="sm:hidden flex items-center gap-2.5 flex-wrap py-2 mb-3 px-3 rounded-[var(--radius-md)] order-[40]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)", boxShadow: "var(--e-1)" }}>
-        <div className="seg-track flex-1">
-          {["OFF", "PAPER", "SHADOW", "AUTO"].map((mode) => (
-            <motion.button key={mode} whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
-              role="tab" aria-selected={settings?.execution_mode === mode} data-on={settings?.execution_mode === mode}
-              onClick={() => setExecutionMode(mode)} disabled={saving} className="seg"
+      <div className="sm:hidden flex items-center gap-2 flex-wrap py-2 mb-3 px-3 rounded-[var(--radius-md)] order-[40]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)", boxShadow: "var(--e-1)" }}>
+        {["PAPER", "SHADOW", "AUTO"].map((profile) => {
+          const on = enabledProfiles.includes(profile);
+          return (
+            <motion.button key={profile} whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+              role="switch" aria-checked={on}
+              onClick={() => setProfileEnabled(profile, !on)} disabled={saving} className="seg flex-1"
               style={
-                settings?.execution_mode !== mode ? { minHeight: 38 }
-                  // AUTO's active segment is a solid indigo fill (not the
-                  // shared white-pill/colored-text look every other mode
-                  // uses) — it needs its own background override here since
-                  // MODE_COLOR.AUTO.fg is a light "ink" color meant for that
-                  // fill, not for text on the default white active-pill.
-                  : mode === "AUTO" ? {
+                !on ? { minHeight: 38 }
+                  : profile === "AUTO" ? {
                       background: `linear-gradient(135deg, var(--oat-accent), var(--oat-accent-2))`,
                       color: MODE_COLOR.AUTO.fg, minHeight: 38,
                       boxShadow: "0 2px 10px rgba(90,85,247,0.35), inset 0 1px 0 rgba(255,255,255,0.25)",
                     }
-                  : { color: MODE_COLOR[mode].fg, minHeight: 38 }
+                  : { background: MODE_COLOR[profile].bg, color: MODE_COLOR[profile].fg, minHeight: 38 }
               }>
-              {mode}
+              {profile} {on ? "ON" : "OFF"}
             </motion.button>
-          ))}
-        </div>
-        {settings?.execution_mode && settings.execution_mode !== "OFF" && (
-          <span className="text-[10px] font-medium text-muted shrink-0 w-full text-center -mt-0.5">
-            {settings.execution_mode === "AUTO" ? "Real broker orders"
-              : settings.execution_mode === "SHADOW" ? "Simulated fills"
-              : "Simulated fills"}
-          </span>
-        )}
+          );
+        })}
       </div>
       )}
 
@@ -1310,7 +1335,7 @@ export default function OptionsAutoTrader() {
       <UtilityBar
         settings={settings} growwStatus={growwStatus} growwConnecting={growwConnecting}
         connectGroww={connectGroww} setActiveBroker={setActiveBroker} saving={saving}
-        setExecutionMode={setExecutionMode}
+        setProfileEnabled={setProfileEnabled} enabledProfiles={enabledProfiles}
         settingsOpen={settingsOpen} setSettingsOpen={setSettingsOpen}
         showAllModes={showAllModes} setShowAllModes={setShowAllModes}
       />

@@ -62,6 +62,13 @@ create table options_autotrade_settings (
   time_exit_dte integer not null default 2,
   strike_breach_buffer_pct numeric not null default 0,
   max_consecutive_losses integer not null default 3,
+  -- Independent PAPER/SHADOW/AUTO toggles (migration 019) — replace
+  -- execution_mode's mutual exclusivity. execution_mode is kept for
+  -- backward compatibility (see executionProfiles.ts) but unused once
+  -- these are explicitly set.
+  paper_enabled boolean,
+  shadow_enabled boolean,
+  auto_enabled boolean,
   updated_at timestamptz not null default now(),
   constraint options_autotrade_settings_singleton check (id = 1)
 );
@@ -149,13 +156,18 @@ create table options_autotrade_log (
 -- computePositionSize() (via realized_pnl) but not yet WRITTEN by any
 -- enforcement logic in this codebase — that's the daily risk controller
 -- (a later phase), not this slice.
+-- Separate per-execution-profile risk lock (migration 019): PAPER, SHADOW
+-- and AUTO each track their own daily P&L / consecutive-loss state, so one
+-- profile's bad day never freezes another's trading.
 create table options_autotrade_daily_stats (
-  trade_date date primary key,
+  trade_date date not null,
+  execution_mode text not null default 'PAPER',
   trades_taken integer not null default 0,
   realized_pnl numeric not null default 0,
   consecutive_losses integer not null default 0,
   locked boolean not null default false,
-  lock_reason text
+  lock_reason text,
+  primary key (trade_date, execution_mode)
 );
 
 -- Concurrency/idempotency gate for AUTO entries — see

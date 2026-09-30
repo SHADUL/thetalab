@@ -103,6 +103,7 @@ import { runForwardValidationSelfTest } from '../src/quant/execution/selfTest.ts
 import { classifyShadowConsistency, buildShadowRecoveryFinalizationPlan, hasOrphanedExitTelemetry } from '../src/quant/execution/shadowConsistency.ts';
 import { evaluateProtocolTimingEligibility } from '../src/quant/execution/protocolTiming.ts';
 import { reconcile, type DbPositionSummary, type BrokerPosition, type BrokerOrder } from '../src/quant/execution/brokerReconciliation.ts';
+import { deriveEnabledExecutionProfiles, type ExecutionProfile } from '../src/quant/execution/executionProfiles.ts';
 import { computeVwapBands } from '../src/vwap-scalper/vwapBands.ts';
 import { detectVwapScalperSignals } from '../src/vwap-scalper/signals.ts';
 import { computeVwapScalperPositionSize, computeFixedCapitalPositionSize } from '../src/vwap-scalper/positionSizing.ts';
@@ -1021,12 +1022,14 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
 
   const { data: settings } = await supabase.from('options_autotrade_settings').select('*').eq('id', 1).maybeSingle();
   if (!settings) { res.status(500).json({ ok: false, error: 'settings_not_found' }); return; }
-  // This guard predates AUTO mode existing at all — it originally meant
-  // "only run when paper execution is turned on." AUTO must pass it too,
-  // or every scan cycle silently no-ops forever and AUTO never places a
-  // single real order despite everything downstream being wired for it.
-  if (settings.execution_mode !== 'PAPER' && settings.execution_mode !== 'AUTO' && settings.execution_mode !== 'SHADOW') {
-    res.status(200).json({ ok: true, skipped: `execution_mode is '${settings.execution_mode}', not PAPER, SHADOW or AUTO` });
+  // Independent PAPER/SHADOW/AUTO toggles (migration 019): every profile
+  // enabled this cycle runs its OWN full, independent copy of the same
+  // scan decision — separate sizing, separate execution, separate P&L,
+  // separate daily risk lock. See executionProfiles.ts for the exact
+  // (backward-compatible) derivation.
+  const enabledModes = deriveEnabledExecutionProfiles(settings) as ExecutionProfile[];
+  if (enabledModes.length === 0) {
+    res.status(200).json({ ok: true, skipped: `no execution profile enabled (execution_mode='${settings.execution_mode}', paper_enabled=${settings.paper_enabled}, shadow_enabled=${settings.shadow_enabled}, auto_enabled=${settings.auto_enabled})` });
     return;
   }
   // A narrower control than execution_mode: pause NEW entries for just
@@ -1040,23 +1043,15 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     return;
   }
 
-  // Computed once, up top, so every log entry this whole scan produces —
-  // not just the ones after sizing — is tagged with the mode it actually
-  // ran under. The dashboard's Activity Log filters on this exactly like
-  // it already filters positions, so old PAPER chatter doesn't sit next
-  // to real AUTO activity looking like it's still happening.
-  const isLive = settings.execution_mode === 'AUTO';
-  // SHADOW runs the exact same decision pipeline AUTO does — including
-  // real-funds-based sizing, so the hypothetical order intent it records
-  // is what AUTO would ACTUALLY have sized, not a reserved_fund guess —
-  // but places zero broker orders (FORWARD_VALIDATION_PROTOCOL.md). It
-  // deliberately does NOT go through the broker-reconciliation gate below:
-  // that gate exists specifically to protect against a REAL duplicate
-  // order, which cannot happen here regardless.
-  const isShadow = settings.execution_mode === 'SHADOW';
-  const modeLabel = isLive ? 'AUTO' : isShadow ? 'SHADOW' : 'PAPER';
-  const log = (level: 'info' | 'error', message: string, detail?: unknown) =>
-    supabase.from('options_autotrade_log').insert({ level, message, detail: detail ?? null, execution_mode: modeLabel });
+  // Everything up to the mode loop below is genuinely SHARED across every
+  // enabled profile (the same live chain, the same decision) — tagged with
+  // every enabled mode joined together, so the Activity Log still shows
+  // which profiles this one scan's shared work applies to. Per-profile
+  // outcomes (sizing, execution, P&L) are logged with that profile's own
+  // label inside the loop further down.
+  const scanLabel = enabledModes.join('+');
+  const sharedLog = (level: 'info' | 'error', message: string, detail?: unknown) =>
+    supabase.from('options_autotrade_log').insert({ level, message, detail: detail ?? null, execution_mode: scanLabel });
 
   // Observability (QUANT_AUDIT.md Task 9): a traceable lifecycle for every
   // AUTO attempt — a stable scanId ties every event this one invocation
@@ -1065,9 +1060,9 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   // belong together. Never logs secrets/tokens — `detail` here is always a
   // plain object of IDs, symbols, and human-readable strings.
   const scanId = randomUUID();
-  const event = (name: string, detail?: Record<string, unknown>) =>
-    log('info', `[${name}] ${symbol}`, { event: name, scanId, symbol, ...detail });
-  await event('SCAN_STARTED', { executionMode: modeLabel });
+  const sharedEvent = (name: string, detail?: Record<string, unknown>) =>
+    sharedLog('info', `[${name}] ${symbol}`, { event: name, scanId, symbol, ...detail });
+  await sharedEvent('SCAN_STARTED', { enabledModes });
 
   if (!isMarketOpenIST()) { res.status(200).json({ ok: true, skipped: 'outside_market_hours' }); return; }
 
@@ -1076,18 +1071,35 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   // own implicit maxDailyLoss constraint (which only zeroes out lots for
   // whichever specific candidate is being sized, and knows nothing about
   // consecutive losses) — this is the blanket refusal Phase 20 asks for.
+  // Checked per PROFILE now (migration 019 gave daily_stats an
+  // execution_mode dimension) — a locked SHADOW day must never block
+  // AUTO's real trading, or vice versa. Only if EVERY enabled profile is
+  // currently locked does the whole (expensive) scan short-circuit here;
+  // otherwise the still-runnable profiles proceed and the locked ones are
+  // simply excluded from the entry loop below.
   const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-  const { data: dailyRowPreCheck } = await supabase.from('options_autotrade_daily_stats').select('*').eq('trade_date', todayIST).maybeSingle();
-  const lock = checkDailyRiskLock(
-    { realizedPnlToday: Number(dailyRowPreCheck?.realized_pnl) || 0, consecutiveLosses: Number(dailyRowPreCheck?.consecutive_losses) || 0 },
-    { equity: Number(settings.reserved_fund) || 0, maxDailyLossPct: settings.max_daily_loss_pct, maxConsecutiveLosses: settings.max_consecutive_losses },
-  );
-  if (lock.locked) {
-    if (!dailyRowPreCheck?.locked) {
-      await supabase.from('options_autotrade_daily_stats').upsert({ trade_date: todayIST, locked: true, lock_reason: lock.reason });
-      await log('info', `Daily risk lock engaged for ${symbol}: ${lock.reason} — ${lock.detail}`);
+  const { data: dailyRowsPreCheck } = await supabase.from('options_autotrade_daily_stats')
+    .select('*').eq('trade_date', todayIST).in('execution_mode', enabledModes);
+  const dailyRowByMode = new Map<ExecutionProfile, any>((dailyRowsPreCheck ?? []).map((r: any) => [r.execution_mode as ExecutionProfile, r]));
+  const lockByMode = new Map<ExecutionProfile, ReturnType<typeof checkDailyRiskLock>>();
+  for (const m of enabledModes) {
+    const row = dailyRowByMode.get(m);
+    const modeLock = checkDailyRiskLock(
+      { realizedPnlToday: Number(row?.realized_pnl) || 0, consecutiveLosses: Number(row?.consecutive_losses) || 0 },
+      { equity: Number(settings.reserved_fund) || 0, maxDailyLossPct: settings.max_daily_loss_pct, maxConsecutiveLosses: settings.max_consecutive_losses },
+    );
+    lockByMode.set(m, modeLock);
+    if (modeLock.locked && !row?.locked) {
+      await supabase.from('options_autotrade_daily_stats').upsert({ trade_date: todayIST, execution_mode: m, locked: true, lock_reason: modeLock.reason });
+      await sharedLog('info', `Daily risk lock engaged for ${symbol} (${m}): ${modeLock.reason} — ${modeLock.detail}`);
     }
-    res.status(200).json({ ok: true, skipped: 'daily_risk_locked', reason: lock.reason, detail: lock.detail });
+  }
+  const runnableModes = enabledModes.filter((m) => !lockByMode.get(m)!.locked);
+  if (runnableModes.length === 0) {
+    res.status(200).json({
+      ok: true, skipped: 'daily_risk_locked',
+      perMode: Object.fromEntries(enabledModes.map((m) => [m, lockByMode.get(m)])),
+    });
     return;
   }
 
@@ -1190,10 +1202,10 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     try {
       historicalCloses = await fetchHistoricalCloses(instrumentToken, { token, apiKey });
     } catch (err: any) {
-      await log('error', `Historical closes fetch failed for ${symbol} — premiumEdge will be excluded, not fabricated`, { message: err.message });
+      await sharedLog('error', `Historical closes fetch failed for ${symbol} — premiumEdge will be excluded, not fabricated`, { message: err.message });
     }
   } else {
-    await log('error', `No instrument_token in quote response for ${indexKey} — premiumEdge will be excluded, not fabricated`);
+    await sharedLog('error', `No instrument_token in quote response for ${indexKey} — premiumEdge will be excluded, not fabricated`);
   }
 
   // 3. Build the live chain: select strikes near spot for EVERY eligible
@@ -1235,7 +1247,7 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     try {
       quoteData = await kiteFetch(`/quote?${batch.map((k: string) => `i=${encodeURIComponent(k)}`).join('&')}`, { token, apiKey });
     } catch (err: any) {
-      await log('error', 'Live quote batch failed during paper-scan', { symbol, message: err.message });
+      await sharedLog('error', 'Live quote batch failed during paper-scan', { symbol, message: err.message });
       continue;
     }
     for (const key of batch) {
@@ -1284,7 +1296,7 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
       }
     }
   } catch (err: any) {
-    await log('error', `IV history load/rank failed for ${symbol} — ivRank will be excluded, not fabricated`, { message: err.message });
+    await sharedLog('error', `IV history load/rank failed for ${symbol} — ivRank will be excluded, not fabricated`, { message: err.message });
   }
   // The 252-session (≈1Y trading) lookback is this endpoint's primary
   // reading, fed into the quality score — matches ivRankAndPercentile's own
@@ -1294,7 +1306,9 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   // 4. Run the decision pipeline (skew -> strategy -> optimizer -> expiry
   // selection -> quality score). Both ivRank and premiumEdge are wired
   // from real data now — ivRank from the archive above, premiumEdge from
-  // the real historicalCloses fetched earlier.
+  // the real historicalCloses fetched earlier. This decision is SHARED —
+  // computed exactly once and reused by every enabled profile below, so
+  // PAPER/SHADOW/AUTO always act on the identical candidate this cycle.
   const step = enriched.slices[0]?.forward ? inferStrikeStep(enriched.slices[0].quotes.map((q) => q.quote.strike)) : 50;
   const wingWidths = [2, 4, 6].map((m) => m * step);
   const evaluations = evaluateExpiries(enriched, {
@@ -1320,7 +1334,7 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   try {
     marketRegime = classifyMarketRegime({ historicalCloses, currentSpot: spot, indiaVix, gapAndRange });
   } catch (err: any) {
-    await log('error', `Market regime classification failed for ${symbol}`, { message: err.message });
+    await sharedLog('error', `Market regime classification failed for ${symbol}`, { message: err.message });
   }
 
   const decision = decideTrade(evaluations, thresholds, marketRegime);
@@ -1335,13 +1349,13 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     evaluations: evaluations.map(serializeExpiryEvaluation),
   };
 
-  await log('info', `${modeLabel} scan decision for ${symbol}: ${decision.action}`, { rejectedRows: rejected.length, decision: decision.explanation });
+  await sharedLog('info', `${scanLabel} scan decision for ${symbol}: ${decision.action}`, { rejectedRows: rejected.length, decision: decision.explanation });
 
   if (decision.action === 'NO_TRADE' || !decision.expiryEvaluation?.best) {
     res.status(200).json({ ok: true, action: decision.action, explanation: decision.explanation, diagnostics });
     return;
   }
-  await event('CANDIDATE_SELECTED', {
+  await sharedEvent('CANDIDATE_SELECTED', {
     strategyLabel: decision.expiryEvaluation.strategyLabel, qualityScore: decision.expiryEvaluation.best.qualityScore.score,
   });
 
@@ -1352,498 +1366,527 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   // "YYYY-MM-DD" date string — every comparison against a DB row must go
   // through this same conversion, not compare the raw epoch value.
   const expiryDateStr = new Date(decision.expiryEvaluation.expiry).toISOString().slice(0, 10);
-
-  // 5. Portfolio state from currently ACTIVE positions IN THIS SAME MODE
-  // only. AUTO/PAPER/SHADOW are independent simulated books everywhere
-  // else in this file (separate P&L, separate daily-stats risk lock,
-  // separate telemetry) — this query previously had no execution_mode
-  // filter at all (a leftover from before SHADOW/AUTO existed, per its
-  // own now-stale "ACTIVE paper positions" comment), which meant PAPER's
-  // open positions were silently counting against SHADOW's (and AUTO's)
-  // portfolio-risk caps — maxPortfolioRiskPct, maxMarginUtilizationPct,
-  // maxCorrelatedGroupRiskPct, maxPositions — below. Found 2026-09-29 when
-  // 2 ACTIVE PAPER positions (₹2,44,864 margin) were blocking every SHADOW
-  // entry via maxMarginUtilization, despite zero ACTIVE SHADOW positions
-  // existing.
-  const { data: openRows } = await supabase.from('options_autotrade_positions').select('*').eq('status', 'ACTIVE').eq('execution_mode', modeLabel);
-  const openPositions: OpenPositionSummary[] = (openRows ?? []).map((p: any) => ({
-    underlyingGroup: p.symbol,
-    maxLoss: Number(p.max_loss) || 0,
-    marginRequired: Number(p.margin_required) || 0,
-    netGreeks: { delta: Number(p.net_delta) || 0, gamma: Number(p.net_gamma) || 0, theta: Number(p.net_theta) || 0, vega: Number(p.net_vega) || 0, rho: 0 },
-  }));
-  const duplicateExists = (openRows ?? []).some((p: any) => p.symbol === symbol && p.expiry === expiryDateStr && p.strategy_label === decision.expiryEvaluation!.strategyLabel);
-
-  const { data: dailyRow } = await supabase.from('options_autotrade_daily_stats').select('*').eq('trade_date', todayIST).maybeSingle();
   const sevenDaysAgo = new Date(Date.now() - 7 * 86_400_000).toISOString().slice(0, 10);
-  const { data: weekRows } = await supabase.from('options_autotrade_daily_stats').select('realized_pnl').gte('trade_date', sevenDaysAgo);
-  const realizedPnlToday = Number(dailyRow?.realized_pnl) || 0;
-  const realizedPnlThisWeek = (weekRows ?? []).reduce((s: number, r: any) => s + (Number(r.realized_pnl) || 0), 0);
-
-  const portfolio: PortfolioState = { openPositions, realizedPnlToday, realizedPnlThisWeek };
-
-  // 6. Per-lot margin from a live basket call (the candidate's own legs, at 1 lot).
-  const legs: PlannedLeg[] = best.result.legs.map((l) => {
-    const inst = instrumentRows.find((r: any) => r.expiry === expiryDateStr && Number(r.strike) === l.strike && r.option_right === l.right);
-    return { side: l.side, right: l.right, strike: l.strike, tradingsymbol: inst?.tradingsymbol ?? '', quantity: lotSize ?? 0, fillPrice: l.price };
-  });
+  const winningSlice = enriched.slices.find((s) => s.expiry === decision.expiryEvaluation!.expiry);
 
   // Which broker AUTO's real order would actually go through — decided
-  // once, here, and reused for every real-money check below (funds,
-  // margin, execution). PAPER/SHADOW never reach this branch's real
-  // consequences; they still use Kite's chain/quotes for the decision
-  // itself regardless (see options-auto's own scoping note: Groww's data
-  // depth can't replace Kite's here, this is order EXECUTION only).
+  // once for the whole scan (Groww routing is a global setting, not
+  // per-profile) and reused inside the AUTO iteration of the loop below.
   const activeBroker = settings.active_broker === 'GROWW' ? 'GROWW' : 'KITE';
-  const routesRealOrdersThroughGroww = isLive && activeBroker === 'GROWW';
-  let growwToken: string | null = null;
-  if (routesRealOrdersThroughGroww) {
-    const { data: growwSessionRow } = await supabase.from('groww_session').select('access_token').eq('id', 1).maybeSingle();
-    growwToken = growwSessionRow?.access_token ?? null;
-  }
 
-  // A real Groww order needs GROWW's OWN trading_symbol (a different
-  // string format from Kite's, e.g. "NIFTY26O0622700PE") — resolved from
-  // groww_options_instruments, never Kite's options_instruments. Only
-  // overridden when a real order will actually go through Groww; every
-  // other path keeps the Kite-resolved symbol from above unchanged.
-  if (routesRealOrdersThroughGroww) {
-    const { data: growwInstrumentRows } = await supabase.from('groww_options_instruments')
-      .select('*').eq('symbol', symbol).eq('expiry', expiryDateStr);
-    for (const l of legs) {
-      const growwInst = (growwInstrumentRows ?? []).find((r: any) => Number(r.strike) === l.strike && r.option_right === l.right);
-      l.tradingsymbol = growwInst?.trading_symbol ?? '';
-    }
-  }
+  // From here on, every enabled-and-unlocked profile runs its OWN
+  // independent copy of the candidate above: its own sizing (against its
+  // own real-funds-or-reserved-fund equity), its own broker-reconciliation
+  // gate (AUTO only), its own concurrency claim, its own execution, and
+  // its own position/telemetry row. A failure or skip in one profile this
+  // cycle (e.g. AUTO's real funds unavailable) never prevents another
+  // enabled profile (e.g. SHADOW) from still recording its own outcome.
+  const perModeResults: Record<string, unknown> = {};
 
-  const unresolvedLegs = legs.filter((l) => !l.tradingsymbol).map((l) => `${l.strike}${l.right}`);
+  for (const modeLabel of runnableModes) {
+    const isLive = modeLabel === 'AUTO';
+    const isShadow = modeLabel === 'SHADOW';
+    const log = (level: 'info' | 'error', message: string, detail?: unknown) =>
+      supabase.from('options_autotrade_log').insert({ level, message, detail: detail ?? null, execution_mode: modeLabel });
+    const event = (name: string, detail?: Record<string, unknown>) =>
+      log('info', `[${name}] ${symbol}`, { event: name, scanId, symbol, ...detail });
 
-  let marginRequiredPerLot = 0;
-  let marginDetail = 'Margin not checked — instrument resolution failed.';
-  if (!unresolvedLegs.length) {
-    try {
-      if (routesRealOrdersThroughGroww) {
-        if (!growwToken) throw new Error('no_groww_session');
-        const total = await fetchGrowwBasketMargin(legs.map((l) => ({ tradingSymbol: l.tradingsymbol, side: l.side, quantity: l.quantity })), growwToken);
-        if (total === null) throw new Error('Groww basket-margin request failed');
-        marginRequiredPerLot = total;
-        marginDetail = `Live Groww basket margin for 1 lot: ₹${marginRequiredPerLot.toFixed(0)}.`;
-      } else {
-        const basketReq = buildBasketMarginRequest(legs.map((l) => ({ side: l.side, tradingsymbol: l.tradingsymbol, quantity: l.quantity })), { exchange, product: 'NRML' });
-        const marginData = await kiteFetch(`/margins/basket?consider_positions=false`, { method: 'POST', token, apiKey, jsonBody: basketReq.orders });
-        const margin = parseBasketMarginResponse(marginData);
-        marginRequiredPerLot = margin?.totalRequired ?? 0;
-        marginDetail = `Live basket margin for 1 lot: ₹${marginRequiredPerLot.toFixed(0)}.`;
-      }
-    } catch (err: any) {
-      marginDetail = `Margin check failed: ${err.message}`;
-    }
-  }
-
-  // AUTO mode sizes against the REAL broker balance, never the self-
-  // declared reserved_fund setting — that number is a risk-budget
-  // allocation a human typed in, not a live account balance. A failed
-  // fetch refuses the trade outright rather than falling back to
-  // reserved_fund, which would size a real order against a number nobody
-  // has verified the account actually holds. SHADOW sizes against the SAME
-  // real balance (never reserved_fund either) so its recorded hypothetical
-  // intent reflects what AUTO would actually have sized — see this file's
-  // header note on isShadow above.
-  const usesRealFunds = isLive || isShadow;
-  const realAvailableFunds = usesRealFunds
-    ? (routesRealOrdersThroughGroww ? (growwToken ? await fetchGrowwAvailableFunds(growwToken) : null) : await fetchRealAvailableFunds(token, apiKey))
-    : null;
-  if (usesRealFunds && realAvailableFunds === null) {
-    await log('error', `${modeLabel}: could not verify real account funds for ${symbol} — refusing to size or record any intent this cycle.`);
-    res.status(200).json({ ok: true, action: decision.action, opened: false, skipped: 'real_funds_unavailable', diagnostics });
-    return;
-  }
-
-  // Broker reconciliation gate (QUANT_AUDIT.md Task 3) — AUTO only, and
-  // account-wide (not scoped to this one symbol): a disagreement between
-  // this system's own records and the active broker's actual order/
-  // position book on ANY symbol blocks EVERY new AUTO entry this cycle,
-  // regardless of which symbol is being scanned right now. This never
-  // touches an existing position — it only refuses to add MORE exposure
-  // while the broker's true state is uncertain.
-  //
-  // This gate reconciles against whichever broker is actually routing real
-  // orders this cycle — Kite's own order/position book for Kite, Groww's
-  // own for Groww (see fetchGrowwBrokerPositions/fetchGrowwBrokerOrdersToday
-  // above) — using the SAME unmodified reconcile() function either way.
-  if (routesRealOrdersThroughGroww) {
-    if (!growwToken) {
-      await event('BROKER_STATE_AMBIGUOUS', { reason: 'no_groww_session' });
-      await log('error', `AUTO (Groww): no Groww session — refusing all new Groww AUTO entries this cycle.`);
-      res.status(200).json({ ok: true, action: decision.action, opened: false, skipped: 'broker_state_unavailable', diagnostics });
-      return;
-    }
-    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-    const [brokerPositions, brokerOrders] = await Promise.all([
-      fetchGrowwBrokerPositions(growwToken),
-      fetchGrowwBrokerOrdersToday(growwToken, todayIST),
-    ]);
-    if (brokerPositions === null || brokerOrders === null) {
-      await event('BROKER_STATE_AMBIGUOUS', { reason: 'fetch_failed' });
-      await log('error', `AUTO (Groww): could not verify broker positions/orders for reconciliation — refusing all new AUTO entries this cycle.`);
-      res.status(200).json({ ok: true, action: decision.action, opened: false, skipped: 'broker_state_unavailable', diagnostics });
-      return;
-    }
-    const { dbActivePositions, dbPendingReconciliation, openIntents } = await fetchDbReconciliationInputs(supabase, 'GROWW');
-    const reconciliation = reconcile({
-      dbActivePositions, dbPendingReconciliation, openIntents, brokerPositions, brokerOrders,
-      manuallyAllowedTradingsymbols: settings.manually_allowed_tradingsymbols ?? [],
-    });
-    if (reconciliation.status === 'MISMATCH' || reconciliation.status === 'RECONCILIATION_REQUIRED') {
-      await event('RECONCILIATION_REQUIRED', { reconciliationStatus: reconciliation.status, findingCount: reconciliation.findings.length });
-      await log('error', `AUTO (Groww): broker reconciliation is ${reconciliation.status} — BLOCKING all new AUTO entries until resolved.`,
-        { findings: reconciliation.findings });
-      res.status(200).json({
-        ok: true, action: decision.action, opened: false, skipped: 'reconciliation_required',
-        reconciliation, diagnostics,
-      });
-      return;
-    }
-    await event('BROKER_RECONCILED', { reconciliationStatus: reconciliation.status });
-  } else if (isLive) {
-    const [brokerPositions, brokerOrders] = await Promise.all([
-      fetchBrokerPositions(token, apiKey),
-      fetchBrokerOrdersToday(token, apiKey),
-    ]);
-    if (brokerPositions === null || brokerOrders === null) {
-      await event('BROKER_STATE_AMBIGUOUS', { reason: 'fetch_failed' });
-      await log('error', `AUTO: could not verify broker positions/orders for reconciliation — refusing all new AUTO entries this cycle.`);
-      res.status(200).json({ ok: true, action: decision.action, opened: false, skipped: 'broker_state_unavailable', diagnostics });
-      return;
-    }
-    const { dbActivePositions, dbPendingReconciliation, openIntents } = await fetchDbReconciliationInputs(supabase, 'KITE');
-    const reconciliation = reconcile({
-      dbActivePositions, dbPendingReconciliation, openIntents, brokerPositions, brokerOrders,
-      manuallyAllowedTradingsymbols: settings.manually_allowed_tradingsymbols ?? [],
-    });
-    if (reconciliation.status === 'MISMATCH' || reconciliation.status === 'RECONCILIATION_REQUIRED') {
-      await event('RECONCILIATION_REQUIRED', { reconciliationStatus: reconciliation.status, findingCount: reconciliation.findings.length });
-      await log('error', `AUTO: broker reconciliation is ${reconciliation.status} — BLOCKING all new AUTO entries until resolved.`,
-        { findings: reconciliation.findings });
-      res.status(200).json({
-        ok: true, action: decision.action, opened: false, skipped: 'reconciliation_required',
-        reconciliation, diagnostics,
-      });
-      return;
-    }
-    await event('BROKER_RECONCILED', { reconciliationStatus: reconciliation.status });
-  }
-
-  const sizing = computePositionSize(
-    {
-      pricing: { maxLoss: best.result.maxLoss, maxProfit: best.result.maxProfit, netCredit: best.result.netCredit, netGreeks: best.result.netGreeks },
-      marginRequiredPerLot,
-      underlyingGroup: candidateSymbolGroup,
-    },
-    {
-      // AUTO and SHADOW both base every %-of-equity risk cap (max
-      // risk/trade, daily/weekly loss, portfolio risk, correlated-group
-      // risk) on the REAL account balance — reserved_fund is a self-
-      // declared number a human typed in, and letting real risk limits key
-      // off it would let those caps drift arbitrarily far from what the
-      // account can actually absorb. PAPER keeps using reserved_fund,
-      // since there's no real balance to check it against.
-      //
-      // SHADOW gets one deliberate exception: a temporary equity FLOOR
-      // (SHADOW_EQUITY_FLOOR_RUPEES), applied as max(real funds, floor) —
-      // added 2026-09-29 because the real account currently shows ₹0
-      // available (not yet funded; ₹1L is being loaded soon) and SHADOW
-      // sizing to zero lots on every scan was producing no forward-
-      // validation signal at all. This is a floor, not an override: once
-      // real funds exceed the floor, SHADOW automatically reverts to
-      // sizing off the real balance with no code change needed — AUTO is
-      // NEVER floored, since it fires real orders and must only ever size
-      // against what the account actually holds.
-      equity: isShadow ? Math.max(realAvailableFunds ?? 0, SHADOW_EQUITY_FLOOR_RUPEES)
-        : usesRealFunds ? (realAvailableFunds ?? 0) : Number(settings.reserved_fund) || 0,
-      availableFunds: isShadow ? Math.max(realAvailableFunds ?? 0, SHADOW_EQUITY_FLOOR_RUPEES)
-        : usesRealFunds ? (realAvailableFunds ?? 0) : Number(settings.reserved_fund) || 0,
-    },
-    portfolio,
-    {
-      maxRiskPerTradePct: settings.max_risk_per_trade_pct, maxDailyLossPct: settings.max_daily_loss_pct,
-      maxWeeklyLossPct: settings.max_weekly_loss_pct, maxPortfolioRiskPct: settings.max_portfolio_risk_pct,
-      maxMarginUtilizationPct: settings.max_margin_utilization_pct, maxPositions: settings.max_positions,
-      maxUnderlyingDelta: settings.max_underlying_delta, maxGamma: settings.max_gamma, maxVega: settings.max_vega,
-      maxCorrelatedGroupRiskPct: settings.max_correlated_group_risk_pct,
-    },
-  );
-
-  // Lots are only known AFTER sizing — legs above were built at exactly
-  // ONE lot's quantity (to price the per-lot margin call). Scale every
-  // leg's quantity by sizing.lots now, before it goes anywhere near
-  // execution or persistence; using the unscaled `legs` past this point
-  // would trade/record the wrong quantity whenever sizing.lots > 1.
-  const scaledLegs: PlannedLeg[] = legs.map((l) => ({ ...l, quantity: l.quantity * sizing.lots }));
-
-  // 7. Pre-trade validation. This synchronous flow has no time gap between
-  // scoring and "submission" — priceDrift/Greeks/max-loss recalculation are
-  // therefore trivially unchanged (0% drift, same values). These checks
-  // become meaningful once a real time gap exists (e.g. a SEMI_AUTO human
-  // confirmation delay, or genuine order-placement latency) — for now they
-  // mainly prove the validation interface is wired correctly.
-  const validation = runPreTradeValidation({
-    quoteAgeMs: 0, maxQuoteAgeMs: 5 * 60_000,
-    isMarketOpen: true,
-    allInstrumentsResolved: unresolvedLegs.length === 0, unresolvedLegs,
-    marginSufficient: sizing.lots > 0 && marginRequiredPerLot > 0, marginDetail,
-    positionSizeLots: sizing.lots,
-    duplicatePositionExists: duplicateExists,
-    priceDriftPct: 0, maxSlippagePct: 1.5,
-    strategyStillValid: true, strategyDetail: 'Decision was made from the same live snapshot being validated — no time gap yet.',
-    greeksWithinLimits: sizing.lots > 0, greeksDetail: sizing.lots > 0 ? 'Within computePositionSize\'s exposure caps.' : sizing.reason ?? 'Position size resolved to zero.',
-    recalculatedMaxLoss: best.result.maxLoss, originalMaxLoss: best.result.maxLoss, maxLossDriftPct: 5,
-  });
-
-  // Concurrency/idempotency gate (QUANT_AUDIT.md Task 2) — the actual
-  // claim happens here, right before execution, on the FINAL scaled legs
-  // (the exact candidate shape a real order would be placed for). A
-  // conflicting claim means another invocation already owns this exact
-  // candidate right now — zero broker calls follow for this attempt. See
-  // orderIntent.ts for exactly what "the same trade" means here, and why
-  // a later, distinct attempt is never permanently blocked.
-  const intentStore = supabaseOrderIntentStore(supabase);
-  const claim = await claimOrderIntent(intentStore, {
-    symbol, expiry: expiryDateStr, strategyLabel: decision.expiryEvaluation.strategyLabel, tradeDate: todayIST,
-    legs: scaledLegs.map((l) => ({ side: l.side, right: l.right, strike: l.strike })),
-    executionMode: modeLabel,
-  });
-  if (!claim.claimed) {
-    if (claim.reason === 'CONFLICT') {
-      await event('INTENT_CONFLICT', { intentKey: claim.intentKey });
-      await event('ENTRY_SKIPPED', { reason: 'intent_conflict' });
-      await log('info', `${modeLabel}: intent conflict for ${symbol} — another invocation already claimed this exact candidate. Skipping, zero orders placed.`);
-      res.status(200).json({ ok: true, action: decision.action, opened: false, skipped: 'intent_conflict', diagnostics });
-      return;
-    }
-    // STORE_ERROR — the intent table itself couldn't be written to. Fail
-    // closed rather than proceeding without the concurrency guarantee.
-    await event('ENTRY_SKIPPED', { reason: 'intent_claim_failed' });
-    await log('error', `${modeLabel}: failed to claim an order intent for ${symbol} — refusing to place any order without the concurrency lock.`, { message: claim.message });
-    res.status(200).json({ ok: true, action: decision.action, opened: false, skipped: 'intent_claim_failed', diagnostics });
-    return;
-  }
-  await event('INTENT_CLAIMED', { intentId: claim.intentId, intentKey: claim.intentKey });
-  await event('PRETRADE_VALIDATED', { passed: validation.passed });
-
-  // AUTO fires REAL orders against the real Zerodha account — BUY (hedge)
-  // legs first, confirmed FILLED, before any SELL (short) leg, exactly the
-  // sequencing real margin treatment requires (see liveFill.ts's own
-  // header). PAPER keeps simulating every leg filling instantly.
-  if (isLive) await event('HEDGE_SUBMITTED', { intentId: claim.intentId });
-  const winningSlice = enriched.slices.find((s) => s.expiry === decision.expiryEvaluation!.expiry);
-  const shadowExecResult = isShadow && winningSlice
-    ? runShadowExecutionForLegs(scaledLegs, validation, winningSlice.quotes)
-    : null;
-  // routesRealOrdersThroughGroww never actually reaches here today — the
-  // broker-reconciliation gate above already refuses and returns before
-  // this point whenever it's true (see that gate's own comment on why).
-  // Wired correctly anyway, so lifting that refusal later (once a real
-  // Groww reconciliation check exists) is a one-line change here, not a
-  // new feature.
-  const execResult = isLive
-    ? routesRealOrdersThroughGroww
-      ? await runLiveExecution(scaledLegs, validation, makeGrowwOrderPlacer(growwToken!), { exchange: GROWW_EXCHANGE_FOR_KITE_EXCHANGE[exchange] ?? 'NSE' })
-      : await runLiveExecution(scaledLegs, validation, makeLiveOrderPlacer(token, apiKey), { exchange })
-    : shadowExecResult
-      ? shadowExecResult
-      : runPaperExecution(scaledLegs, validation);
-
-  // SHADOW-only telemetry: option-chain snapshot + per-expiry IV history +
-  // the forward-validation ledger signal, ALL best-effort (SOFT_FAIL — a
-  // failure here never blocks recording the position/log below, it only
-  // affects this signal's eligibility for the OFFICIAL forward-validation
-  // sample, per FORWARD_VALIDATION_PROTOCOL.md). Persists the EXACT slice
-  // already used above — never a second fetch.
-  let shadowEligible = false;
-  let shadowEligibilityReasons: string[] = [];
-  let shadowLedgerId: string | null = null;
-  if (isShadow && winningSlice) {
-    const shadowRepo = supabaseShadowRepository(supabase);
-    const scanIdForShadow = randomUUID();
-    const nowIso = new Date().toISOString();
-    const snapshotRows: OptionChainSnapshotRow[] = winningSlice.quotes.map((q) => ({
-      scanId: scanIdForShadow, capturedAt: nowIso, symbol, spot: spot ?? null,
-      indiaVix: null, forward: winningSlice.forward, expiry: expiryDateStr,
-      calendarDte: decision.expiryEvaluation!.dte, tradingSessionHorizon: approxTradingSessionsFromCalendarDays(decision.expiryEvaluation!.dte),
-      strike: q.quote.strike, optionRight: q.quote.right,
-      bid: q.quote.bid, bidQty: null, ask: q.quote.ask, askQty: null, ltp: q.quote.last, markPrice: q.markPrice,
-      volume: q.quote.volume, openInterest: q.quote.openInterest, iv: q.iv,
-      delta: q.greeks.delta, gamma: q.greeks.gamma, theta: q.greeks.theta, vega: q.greeks.vega,
+    // 5. Portfolio state from currently ACTIVE positions IN THIS SAME MODE
+    // only. AUTO/PAPER/SHADOW are independent simulated books everywhere
+    // else in this file (separate P&L, separate daily-stats risk lock,
+    // separate telemetry) — this query previously had no execution_mode
+    // filter at all (a leftover from before SHADOW/AUTO existed, per its
+    // own now-stale "ACTIVE paper positions" comment), which meant PAPER's
+    // open positions were silently counting against SHADOW's (and AUTO's)
+    // portfolio-risk caps — maxPortfolioRiskPct, maxMarginUtilizationPct,
+    // maxCorrelatedGroupRiskPct, maxPositions — below. Found 2026-09-29 when
+    // 2 ACTIVE PAPER positions (₹2,44,864 margin) were blocking every SHADOW
+    // entry via maxMarginUtilization, despite zero ACTIVE SHADOW positions
+    // existing.
+    const { data: openRows } = await supabase.from('options_autotrade_positions').select('*').eq('status', 'ACTIVE').eq('execution_mode', modeLabel);
+    const openPositions: OpenPositionSummary[] = (openRows ?? []).map((p: any) => ({
+      underlyingGroup: p.symbol,
+      maxLoss: Number(p.max_loss) || 0,
+      marginRequired: Number(p.margin_required) || 0,
+      netGreeks: { delta: Number(p.net_delta) || 0, gamma: Number(p.net_gamma) || 0, theta: Number(p.net_theta) || 0, vega: Number(p.net_vega) || 0, rho: 0 },
     }));
-    let snapshotOk = true;
-    try { snapshotOk = 'ok' in await shadowRepo.insertChainSnapshots(snapshotRows); } catch { snapshotOk = false; }
+    const duplicateExists = (openRows ?? []).some((p: any) => p.symbol === symbol && p.expiry === expiryDateStr && p.strategy_label === decision.expiryEvaluation!.strategyLabel);
 
-    const atmIvForShadow = atmIvOf(winningSlice);
-    const ivRows: IvHistoryRow[] = winningSlice.atmStrike !== null ? [{
-      capturedAt: nowIso, symbol, expiry: expiryDateStr, atmStrike: winningSlice.atmStrike,
-      atmCallIv: winningSlice.quotes.find((q) => q.quote.strike === winningSlice.atmStrike && q.quote.right === 'CE')?.iv ?? null,
-      atmPutIv: winningSlice.quotes.find((q) => q.quote.strike === winningSlice.atmStrike && q.quote.right === 'PE')?.iv ?? null,
-      combinedAtmIv: atmIvForShadow, calendarDte: decision.expiryEvaluation!.dte, tradingSessionHorizon: approxTradingSessionsFromCalendarDays(decision.expiryEvaluation!.dte),
-      spot: spot ?? null, indiaVix: null,
-    }] : [];
-    try { await shadowRepo.insertIvHistory(dedupeIvHistoryRows(ivRows)); } catch { /* SOFT_FAIL — see comment above */ }
+    const dailyRow = dailyRowByMode.get(modeLabel);
+    const { data: weekRows } = await supabase.from('options_autotrade_daily_stats').select('realized_pnl').eq('execution_mode', modeLabel).gte('trade_date', sevenDaysAgo);
+    const realizedPnlToday = Number(dailyRow?.realized_pnl) || 0;
+    const realizedPnlThisWeek = (weekRows ?? []).reduce((s: number, r: any) => s + (Number(r.realized_pnl) || 0), 0);
 
-    let ledgerOk = true;
-    try {
-      // Task 13: version fingerprint — activeProtocolId is null (a real,
-      // honest PRE_PROTOCOL state) until a protocol run has actually been
-      // started for this symbol+baseline via resource=start-forward-
-      // validation; this lookup never creates or infers one.
-      const { data: activeRun } = await supabase.from('forward_validation_runs')
-        .select('protocol_id').eq('symbol', symbol).eq('baseline_version', BASELINE_VERSION).eq('status', 'ACTIVE').maybeSingle();
-      const signal: ForwardSignal = {
-        symbol, strategyLabel: decision.expiryEvaluation!.strategyLabel, expiry: expiryDateStr,
-        calendarDte: decision.expiryEvaluation!.dte, tradingSessionHorizon: approxTradingSessionsFromCalendarDays(decision.expiryEvaluation!.dte),
-        shortDeltaTarget: null, wingWidth: null, netCredit: best.result.netCredit, estimatedMaxLoss: best.result.maxLoss,
-        estimatedPop: best.result.pop, expectedValue: best.expectedValue, premiumEdgePct: best.qualityScore.raw.premiumEdgePct,
-        independentEvPerUnitRisk: best.qualityScore.raw.independentEvPerUnitRisk, ivRank: null,
-        liquidityTier: best.liquidity.tier, marketRegime: null, sizingLots: sizing.lots, expectedCostsRupees: null,
-        intentId: claim.claimed ? claim.intentId : null,
-        baselineVersion: BASELINE_VERSION, fillModelVersion: 'SHADOW_EXECUTION_V1',
-        protocolId: activeRun?.protocol_id ?? null, codeVersion: process.env.VERCEL_GIT_COMMIT_SHA ?? null,
-      };
-      // Task 1: capture the returned ledger row id so it can be stored on
-      // the position row created below — this IS the link that lets the
-      // eventual exit find its way back to the same ledger row.
-      shadowLedgerId = await recordSignal(supabaseForwardLedgerStore(supabase), signal);
-    } catch { ledgerOk = false; }
+    const portfolio: PortfolioState = { openPositions, realizedPnlToday, realizedPnlThisWeek };
 
-    // Task 3: entry execution-quality telemetry, one row per leg, from the
-    // SAME fill/quote objects SHADOW_EXECUTION_V1 already produced above —
-    // never a second fetch.
-    let entryTelemetryOk = true;
-    if (shadowExecResult && shadowExecResult.state !== 'FAILED') {
-      try {
-        const quotesByKey = new Map(winningSlice.quotes.map((q) => [`${q.quote.strike}:${q.quote.right}`, q]));
-        const entryRows: ExecutionQualityRow[] = shadowExecResult.legFills.map((l) => {
-          const q = quotesByKey.get(`${l.strike}:${l.right}`);
-          const decisionMid = q?.mid ?? null;
-          const slippage = decisionMid !== null ? (l.side === 'BUY' ? l.fillPrice - decisionMid : decisionMid - l.fillPrice) : null;
-          return {
-            scanId: scanIdForShadow, candidateId: null, intentId: claim.claimed ? claim.intentId : null,
-            positionId: null, legId: null, symbol, strategyLabel: decision.expiryEvaluation!.strategyLabel,
-            expiry: expiryDateStr, strike: l.strike, optionRight: l.right, side: l.side, quantity: l.quantity,
-            executionMode: 'SHADOW', fillModel: 'SHADOW_EXECUTION_V1',
-            // Task 2: phase+forwardLedgerId are what let an eventual exit
-            // look up this EXACT entry's real slippage cost instead of
-            // hard-coding entryExecutionCost to 0.
-            phase: 'ENTRY', forwardLedgerId: shadowLedgerId,
-            decisionAt: nowIso, quoteAt: nowIso, submittedAt: nowIso, filledAt: nowIso,
-            decisionMid, bid: q?.quote.bid ?? null, ask: q?.quote.ask ?? null, spreadPct: q?.spreadPct ?? null,
-            submittedPrice: l.fillPrice, actualFill: l.fillPrice,
-            slippageRupees: slippage, slippageBps: decisionMid && decisionMid > 0 && slippage !== null ? (slippage / decisionMid) * 10_000 : null,
-            latencyMs: null, volume: q?.quote.volume ?? null, openInterest: q?.quote.openInterest ?? null,
-            delta: q?.greeks.delta ?? null, dte: decision.expiryEvaluation!.dte, indiaVix: null,
-            brokerOrderId: null, fillIsSimulated: true,
-          };
-        });
-        const result = await shadowRepo.insertExecutionQuality(entryRows);
-        entryTelemetryOk = 'ok' in result;
-      } catch { entryTelemetryOk = false; }
-    }
-
-    const eligibility = isEligibleForForwardValidation({
-      baselineVersion: BASELINE_VERSION, executionMode: 'SHADOW', fillModel: 'SHADOW_EXECUTION_V1',
-      everyLegHasRealBidAsk: shadowExecResult?.hasRealBidAsk ?? false,
-      quotesFreshMs: 0, maxQuoteAgeMs: 5 * 60_000,
-      snapshotStoredSuccessfully: snapshotOk, ledgerSignalStoredSuccessfully: ledgerOk && entryTelemetryOk,
-      knownIngestionBug: false, brokerOrderPlaced: false,
-      expectedBaselineVersion: BASELINE_VERSION, expectedFillModel: 'SHADOW_EXECUTION_V1',
+    // 6. Per-lot margin from a live basket call (the candidate's own legs, at 1 lot).
+    const legs: PlannedLeg[] = best.result.legs.map((l) => {
+      const inst = instrumentRows.find((r: any) => r.expiry === expiryDateStr && Number(r.strike) === l.strike && r.option_right === l.right);
+      return { side: l.side, right: l.right, strike: l.strike, tradingsymbol: inst?.tradingsymbol ?? '', quantity: lotSize ?? 0, fillPrice: l.price };
     });
-    shadowEligible = eligibility.eligible;
-    shadowEligibilityReasons = eligibility.reasons;
-    await event('SHADOW_SIGNAL_RECORDED', { eligibleForForwardValidation: shadowEligible, reasons: shadowEligibilityReasons, ledgerId: shadowLedgerId });
-  }
 
-  if (execResult.state === 'RECONCILIATION_REQUIRED') {
-    // A real order's true broker status is unknown (a timeout the
-    // follow-up query also couldn't resolve — see liveFill.ts). This MUST
-    // leave a durable, visible record — not just a log line — so the
-    // reconciliation gate above actually blocks future AUTO entries on
-    // the next scan, and a human sees it in the dashboard the same way
-    // an existing CLOSE_FAILED position already shows up.
-    const { data: reconRow } = await supabase.from('options_autotrade_positions').insert({
-      symbol, strategy_label: decision.expiryEvaluation.strategyLabel, expiry: expiryDateStr,
-      status: 'RECONCILIATION_REQUIRED', execution_state: execResult.state, protection: execResult.protection,
-      execution_mode: modeLabel, broker: activeBroker, lots: sizing.lots, net_credit: best.result.netCredit,
-      max_profit: sizing.sizedMaxProfit, max_loss: sizing.sizedMaxLoss, margin_required: sizing.sizedMarginRequired,
-      quality_score: best.qualityScore.score, decision_explanation: decision.explanation, entry_date: todayIST,
-    }).select('id').single();
-    if (reconRow) {
-      await supabase.from('options_autotrade_legs').insert(execResult.legFills.map((l) => ({
-        position_id: reconRow.id, side: l.side, option_right: l.right, strike: l.strike,
-        tradingsymbol: l.tradingsymbol, quantity: l.quantity, fill_price: l.fillPrice, status: l.status,
-        order_id: l.orderId ?? null,
-      })));
+    // PAPER/SHADOW never reach this branch's real consequences; they
+    // still use Kite's chain/quotes for the decision itself regardless
+    // (see options-auto's own scoping note: Groww's data depth can't
+    // replace Kite's here, this is order EXECUTION only).
+    const routesRealOrdersThroughGroww = isLive && activeBroker === 'GROWW';
+    let growwToken: string | null = null;
+    if (routesRealOrdersThroughGroww) {
+      const { data: growwSessionRow } = await supabase.from('groww_session').select('access_token').eq('id', 1).maybeSingle();
+      growwToken = growwSessionRow?.access_token ?? null;
     }
-    await intentStore.updateStatus(claim.intentId, { status: 'FAILED', error: 'RECONCILIATION_REQUIRED', positionId: reconRow?.id });
-    await event('BROKER_STATE_AMBIGUOUS', { intentId: claim.intentId, positionId: reconRow?.id });
-    await event('RECONCILIATION_REQUIRED', { intentId: claim.intentId, positionId: reconRow?.id });
-    await log('error', `${modeLabel}: position for ${symbol} needs MANUAL RECONCILIATION against the broker — at least one leg's true status is unknown. New AUTO entries are now blocked account-wide until resolved.`, { log: execResult.log });
-    res.status(200).json({ ok: true, action: decision.action, opened: false, reconciliationRequired: true, validation, sizing, log: execResult.log, diagnostics });
-    return;
+
+    // A real Groww order needs GROWW's OWN trading_symbol (a different
+    // string format from Kite's, e.g. "NIFTY26O0622700PE") — resolved from
+    // groww_options_instruments, never Kite's options_instruments. Only
+    // overridden when a real order will actually go through Groww; every
+    // other path keeps the Kite-resolved symbol from above unchanged.
+    if (routesRealOrdersThroughGroww) {
+      const { data: growwInstrumentRows } = await supabase.from('groww_options_instruments')
+        .select('*').eq('symbol', symbol).eq('expiry', expiryDateStr);
+      for (const l of legs) {
+        const growwInst = (growwInstrumentRows ?? []).find((r: any) => Number(r.strike) === l.strike && r.option_right === l.right);
+        l.tradingsymbol = growwInst?.trading_symbol ?? '';
+      }
+    }
+
+    const unresolvedLegs = legs.filter((l) => !l.tradingsymbol).map((l) => `${l.strike}${l.right}`);
+
+    let marginRequiredPerLot = 0;
+    let marginDetail = 'Margin not checked — instrument resolution failed.';
+    if (!unresolvedLegs.length) {
+      try {
+        if (routesRealOrdersThroughGroww) {
+          if (!growwToken) throw new Error('no_groww_session');
+          const total = await fetchGrowwBasketMargin(legs.map((l) => ({ tradingSymbol: l.tradingsymbol, side: l.side, quantity: l.quantity })), growwToken);
+          if (total === null) throw new Error('Groww basket-margin request failed');
+          marginRequiredPerLot = total;
+          marginDetail = `Live Groww basket margin for 1 lot: ₹${marginRequiredPerLot.toFixed(0)}.`;
+        } else {
+          const basketReq = buildBasketMarginRequest(legs.map((l) => ({ side: l.side, tradingsymbol: l.tradingsymbol, quantity: l.quantity })), { exchange, product: 'NRML' });
+          const marginData = await kiteFetch(`/margins/basket?consider_positions=false`, { method: 'POST', token, apiKey, jsonBody: basketReq.orders });
+          const margin = parseBasketMarginResponse(marginData);
+          marginRequiredPerLot = margin?.totalRequired ?? 0;
+          marginDetail = `Live basket margin for 1 lot: ₹${marginRequiredPerLot.toFixed(0)}.`;
+        }
+      } catch (err: any) {
+        marginDetail = `Margin check failed: ${err.message}`;
+      }
+    }
+
+    // AUTO mode sizes against the REAL broker balance, never the self-
+    // declared reserved_fund setting — that number is a risk-budget
+    // allocation a human typed in, not a live account balance. A failed
+    // fetch refuses the trade outright rather than falling back to
+    // reserved_fund, which would size a real order against a number nobody
+    // has verified the account actually holds. SHADOW sizes against the SAME
+    // real balance (never reserved_fund either) so its recorded hypothetical
+    // intent reflects what AUTO would actually have sized — see this file's
+    // header note on isShadow above.
+    const usesRealFunds = isLive || isShadow;
+    const realAvailableFunds = usesRealFunds
+      ? (routesRealOrdersThroughGroww ? (growwToken ? await fetchGrowwAvailableFunds(growwToken) : null) : await fetchRealAvailableFunds(token, apiKey))
+      : null;
+    if (usesRealFunds && realAvailableFunds === null) {
+      await log('error', `${modeLabel}: could not verify real account funds for ${symbol} — refusing to size or record any intent this cycle.`);
+      perModeResults[modeLabel] = { ok: true, opened: false, skipped: 'real_funds_unavailable' };
+      continue;
+    }
+
+    // Broker reconciliation gate (QUANT_AUDIT.md Task 3) — AUTO only, and
+    // account-wide (not scoped to this one symbol): a disagreement between
+    // this system's own records and the active broker's actual order/
+    // position book on ANY symbol blocks EVERY new AUTO entry this cycle,
+    // regardless of which symbol is being scanned right now. This never
+    // touches an existing position — it only refuses to add MORE exposure
+    // while the broker's true state is uncertain.
+    //
+    // This gate reconciles against whichever broker is actually routing real
+    // orders this cycle — Kite's own order/position book for Kite, Groww's
+    // own for Groww (see fetchGrowwBrokerPositions/fetchGrowwBrokerOrdersToday
+    // above) — using the SAME unmodified reconcile() function either way.
+    let reconciliationBlocked = false;
+    if (routesRealOrdersThroughGroww) {
+      if (!growwToken) {
+        await event('BROKER_STATE_AMBIGUOUS', { reason: 'no_groww_session' });
+        await log('error', `AUTO (Groww): no Groww session — refusing all new Groww AUTO entries this cycle.`);
+        perModeResults[modeLabel] = { ok: true, opened: false, skipped: 'broker_state_unavailable' };
+        continue;
+      }
+      const todayISTForRecon = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+      const [brokerPositions, brokerOrders] = await Promise.all([
+        fetchGrowwBrokerPositions(growwToken),
+        fetchGrowwBrokerOrdersToday(growwToken, todayISTForRecon),
+      ]);
+      if (brokerPositions === null || brokerOrders === null) {
+        await event('BROKER_STATE_AMBIGUOUS', { reason: 'fetch_failed' });
+        await log('error', `AUTO (Groww): could not verify broker positions/orders for reconciliation — refusing all new AUTO entries this cycle.`);
+        perModeResults[modeLabel] = { ok: true, opened: false, skipped: 'broker_state_unavailable' };
+        continue;
+      }
+      const { dbActivePositions, dbPendingReconciliation, openIntents } = await fetchDbReconciliationInputs(supabase, 'GROWW');
+      const reconciliation = reconcile({
+        dbActivePositions, dbPendingReconciliation, openIntents, brokerPositions, brokerOrders,
+        manuallyAllowedTradingsymbols: settings.manually_allowed_tradingsymbols ?? [],
+      });
+      if (reconciliation.status === 'MISMATCH' || reconciliation.status === 'RECONCILIATION_REQUIRED') {
+        await event('RECONCILIATION_REQUIRED', { reconciliationStatus: reconciliation.status, findingCount: reconciliation.findings.length });
+        await log('error', `AUTO (Groww): broker reconciliation is ${reconciliation.status} — BLOCKING all new AUTO entries until resolved.`,
+          { findings: reconciliation.findings });
+        perModeResults[modeLabel] = { ok: true, opened: false, skipped: 'reconciliation_required', reconciliation };
+        reconciliationBlocked = true;
+      } else {
+        await event('BROKER_RECONCILED', { reconciliationStatus: reconciliation.status });
+      }
+    } else if (isLive) {
+      const [brokerPositions, brokerOrders] = await Promise.all([
+        fetchBrokerPositions(token, apiKey),
+        fetchBrokerOrdersToday(token, apiKey),
+      ]);
+      if (brokerPositions === null || brokerOrders === null) {
+        await event('BROKER_STATE_AMBIGUOUS', { reason: 'fetch_failed' });
+        await log('error', `AUTO: could not verify broker positions/orders for reconciliation — refusing all new AUTO entries this cycle.`);
+        perModeResults[modeLabel] = { ok: true, opened: false, skipped: 'broker_state_unavailable' };
+        continue;
+      }
+      const { dbActivePositions, dbPendingReconciliation, openIntents } = await fetchDbReconciliationInputs(supabase, 'KITE');
+      const reconciliation = reconcile({
+        dbActivePositions, dbPendingReconciliation, openIntents, brokerPositions, brokerOrders,
+        manuallyAllowedTradingsymbols: settings.manually_allowed_tradingsymbols ?? [],
+      });
+      if (reconciliation.status === 'MISMATCH' || reconciliation.status === 'RECONCILIATION_REQUIRED') {
+        await event('RECONCILIATION_REQUIRED', { reconciliationStatus: reconciliation.status, findingCount: reconciliation.findings.length });
+        await log('error', `AUTO: broker reconciliation is ${reconciliation.status} — BLOCKING all new AUTO entries until resolved.`,
+          { findings: reconciliation.findings });
+        perModeResults[modeLabel] = { ok: true, opened: false, skipped: 'reconciliation_required', reconciliation };
+        reconciliationBlocked = true;
+      } else {
+        await event('BROKER_RECONCILED', { reconciliationStatus: reconciliation.status });
+      }
+    }
+    if (reconciliationBlocked) continue;
+
+    const sizing = computePositionSize(
+      {
+        pricing: { maxLoss: best.result.maxLoss, maxProfit: best.result.maxProfit, netCredit: best.result.netCredit, netGreeks: best.result.netGreeks },
+        marginRequiredPerLot,
+        underlyingGroup: candidateSymbolGroup,
+      },
+      {
+        // AUTO and SHADOW both base every %-of-equity risk cap (max
+        // risk/trade, daily/weekly loss, portfolio risk, correlated-group
+        // risk) on the REAL account balance — reserved_fund is a self-
+        // declared number a human typed in, and letting real risk limits key
+        // off it would let those caps drift arbitrarily far from what the
+        // account can actually absorb. PAPER keeps using reserved_fund,
+        // since there's no real balance to check it against.
+        //
+        // SHADOW gets one deliberate exception: a temporary equity FLOOR
+        // (SHADOW_EQUITY_FLOOR_RUPEES), applied as max(real funds, floor) —
+        // added 2026-09-29 because the real account currently shows ₹0
+        // available (not yet funded; ₹1L is being loaded soon) and SHADOW
+        // sizing to zero lots on every scan was producing no forward-
+        // validation signal at all. This is a floor, not an override: once
+        // real funds exceed the floor, SHADOW automatically reverts to
+        // sizing off the real balance with no code change needed — AUTO is
+        // NEVER floored, since it fires real orders and must only ever size
+        // against what the account actually holds.
+        equity: isShadow ? Math.max(realAvailableFunds ?? 0, SHADOW_EQUITY_FLOOR_RUPEES)
+          : usesRealFunds ? (realAvailableFunds ?? 0) : Number(settings.reserved_fund) || 0,
+        availableFunds: isShadow ? Math.max(realAvailableFunds ?? 0, SHADOW_EQUITY_FLOOR_RUPEES)
+          : usesRealFunds ? (realAvailableFunds ?? 0) : Number(settings.reserved_fund) || 0,
+      },
+      portfolio,
+      {
+        maxRiskPerTradePct: settings.max_risk_per_trade_pct, maxDailyLossPct: settings.max_daily_loss_pct,
+        maxWeeklyLossPct: settings.max_weekly_loss_pct, maxPortfolioRiskPct: settings.max_portfolio_risk_pct,
+        maxMarginUtilizationPct: settings.max_margin_utilization_pct, maxPositions: settings.max_positions,
+        maxUnderlyingDelta: settings.max_underlying_delta, maxGamma: settings.max_gamma, maxVega: settings.max_vega,
+        maxCorrelatedGroupRiskPct: settings.max_correlated_group_risk_pct,
+      },
+    );
+
+    // Lots are only known AFTER sizing — legs above were built at exactly
+    // ONE lot's quantity (to price the per-lot margin call). Scale every
+    // leg's quantity by sizing.lots now, before it goes anywhere near
+    // execution or persistence; using the unscaled `legs` past this point
+    // would trade/record the wrong quantity whenever sizing.lots > 1.
+    const scaledLegs: PlannedLeg[] = legs.map((l) => ({ ...l, quantity: l.quantity * sizing.lots }));
+
+    // 7. Pre-trade validation. This synchronous flow has no time gap between
+    // scoring and "submission" — priceDrift/Greeks/max-loss recalculation are
+    // therefore trivially unchanged (0% drift, same values). These checks
+    // become meaningful once a real time gap exists (e.g. a SEMI_AUTO human
+    // confirmation delay, or genuine order-placement latency) — for now they
+    // mainly prove the validation interface is wired correctly.
+    const validation = runPreTradeValidation({
+      quoteAgeMs: 0, maxQuoteAgeMs: 5 * 60_000,
+      isMarketOpen: true,
+      allInstrumentsResolved: unresolvedLegs.length === 0, unresolvedLegs,
+      marginSufficient: sizing.lots > 0 && marginRequiredPerLot > 0, marginDetail,
+      positionSizeLots: sizing.lots,
+      duplicatePositionExists: duplicateExists,
+      priceDriftPct: 0, maxSlippagePct: 1.5,
+      strategyStillValid: true, strategyDetail: 'Decision was made from the same live snapshot being validated — no time gap yet.',
+      greeksWithinLimits: sizing.lots > 0, greeksDetail: sizing.lots > 0 ? 'Within computePositionSize\'s exposure caps.' : sizing.reason ?? 'Position size resolved to zero.',
+      recalculatedMaxLoss: best.result.maxLoss, originalMaxLoss: best.result.maxLoss, maxLossDriftPct: 5,
+    });
+
+    // Concurrency/idempotency gate (QUANT_AUDIT.md Task 2) — the actual
+    // claim happens here, right before execution, on the FINAL scaled legs
+    // (the exact candidate shape a real order would be placed for). A
+    // conflicting claim means another invocation already owns this exact
+    // candidate right now — zero broker calls follow for this attempt. See
+    // orderIntent.ts for exactly what "the same trade" means here, and why
+    // a later, distinct attempt is never permanently blocked.
+    const intentStore = supabaseOrderIntentStore(supabase);
+    const claim = await claimOrderIntent(intentStore, {
+      symbol, expiry: expiryDateStr, strategyLabel: decision.expiryEvaluation.strategyLabel, tradeDate: todayIST,
+      legs: scaledLegs.map((l) => ({ side: l.side, right: l.right, strike: l.strike })),
+      executionMode: modeLabel,
+    });
+    if (!claim.claimed) {
+      if (claim.reason === 'CONFLICT') {
+        await event('INTENT_CONFLICT', { intentKey: claim.intentKey });
+        await event('ENTRY_SKIPPED', { reason: 'intent_conflict' });
+        await log('info', `${modeLabel}: intent conflict for ${symbol} — another invocation already claimed this exact candidate. Skipping, zero orders placed.`);
+        perModeResults[modeLabel] = { ok: true, opened: false, skipped: 'intent_conflict' };
+        continue;
+      }
+      // STORE_ERROR — the intent table itself couldn't be written to. Fail
+      // closed rather than proceeding without the concurrency guarantee.
+      await event('ENTRY_SKIPPED', { reason: 'intent_claim_failed' });
+      await log('error', `${modeLabel}: failed to claim an order intent for ${symbol} — refusing to place any order without the concurrency lock.`, { message: claim.message });
+      perModeResults[modeLabel] = { ok: true, opened: false, skipped: 'intent_claim_failed' };
+      continue;
+    }
+    await event('INTENT_CLAIMED', { intentId: claim.intentId, intentKey: claim.intentKey });
+    await event('PRETRADE_VALIDATED', { passed: validation.passed });
+
+    // AUTO fires REAL orders against the real Zerodha account — BUY (hedge)
+    // legs first, confirmed FILLED, before any SELL (short) leg, exactly the
+    // sequencing real margin treatment requires (see liveFill.ts's own
+    // header). PAPER keeps simulating every leg filling instantly.
+    if (isLive) await event('HEDGE_SUBMITTED', { intentId: claim.intentId });
+    const shadowExecResult = isShadow && winningSlice
+      ? runShadowExecutionForLegs(scaledLegs, validation, winningSlice.quotes)
+      : null;
+    // routesRealOrdersThroughGroww never actually reaches here today — the
+    // broker-reconciliation gate above already refuses and continues before
+    // this point whenever it's true (see that gate's own comment on why).
+    // Wired correctly anyway, so lifting that refusal later (once a real
+    // Groww reconciliation check exists) is a one-line change here, not a
+    // new feature.
+    const execResult = isLive
+      ? routesRealOrdersThroughGroww
+        ? await runLiveExecution(scaledLegs, validation, makeGrowwOrderPlacer(growwToken!), { exchange: GROWW_EXCHANGE_FOR_KITE_EXCHANGE[exchange] ?? 'NSE' })
+        : await runLiveExecution(scaledLegs, validation, makeLiveOrderPlacer(token, apiKey), { exchange })
+      : shadowExecResult
+        ? shadowExecResult
+        : runPaperExecution(scaledLegs, validation);
+
+    // SHADOW-only telemetry: option-chain snapshot + per-expiry IV history +
+    // the forward-validation ledger signal, ALL best-effort (SOFT_FAIL — a
+    // failure here never blocks recording the position/log below, it only
+    // affects this signal's eligibility for the OFFICIAL forward-validation
+    // sample, per FORWARD_VALIDATION_PROTOCOL.md). Persists the EXACT slice
+    // already used above — never a second fetch.
+    let shadowEligible = false;
+    let shadowEligibilityReasons: string[] = [];
+    let shadowLedgerId: string | null = null;
+    if (isShadow && winningSlice) {
+      const shadowRepo = supabaseShadowRepository(supabase);
+      const scanIdForShadow = randomUUID();
+      const nowIso = new Date().toISOString();
+      const snapshotRows: OptionChainSnapshotRow[] = winningSlice.quotes.map((q) => ({
+        scanId: scanIdForShadow, capturedAt: nowIso, symbol, spot: spot ?? null,
+        indiaVix: null, forward: winningSlice.forward, expiry: expiryDateStr,
+        calendarDte: decision.expiryEvaluation!.dte, tradingSessionHorizon: approxTradingSessionsFromCalendarDays(decision.expiryEvaluation!.dte),
+        strike: q.quote.strike, optionRight: q.quote.right,
+        bid: q.quote.bid, bidQty: null, ask: q.quote.ask, askQty: null, ltp: q.quote.last, markPrice: q.markPrice,
+        volume: q.quote.volume, openInterest: q.quote.openInterest, iv: q.iv,
+        delta: q.greeks.delta, gamma: q.greeks.gamma, theta: q.greeks.theta, vega: q.greeks.vega,
+      }));
+      let snapshotOk = true;
+      try { snapshotOk = 'ok' in await shadowRepo.insertChainSnapshots(snapshotRows); } catch { snapshotOk = false; }
+
+      const atmIvForShadow = atmIvOf(winningSlice);
+      const ivRows: IvHistoryRow[] = winningSlice.atmStrike !== null ? [{
+        capturedAt: nowIso, symbol, expiry: expiryDateStr, atmStrike: winningSlice.atmStrike,
+        atmCallIv: winningSlice.quotes.find((q) => q.quote.strike === winningSlice.atmStrike && q.quote.right === 'CE')?.iv ?? null,
+        atmPutIv: winningSlice.quotes.find((q) => q.quote.strike === winningSlice.atmStrike && q.quote.right === 'PE')?.iv ?? null,
+        combinedAtmIv: atmIvForShadow, calendarDte: decision.expiryEvaluation!.dte, tradingSessionHorizon: approxTradingSessionsFromCalendarDays(decision.expiryEvaluation!.dte),
+        spot: spot ?? null, indiaVix: null,
+      }] : [];
+      try { await shadowRepo.insertIvHistory(dedupeIvHistoryRows(ivRows)); } catch { /* SOFT_FAIL — see comment above */ }
+
+      let ledgerOk = true;
+      try {
+        // Task 13: version fingerprint — activeProtocolId is null (a real,
+        // honest PRE_PROTOCOL state) until a protocol run has actually been
+        // started for this symbol+baseline via resource=start-forward-
+        // validation; this lookup never creates or infers one.
+        const { data: activeRun } = await supabase.from('forward_validation_runs')
+          .select('protocol_id').eq('symbol', symbol).eq('baseline_version', BASELINE_VERSION).eq('status', 'ACTIVE').maybeSingle();
+        const signal: ForwardSignal = {
+          symbol, strategyLabel: decision.expiryEvaluation!.strategyLabel, expiry: expiryDateStr,
+          calendarDte: decision.expiryEvaluation!.dte, tradingSessionHorizon: approxTradingSessionsFromCalendarDays(decision.expiryEvaluation!.dte),
+          shortDeltaTarget: null, wingWidth: null, netCredit: best.result.netCredit, estimatedMaxLoss: best.result.maxLoss,
+          estimatedPop: best.result.pop, expectedValue: best.expectedValue, premiumEdgePct: best.qualityScore.raw.premiumEdgePct,
+          independentEvPerUnitRisk: best.qualityScore.raw.independentEvPerUnitRisk, ivRank: null,
+          liquidityTier: best.liquidity.tier, marketRegime: null, sizingLots: sizing.lots, expectedCostsRupees: null,
+          intentId: claim.claimed ? claim.intentId : null,
+          baselineVersion: BASELINE_VERSION, fillModelVersion: 'SHADOW_EXECUTION_V1',
+          protocolId: activeRun?.protocol_id ?? null, codeVersion: process.env.VERCEL_GIT_COMMIT_SHA ?? null,
+        };
+        // Task 1: capture the returned ledger row id so it can be stored on
+        // the position row created below — this IS the link that lets the
+        // eventual exit find its way back to the same ledger row.
+        shadowLedgerId = await recordSignal(supabaseForwardLedgerStore(supabase), signal);
+      } catch { ledgerOk = false; }
+
+      // Task 3: entry execution-quality telemetry, one row per leg, from the
+      // SAME fill/quote objects SHADOW_EXECUTION_V1 already produced above —
+      // never a second fetch.
+      let entryTelemetryOk = true;
+      if (shadowExecResult && shadowExecResult.state !== 'FAILED') {
+        try {
+          const quotesByKey = new Map(winningSlice.quotes.map((q) => [`${q.quote.strike}:${q.quote.right}`, q]));
+          const entryRows: ExecutionQualityRow[] = shadowExecResult.legFills.map((l) => {
+            const q = quotesByKey.get(`${l.strike}:${l.right}`);
+            const decisionMid = q?.mid ?? null;
+            const slippage = decisionMid !== null ? (l.side === 'BUY' ? l.fillPrice - decisionMid : decisionMid - l.fillPrice) : null;
+            return {
+              scanId: scanIdForShadow, candidateId: null, intentId: claim.claimed ? claim.intentId : null,
+              positionId: null, legId: null, symbol, strategyLabel: decision.expiryEvaluation!.strategyLabel,
+              expiry: expiryDateStr, strike: l.strike, optionRight: l.right, side: l.side, quantity: l.quantity,
+              executionMode: 'SHADOW', fillModel: 'SHADOW_EXECUTION_V1',
+              // Task 2: phase+forwardLedgerId are what let an eventual exit
+              // look up this EXACT entry's real slippage cost instead of
+              // hard-coding entryExecutionCost to 0.
+              phase: 'ENTRY', forwardLedgerId: shadowLedgerId,
+              decisionAt: nowIso, quoteAt: nowIso, submittedAt: nowIso, filledAt: nowIso,
+              decisionMid, bid: q?.quote.bid ?? null, ask: q?.quote.ask ?? null, spreadPct: q?.spreadPct ?? null,
+              submittedPrice: l.fillPrice, actualFill: l.fillPrice,
+              slippageRupees: slippage, slippageBps: decisionMid && decisionMid > 0 && slippage !== null ? (slippage / decisionMid) * 10_000 : null,
+              latencyMs: null, volume: q?.quote.volume ?? null, openInterest: q?.quote.openInterest ?? null,
+              delta: q?.greeks.delta ?? null, dte: decision.expiryEvaluation!.dte, indiaVix: null,
+              brokerOrderId: null, fillIsSimulated: true,
+            };
+          });
+          const result = await shadowRepo.insertExecutionQuality(entryRows);
+          entryTelemetryOk = 'ok' in result;
+        } catch { entryTelemetryOk = false; }
+      }
+
+      const eligibility = isEligibleForForwardValidation({
+        baselineVersion: BASELINE_VERSION, executionMode: 'SHADOW', fillModel: 'SHADOW_EXECUTION_V1',
+        everyLegHasRealBidAsk: shadowExecResult?.hasRealBidAsk ?? false,
+        quotesFreshMs: 0, maxQuoteAgeMs: 5 * 60_000,
+        snapshotStoredSuccessfully: snapshotOk, ledgerSignalStoredSuccessfully: ledgerOk && entryTelemetryOk,
+        knownIngestionBug: false, brokerOrderPlaced: false,
+        expectedBaselineVersion: BASELINE_VERSION, expectedFillModel: 'SHADOW_EXECUTION_V1',
+      });
+      shadowEligible = eligibility.eligible;
+      shadowEligibilityReasons = eligibility.reasons;
+      await event('SHADOW_SIGNAL_RECORDED', { eligibleForForwardValidation: shadowEligible, reasons: shadowEligibilityReasons, ledgerId: shadowLedgerId });
+    }
+
+    if (execResult.state === 'RECONCILIATION_REQUIRED') {
+      // A real order's true broker status is unknown (a timeout the
+      // follow-up query also couldn't resolve — see liveFill.ts). This MUST
+      // leave a durable, visible record — not just a log line — so the
+      // reconciliation gate above actually blocks future AUTO entries on
+      // the next scan, and a human sees it in the dashboard the same way
+      // an existing CLOSE_FAILED position already shows up.
+      const { data: reconRow } = await supabase.from('options_autotrade_positions').insert({
+        symbol, strategy_label: decision.expiryEvaluation.strategyLabel, expiry: expiryDateStr,
+        status: 'RECONCILIATION_REQUIRED', execution_state: execResult.state, protection: execResult.protection,
+        execution_mode: modeLabel, broker: activeBroker, lots: sizing.lots, net_credit: best.result.netCredit,
+        max_profit: sizing.sizedMaxProfit, max_loss: sizing.sizedMaxLoss, margin_required: sizing.sizedMarginRequired,
+        quality_score: best.qualityScore.score, decision_explanation: decision.explanation, entry_date: todayIST,
+      }).select('id').single();
+      if (reconRow) {
+        await supabase.from('options_autotrade_legs').insert(execResult.legFills.map((l) => ({
+          position_id: reconRow.id, side: l.side, option_right: l.right, strike: l.strike,
+          tradingsymbol: l.tradingsymbol, quantity: l.quantity, fill_price: l.fillPrice, status: l.status,
+          order_id: l.orderId ?? null,
+        })));
+      }
+      await intentStore.updateStatus(claim.intentId, { status: 'FAILED', error: 'RECONCILIATION_REQUIRED', positionId: reconRow?.id });
+      await event('BROKER_STATE_AMBIGUOUS', { intentId: claim.intentId, positionId: reconRow?.id });
+      await event('RECONCILIATION_REQUIRED', { intentId: claim.intentId, positionId: reconRow?.id });
+      await log('error', `${modeLabel}: position for ${symbol} needs MANUAL RECONCILIATION against the broker — at least one leg's true status is unknown. New AUTO entries are now blocked account-wide until resolved.`, { log: execResult.log });
+      perModeResults[modeLabel] = { ok: true, opened: false, reconciliationRequired: true, validation, sizing, log: execResult.log };
+      continue;
+    }
+
+    if (execResult.state !== 'ACTIVE') {
+      await intentStore.updateStatus(claim.intentId, { status: 'FAILED', error: execResult.state });
+      await event('ENTRY_SKIPPED', { intentId: claim.intentId, reason: execResult.state });
+      await log(isLive ? 'error' : 'info', `${modeLabel} position not opened for ${symbol}`, { reason: execResult.log });
+      perModeResults[modeLabel] = { ok: true, opened: false, validation, sizing, log: execResult.log };
+      continue;
+    }
+
+    const { data: inserted, error: insertErr } = await supabase.from('options_autotrade_positions').insert({
+      symbol, strategy_label: decision.expiryEvaluation.strategyLabel,
+      expiry: expiryDateStr,
+      status: 'ACTIVE', execution_state: execResult.state, protection: execResult.protection,
+      execution_mode: modeLabel, broker: activeBroker,
+      lots: sizing.lots, net_credit: best.result.netCredit, max_profit: sizing.sizedMaxProfit, max_loss: sizing.sizedMaxLoss,
+      margin_required: sizing.sizedMarginRequired,
+      net_delta: (best.result.netGreeks.delta ?? 0) * sizing.lots, net_gamma: (best.result.netGreeks.gamma ?? 0) * sizing.lots,
+      net_theta: (best.result.netGreeks.theta ?? 0) * sizing.lots, net_vega: (best.result.netGreeks.vega ?? 0) * sizing.lots,
+      quality_score: best.qualityScore.score, decision_explanation: decision.explanation,
+      entry_date: todayIST,
+      // Task 1: link this position back to its forward-validation ledger
+      // row (null for PAPER/AUTO, which never populate shadowLedgerId).
+      // If ledger recording failed, the position still opens (a research-
+      // telemetry failure must never block the underlying paper/shadow
+      // tracking itself) but is explicitly marked ineligible rather than
+      // silently left in an ambiguous state.
+      forward_ledger_id: isShadow ? shadowLedgerId : null,
+      valid_for_forward_validation: isShadow ? shadowEligible : null,
+      forward_validation_ineligibility_reasons: isShadow && !shadowEligible ? shadowEligibilityReasons : null,
+    }).select('id').single();
+
+    if (insertErr) {
+      // A real fill (for AUTO) may have just happened at the broker, but it
+      // couldn't be persisted — the intent must NOT be left CLAIMED (that
+      // would silently permit a duplicate claim of the identical candidate
+      // later) nor marked COMPLETED (nothing was actually recorded). Marked
+      // ABANDONED so the next scan's reconciliation gate blocks new AUTO
+      // entries account-wide until a human confirms what really happened.
+      // Recorded as a per-mode failure and the loop CONTINUES to the next
+      // enabled profile — this used to abort the whole HTTP response with a
+      // 502, which would have silently skipped every OTHER enabled profile's
+      // outcome this cycle too; that's no longer acceptable now that
+      // multiple real books can depend on this one invocation.
+      await intentStore.updateStatus(claim.intentId, { status: 'ABANDONED', error: `position_insert_failed: ${insertErr.message}` });
+      await log('error', `${modeLabel}: position insert FAILED for ${symbol} after execution reported ${execResult.state} — broker state and DB now disagree. Manual reconciliation required.`, { message: insertErr.message, log: execResult.log });
+      perModeResults[modeLabel] = { ok: false, error: 'supabase_error', message: insertErr.message };
+      continue;
+    }
+
+    const legRows = execResult.legFills.map((l) => ({
+      position_id: inserted.id, side: l.side, option_right: l.right, strike: l.strike,
+      tradingsymbol: l.tradingsymbol, quantity: l.quantity, fill_price: l.fillPrice, status: l.status,
+      order_id: l.orderId ?? null,
+    }));
+    await supabase.from('options_autotrade_legs').insert(legRows);
+    await intentStore.updateStatus(claim.intentId, { status: 'COMPLETED', positionId: inserted.id });
+    await event('POSITION_ACTIVE', { intentId: claim.intentId, positionId: inserted.id, lots: sizing.lots });
+    await log('info', `Opened ${modeLabel} position #${inserted.id}: ${decision.expiryEvaluation.strategyLabel} on ${symbol}, ${sizing.lots} lot(s).`, isLive ? { log: execResult.log } : undefined);
+
+    perModeResults[modeLabel] = { ok: true, opened: true, positionId: inserted.id, sizing, log: isLive ? execResult.log : undefined };
   }
 
-  if (execResult.state !== 'ACTIVE') {
-    await intentStore.updateStatus(claim.intentId, { status: 'FAILED', error: execResult.state });
-    await event('ENTRY_SKIPPED', { intentId: claim.intentId, reason: execResult.state });
-    await log(isLive ? 'error' : 'info', `${modeLabel} position not opened for ${symbol}`, { reason: execResult.log });
-    res.status(200).json({ ok: true, action: decision.action, opened: false, validation, sizing, log: execResult.log, diagnostics });
-    return;
-  }
-
-  const { data: inserted, error: insertErr } = await supabase.from('options_autotrade_positions').insert({
-    symbol, strategy_label: decision.expiryEvaluation.strategyLabel,
-    expiry: expiryDateStr,
-    status: 'ACTIVE', execution_state: execResult.state, protection: execResult.protection,
-    execution_mode: modeLabel, broker: activeBroker,
-    lots: sizing.lots, net_credit: best.result.netCredit, max_profit: sizing.sizedMaxProfit, max_loss: sizing.sizedMaxLoss,
-    margin_required: sizing.sizedMarginRequired,
-    net_delta: (best.result.netGreeks.delta ?? 0) * sizing.lots, net_gamma: (best.result.netGreeks.gamma ?? 0) * sizing.lots,
-    net_theta: (best.result.netGreeks.theta ?? 0) * sizing.lots, net_vega: (best.result.netGreeks.vega ?? 0) * sizing.lots,
-    quality_score: best.qualityScore.score, decision_explanation: decision.explanation,
-    entry_date: todayIST,
-    // Task 1: link this position back to its forward-validation ledger
-    // row (null for PAPER/AUTO, which never populate shadowLedgerId).
-    // If ledger recording failed, the position still opens (a research-
-    // telemetry failure must never block the underlying paper/shadow
-    // tracking itself) but is explicitly marked ineligible rather than
-    // silently left in an ambiguous state.
-    forward_ledger_id: isShadow ? shadowLedgerId : null,
-    valid_for_forward_validation: isShadow ? shadowEligible : null,
-    forward_validation_ineligibility_reasons: isShadow && !shadowEligible ? shadowEligibilityReasons : null,
-  }).select('id').single();
-
-  if (insertErr) {
-    // A real fill (for AUTO) may have just happened at the broker, but it
-    // couldn't be persisted — the intent must NOT be left CLAIMED (that
-    // would silently permit a duplicate claim of the identical candidate
-    // later) nor marked COMPLETED (nothing was actually recorded). Marked
-    // ABANDONED so the next scan's reconciliation gate blocks new AUTO
-    // entries account-wide until a human confirms what really happened.
-    await intentStore.updateStatus(claim.intentId, { status: 'ABANDONED', error: `position_insert_failed: ${insertErr.message}` });
-    await log('error', `${modeLabel}: position insert FAILED for ${symbol} after execution reported ${execResult.state} — broker state and DB now disagree. Manual reconciliation required.`, { message: insertErr.message, log: execResult.log });
-    res.status(502).json({ ok: false, error: 'supabase_error', message: insertErr.message });
-    return;
-  }
-
-  const legRows = execResult.legFills.map((l) => ({
-    position_id: inserted.id, side: l.side, option_right: l.right, strike: l.strike,
-    tradingsymbol: l.tradingsymbol, quantity: l.quantity, fill_price: l.fillPrice, status: l.status,
-    order_id: l.orderId ?? null,
-  }));
-  await supabase.from('options_autotrade_legs').insert(legRows);
-  await intentStore.updateStatus(claim.intentId, { status: 'COMPLETED', positionId: inserted.id });
-  await event('POSITION_ACTIVE', { intentId: claim.intentId, positionId: inserted.id, lots: sizing.lots });
-  await log('info', `Opened ${modeLabel} position #${inserted.id}: ${decision.expiryEvaluation.strategyLabel} on ${symbol}, ${sizing.lots} lot(s).`, isLive ? { log: execResult.log } : undefined);
-
-  res.status(200).json({ ok: true, action: decision.action, opened: true, positionId: inserted.id, sizing, explanation: decision.explanation, diagnostics });
+  res.status(200).json({
+    ok: true, action: decision.action, explanation: decision.explanation, diagnostics,
+    lockedModes: enabledModes.filter((m) => !runnableModes.includes(m)),
+    modes: perModeResults,
+  });
 }
 
 /**
@@ -2441,9 +2484,16 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
     }).eq('id', p.id);
     if (updateErr) { await log('error', `Position #${p.id}: failed to persist close`, { message: updateErr.message }, p.execution_mode); continue; }
 
-    const { data: dailyRow } = await supabase.from('options_autotrade_daily_stats').select('realized_pnl,consecutive_losses').eq('trade_date', todayIST).maybeSingle();
+    // Separate per-execution-profile risk lock (migration 019) — PAPER and
+    // AUTO each get their own daily_stats row now, keyed on
+    // (trade_date, execution_mode), so a bad PAPER day never locks out real
+    // AUTO trading and vice versa. p.execution_mode defaults to 'PAPER' for
+    // any legacy position row that predates this column.
+    const closedPositionMode = p.execution_mode ?? 'PAPER';
+    const { data: dailyRow } = await supabase.from('options_autotrade_daily_stats').select('realized_pnl,consecutive_losses').eq('trade_date', todayIST).eq('execution_mode', closedPositionMode).maybeSingle();
     await supabase.from('options_autotrade_daily_stats').upsert({
       trade_date: todayIST,
+      execution_mode: closedPositionMode,
       realized_pnl: (Number(dailyRow?.realized_pnl) || 0) + realizedPnl,
       consecutive_losses: realizedPnl < 0 ? (Number(dailyRow?.consecutive_losses) || 0) + 1 : 0,
     });
@@ -2819,8 +2869,8 @@ async function handleStartForwardValidation(req: any, res: any, supabase: Supaba
     return;
   }
 
-  const { data: settings } = await supabase.from('options_autotrade_settings').select('execution_mode').eq('id', 1).maybeSingle();
-  const autoEnabled = settings?.execution_mode === 'AUTO';
+  const { data: settings } = await supabase.from('options_autotrade_settings').select('execution_mode,paper_enabled,shadow_enabled,auto_enabled').eq('id', 1).maybeSingle();
+  const autoEnabled = deriveEnabledExecutionProfiles(settings ?? {}).includes('AUTO');
 
   // migrationsPresent: probed non-destructively — real SELECTs of the
   // exact columns/table 011+012+013 add; a missing-column or missing-table
@@ -2975,6 +3025,16 @@ async function handleSettings(req: any, res: any, supabase: SupabaseClient) {
       res.status(400).json({ error: 'bad_request', message: `execution_mode must be OFF, PAPER, SHADOW, or AUTO — ALERT_ONLY/SEMI_AUTO aren't implemented yet.` });
       return;
     }
+    // Independent per-profile toggles (migration 019) — once any of these
+    // is explicitly set, executionProfiles.ts's derivation switches this
+    // settings row over to multi-profile semantics and execution_mode is
+    // no longer consulted. All three can be true at once.
+    for (const field of ['paper_enabled', 'shadow_enabled', 'auto_enabled'] as const) {
+      if (body[field] !== undefined && typeof body[field] !== 'boolean') {
+        res.status(400).json({ error: 'bad_request', message: `${field} must be a boolean.` });
+        return;
+      }
+    }
     // Which broker AUTO's real orders route through — a setting, not a
     // per-position choice (see the header comment on handleGrowwConnect
     // below for why: Groww's own historical-data depth can't replace
@@ -3003,6 +3063,9 @@ async function handleSettings(req: any, res: any, supabase: SupabaseClient) {
     }
     const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (body.execution_mode !== undefined) update.execution_mode = body.execution_mode;
+    if (body.paper_enabled !== undefined) update.paper_enabled = body.paper_enabled;
+    if (body.shadow_enabled !== undefined) update.shadow_enabled = body.shadow_enabled;
+    if (body.auto_enabled !== undefined) update.auto_enabled = body.auto_enabled;
     if (body.active_broker !== undefined) update.active_broker = body.active_broker;
     if (body.paused_symbols !== undefined) update.paused_symbols = body.paused_symbols;
     if (body.manually_allowed_tradingsymbols !== undefined) update.manually_allowed_tradingsymbols = body.manually_allowed_tradingsymbols;
@@ -3056,9 +3119,15 @@ async function handleLog(req: any, res: any, supabase: SupabaseClient) {
  */
 async function handleKillSwitch(req: any, res: any, supabase: SupabaseClient) {
   if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
-  const { error } = await supabase.from('options_autotrade_settings').update({ execution_mode: 'OFF', updated_at: new Date().toISOString() }).eq('id', 1);
+  // Sets BOTH the legacy execution_mode AND all three independent toggles
+  // off — this must stop every enabled profile regardless of which
+  // derivation path (legacy or toggle) is currently active for this row.
+  const { error } = await supabase.from('options_autotrade_settings').update({
+    execution_mode: 'OFF', paper_enabled: false, shadow_enabled: false, auto_enabled: false,
+    updated_at: new Date().toISOString(),
+  }).eq('id', 1);
   if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
-  await supabase.from('options_autotrade_log').insert({ level: 'info', message: 'Kill switch triggered from the dashboard — execution_mode set to OFF.' });
+  await supabase.from('options_autotrade_log').insert({ level: 'info', message: 'Kill switch triggered from the dashboard — every execution profile (PAPER/SHADOW/AUTO) turned off.' });
   const { data: openPositions } = await supabase.from('options_autotrade_positions').select('execution_mode').eq('status', 'ACTIVE');
   const liveCount = (openPositions ?? []).filter((p: any) => p.execution_mode === 'AUTO').length;
   const total = openPositions?.length ?? 0;
@@ -3070,28 +3139,39 @@ async function handleKillSwitch(req: any, res: any, supabase: SupabaseClient) {
   });
 }
 
-/** Browser-facing: today's risk-lock state — read by the dashboard to show a banner when locked. No shared-secret gate, same reasoning as handleSettings. */
+/**
+ * Browser-facing: today's risk-lock state — read by the dashboard to show
+ * a banner when locked. No shared-secret gate, same reasoning as
+ * handleSettings. Separate per-profile (migration 019): pass
+ * ?mode=PAPER|SHADOW|AUTO to read one profile's own row; omitted defaults
+ * to PAPER (the legacy row shape/behavior every existing dashboard call
+ * already expects).
+ */
 async function handleDailyStats(req: any, res: any, supabase: SupabaseClient) {
   if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const mode = (['PAPER', 'SHADOW', 'AUTO'].includes(req.query?.mode) ? req.query.mode : 'PAPER') as ExecutionProfile;
   const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-  const { data, error } = await supabase.from('options_autotrade_daily_stats').select('*').eq('trade_date', todayIST).maybeSingle();
+  const { data, error } = await supabase.from('options_autotrade_daily_stats').select('*').eq('trade_date', todayIST).eq('execution_mode', mode).maybeSingle();
   if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
-  res.status(200).json(data ?? { trade_date: todayIST, trades_taken: 0, realized_pnl: 0, consecutive_losses: 0, locked: false, lock_reason: null });
+  res.status(200).json(data ?? { trade_date: todayIST, execution_mode: mode, trades_taken: 0, realized_pnl: 0, consecutive_losses: 0, locked: false, lock_reason: null });
 }
 
 /**
  * Browser-facing manual override — the spec's own "require manual
  * re-enable" instruction: a daily lock is never cleared automatically
  * within the same day, only by this explicit action (or naturally, by a
- * new day's daily_stats row starting unlocked).
+ * new day's daily_stats row starting unlocked). Separate per-profile
+ * (migration 019): pass { mode: 'PAPER'|'SHADOW'|'AUTO' } in the body to
+ * clear one profile's own lock; omitted defaults to PAPER.
  */
 async function handleClearDailyLock(req: any, res: any, supabase: SupabaseClient) {
   if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const mode = (['PAPER', 'SHADOW', 'AUTO'].includes(req.body?.mode) ? req.body.mode : 'PAPER') as ExecutionProfile;
   const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-  const { error } = await supabase.from('options_autotrade_daily_stats').upsert({ trade_date: todayIST, locked: false, lock_reason: null });
+  const { error } = await supabase.from('options_autotrade_daily_stats').upsert({ trade_date: todayIST, execution_mode: mode, locked: false, lock_reason: null });
   if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
-  await supabase.from('options_autotrade_log').insert({ level: 'info', message: 'Daily risk lock manually cleared from the dashboard — new entries can resume today.' });
-  res.status(200).json({ ok: true, message: 'Daily risk lock cleared. New entries can resume on the next scan.' });
+  await supabase.from('options_autotrade_log').insert({ level: 'info', message: `Daily risk lock manually cleared for ${mode} from the dashboard — new entries can resume today.` });
+  res.status(200).json({ ok: true, message: `Daily risk lock cleared for ${mode}. New entries can resume on the next scan.` });
 }
 
 /* ================================================================== */

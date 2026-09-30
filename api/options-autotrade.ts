@@ -1029,6 +1029,16 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     res.status(200).json({ ok: true, skipped: `execution_mode is '${settings.execution_mode}', not PAPER, SHADOW or AUTO` });
     return;
   }
+  // A narrower control than execution_mode: pause NEW entries for just
+  // this one symbol while leaving the others scanning normally and
+  // leaving any of THIS symbol's already-open positions alone —
+  // position-monitor's own re-quote/exit loop never checks this, only
+  // new-entry scanning does, so a paused symbol's open position still
+  // gets managed exactly as before.
+  if ((settings.paused_symbols ?? []).includes(symbol)) {
+    res.status(200).json({ ok: true, skipped: `${symbol} is paused for new entries` });
+    return;
+  }
 
   // Computed once, up top, so every log entry this whole scan produces —
   // not just the ones after sizing — is tagged with the mode it actually
@@ -2967,9 +2977,17 @@ async function handleSettings(req: any, res: any, supabase: SupabaseClient) {
       res.status(400).json({ error: 'bad_request', message: `active_broker must be KITE or GROWW.` });
       return;
     }
+    if (body.paused_symbols !== undefined) {
+      const valid = Object.keys(OPTIONS_SYMBOLS as Record<string, string>);
+      if (!Array.isArray(body.paused_symbols) || body.paused_symbols.some((s: unknown) => typeof s !== 'string' || !valid.includes(s))) {
+        res.status(400).json({ error: 'bad_request', message: `paused_symbols must be an array drawn from ${valid.join(', ')}.` });
+        return;
+      }
+    }
     const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (body.execution_mode !== undefined) update.execution_mode = body.execution_mode;
     if (body.active_broker !== undefined) update.active_broker = body.active_broker;
+    if (body.paused_symbols !== undefined) update.paused_symbols = body.paused_symbols;
     for (const key of EDITABLE_SETTINGS_FIELDS) {
       if (body[key] !== undefined) {
         const n = Number(body[key]);

@@ -105,65 +105,50 @@ function RotatingTicker({ indices }) {
 
 /**
  * Independent PAPER/SHADOW/AUTO execution profiles (migration 019) — a
- * KITE/GROWW-style segmented tab selector picks WHICH profile you're
- * looking at, and only that one profile's own section renders below it
- * (never all three at once): its own on/off switch, its own today's P&L,
- * active-position count and lock state. Switching tabs never changes
- * what's enabled — it only changes which profile's detail you're viewing;
- * toggling the switch only ever affects the currently-selected profile.
+ * KITE/GROWW-style segmented tab selector picks WHICH profile the rest of
+ * the page (Today's P&L, Open Positions, Activity) is currently showing —
+ * viewing AUTO shows only AUTO's own activity, never mixed with SHADOW's
+ * even if both are enabled. Just a bare on/off switch next to the tabs —
+ * no separate card, no label text next to it (a label whose width changes
+ * between "ON"/"OFF" was shifting the whole switch sideways on toggle,
+ * which read as the knob "going out" — removed rather than padded around).
+ * Switching tabs never changes what's enabled; the switch only ever
+ * affects the currently-selected tab.
  */
-function ExecutionProfilesPanel({ enabledProfiles, setProfileEnabled, saving, dailyStatsByMode, positions, hideAmounts }) {
-  const [tab, setTab] = useState("PAPER");
-  const enabled = enabledProfiles.includes(tab);
-  const stats = dailyStatsByMode[tab];
-  const activeCount = positions.active.filter((p) => (p.execution_mode ?? "PAPER") === tab).length;
-  const realizedPnlToday = Number(stats?.realized_pnl) || 0;
-  const fmt = (n) => (hideAmounts ? "••••••" : inr(n));
-  const color = MODE_COLOR[tab];
+function ExecutionProfilesPanel({ selectedProfile, setSelectedProfile, enabledProfiles, setProfileEnabled, saving, dailyStatsByMode }) {
+  const enabled = enabledProfiles.includes(selectedProfile);
+  const locked = !!dailyStatsByMode[selectedProfile]?.locked;
+  const color = MODE_COLOR[selectedProfile];
 
   return (
-    <div className="flex flex-col gap-2 py-2 mb-3 order-[40]">
-      <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-[10.5px] font-semibold text-muted shrink-0">Profile</span>
-        <div className="seg-track">
-          {["PAPER", "SHADOW", "AUTO"].map((p) => (
-            <button key={p} role="tab" aria-selected={tab === p} data-on={tab === p}
-              onClick={() => setTab(p)} className="seg inline-flex items-center gap-1">
-              {p}
-              {enabledProfiles.includes(p) && <span className="live-dot" style={{ background: "currentColor" }} aria-hidden="true" />}
-            </button>
-          ))}
-        </div>
+    <div className="flex items-center gap-2 flex-wrap py-2 mb-3 order-[40]">
+      <span className="text-[10.5px] font-semibold text-muted shrink-0">Profile</span>
+      <div className="seg-track">
+        {["PAPER", "SHADOW", "AUTO"].map((p) => (
+          <button key={p} role="tab" aria-selected={selectedProfile === p} data-on={selectedProfile === p}
+            onClick={() => setSelectedProfile(p)} className="seg inline-flex items-center gap-1">
+            {p}
+            {enabledProfiles.includes(p) && <span className="live-dot" style={{ background: "currentColor" }} aria-hidden="true" />}
+          </button>
+        ))}
       </div>
-
-      <div className="rounded-[var(--radius-md)] px-3 py-2.5" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
-        <div className="flex items-center gap-2">
-          <span className="text-[12px] font-bold flex-1">{tab}</span>
-          {stats?.locked && (
-            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0" style={{ background: "var(--c-warn-soft)", color: "var(--c-warn)" }}>LOCKED</span>
-          )}
-          <span className="text-[10.5px] font-semibold shrink-0" style={{ color: enabled ? color.fg : "var(--c-faint)" }}>{enabled ? "ON" : "OFF"}</span>
-          <motion.button
-            whileTap={{ scale: 0.94 }}
-            onClick={() => setProfileEnabled(tab, !enabled)}
-            disabled={saving} role="switch" aria-checked={enabled}
-            aria-label={`Turn ${tab} ${enabled ? "off" : "on"}`}
-            className="relative rounded-full shrink-0"
-            style={{
-              width: 34, height: 20,
-              background: enabled ? (tab === "AUTO" ? `linear-gradient(135deg, var(--oat-accent), var(--oat-accent-2))` : color.bg) : "var(--c-surface-3)",
-            }}
-          >
-            <motion.span animate={{ x: enabled ? 15 : 1 }} transition={{ type: "spring", stiffness: 500, damping: 32 }}
-              className="absolute top-[2px] rounded-full shadow-sm" style={{ width: 16, height: 16, background: "#fff" }} />
-          </motion.button>
-        </div>
-        <div className="flex items-center gap-3 flex-wrap pt-1.5 mt-1.5 text-[10.5px] text-muted" style={{ borderTop: "1px solid var(--c-line)" }}>
-          <span>Today <strong className={`n ${realizedPnlToday >= 0 ? "text-gain" : "text-loss"}`}>{fmt(realizedPnlToday)}</strong></span>
-          <span>Active <strong className="n">{activeCount}</strong></span>
-          <span className="ml-auto">{tab === "AUTO" ? "Real broker orders" : "Simulated fills"}</span>
-        </div>
-      </div>
+      {locked && (
+        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0" style={{ background: "var(--c-warn-soft)", color: "var(--c-warn)" }}>LOCKED</span>
+      )}
+      <motion.button
+        whileTap={{ scale: 0.94 }}
+        onClick={() => setProfileEnabled(selectedProfile, !enabled)}
+        disabled={saving} role="switch" aria-checked={enabled}
+        aria-label={`Turn ${selectedProfile} ${enabled ? "off" : "on"}`}
+        className="relative rounded-full shrink-0"
+        style={{
+          width: 34, height: 20, boxSizing: "border-box",
+          background: enabled ? (selectedProfile === "AUTO" ? `linear-gradient(135deg, var(--oat-accent), var(--oat-accent-2))` : color.bg) : "var(--c-surface-3)",
+        }}
+      >
+        <motion.span animate={{ x: enabled ? 16 : 2 }} transition={{ type: "spring", stiffness: 500, damping: 32 }}
+          className="absolute top-[2px] rounded-full shadow-sm" style={{ width: 16, height: 16, background: "#fff" }} />
+      </motion.button>
     </div>
   );
 }
@@ -1090,6 +1075,7 @@ export default function OptionsAutoTrader() {
   const [realFunds, setRealFunds] = useState(null);
   const [growwRealFunds, setGrowwRealFunds] = useState(null);
   const [showAllModes, setShowAllModes] = useState(false);
+  const [selectedProfile, setSelectedProfile] = useState("PAPER");
   const [indices, setIndices] = useState([]);
   const [showDesktopCalendar, setShowDesktopCalendar] = useState(false);
   const [growwStatus, setGrowwStatus] = useState(null);
@@ -1161,19 +1147,17 @@ export default function OptionsAutoTrader() {
     ? ["PAPER", "SHADOW", "AUTO"].filter((m) => settings?.[`${m.toLowerCase()}_enabled`])
     : settings?.execution_mode && settings.execution_mode !== "OFF" ? [settings.execution_mode] : [];
 
-  // A position's execution_mode is fixed at the moment it opened — a
-  // PAPER position stays PAPER even after another profile is later turned
-  // on too. Once at least one profile is active, history from a
-  // profile that ISN'T currently enabled sitting in the same list is
-  // actively misleading (it can look like real money that isn't, or hide
-  // that a currently-enabled profile has no history yet), so the default
-  // view filters to whichever profile(s) are currently enabled;
-  // showAllModes opts back into seeing everything together.
-  const visiblePositions = showAllModes || enabledProfiles.length === 0
+  // Everything else on the page (Today's P&L, Open Positions, Activity
+  // log) follows whichever profile tab you're currently looking at, NOT
+  // the set of enabled profiles — "if I'm inside AUTO only show what's
+  // happening in it" means viewing AUTO must show only AUTO, even if
+  // SHADOW is also enabled and running in the background. showAllModes
+  // opts back into seeing every profile's history together.
+  const visiblePositions = showAllModes
     ? positions
     : {
-        active: positions.active.filter((p) => enabledProfiles.includes(p.execution_mode ?? "PAPER")),
-        closed: positions.closed.filter((p) => enabledProfiles.includes(p.execution_mode ?? "PAPER")),
+        active: positions.active.filter((p) => (p.execution_mode ?? "PAPER") === selectedProfile),
+        closed: positions.closed.filter((p) => (p.execution_mode ?? "PAPER") === selectedProfile),
       };
 
   const clearDailyLock = (mode) => {
@@ -1265,14 +1249,16 @@ export default function OptionsAutoTrader() {
       .finally(() => setKillSwitchBusy(false));
   };
 
-  // Same filter as visiblePositions: an entry tagged for the OTHER mode
-  // is hidden by default once a mode is active, so old PAPER activity
-  // doesn't sit in the log looking like it's still happening under AUTO.
-  // Untagged entries (batch-level, or written before this column existed)
-  // always show — they were never claiming to be either mode.
-  const modeFiltered = showAllModes || enabledProfiles.length === 0
+  // Same filter as visiblePositions: an entry tagged for another profile
+  // is hidden while viewing this one, so old PAPER activity doesn't sit in
+  // the log looking like it's still happening under AUTO. Untagged entries
+  // (batch-level, or written before this column existed) always show —
+  // they were never claiming to be any specific profile. A shared-scan log
+  // line (execution_mode like "SHADOW+AUTO") shows if the selected profile
+  // is any one of the modes joined together.
+  const modeFiltered = showAllModes
     ? logEntries
-    : logEntries.filter((e) => !e.execution_mode || enabledProfiles.some((m) => e.execution_mode === m || e.execution_mode?.split("+").includes(m)));
+    : logEntries.filter((e) => !e.execution_mode || e.execution_mode === selectedProfile || e.execution_mode?.split("+").includes(selectedProfile));
   const timeline = [
     ...modeFiltered.map((e) => ({ time: e.created_at, level: e.level, message: e.message })),
   ].slice(0, 30);
@@ -1343,8 +1329,9 @@ export default function OptionsAutoTrader() {
           header for why this replaced the earlier compact pill row. ── */}
       {!mobileFullScreenTab && (
         <ExecutionProfilesPanel
+          selectedProfile={selectedProfile} setSelectedProfile={setSelectedProfile}
           enabledProfiles={enabledProfiles} setProfileEnabled={setProfileEnabled} saving={saving}
-          dailyStatsByMode={dailyStatsByMode} positions={positions} hideAmounts={hideAmounts}
+          dailyStatsByMode={dailyStatsByMode}
         />
       )}
 

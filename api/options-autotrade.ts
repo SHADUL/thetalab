@@ -1896,6 +1896,10 @@ async function recoverShadowPositionIfLedgerCompleted(
   return { positionId: p.id, symbol: p.symbol, reason: plan.update.exit_reason, realizedPnl: plan.update.realized_pnl };
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * Position Monitor + Exit Engine (Phase 14-16) — the piece that was
  * missing until now: without this, an opened paper position just sat as
@@ -1907,6 +1911,15 @@ async function recoverShadowPositionIfLedgerCompleted(
  * computePositionSize() already reads for the daily/weekly-loss caps —
  * those caps have been live but functionally untested until this existed,
  * since nothing ever wrote a realized P&L before.
+ *
+ * The external trigger (cron-job.org) only fires once a minute — cron
+ * services floor at 1-minute granularity, there's no faster external
+ * schedule to ask for. Rather than one re-quote per minute, this re-runs
+ * its own fetch-quote-evaluate pass internally every SUB_INTERVAL_MS,
+ * budgeted to fit inside this function's own maxDuration (60s, see
+ * vercel.json) with headroom for the final response — turning one
+ * 1-minute-resolution check into several ~8-second-resolution ones per
+ * invocation, without a second always-on process to operate.
  */
 async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClient) {
   if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
@@ -1929,13 +1942,36 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
   const token = session?.access_token;
   if (!token) { res.status(200).json({ ok: true, skipped: 'no_kite_session' }); return; }
 
-  const { data: positions, error: posErr } = await supabase
-    .from('options_autotrade_positions').select('*, options_autotrade_legs(*)').eq('status', 'ACTIVE');
-  if (posErr) { res.status(502).json({ ok: false, error: 'supabase_error', message: posErr.message }); return; }
-  if (!positions?.length) { res.status(200).json({ ok: true, checked: 0, closed: [] }); return; }
-
   const symbolExchanges = OPTIONS_SYMBOLS as Record<string, string>;
   const indexKeys = INDEX_QUOTE_KEY as Record<string, string>;
+
+  /** Real net credit actually collected at entry, from each leg's own recorded fill_price — the true broker-filled premium, not the scan-time quote (p.max_profit/net_credit). Same sign convention as cost-to-close: a SELL leg's fill is a credit (+), a BUY leg's fill is a debit (-). Only meaningful for AUTO, whose legs hold a real order's fill_price — PAPER/SHADOW never place a real order, so their fill_price is just the quote used to compute max_profit already, and max_profit remains their correct baseline. */
+  const actualFillCreditFromLegs = (legs: any[]): number =>
+    legs.reduce((sum, l) => sum + (l.side === 'SELL' ? 1 : -1) * Number(l.fill_price) * l.quantity, 0);
+
+  // Sub-minute re-quote loop state — accumulated ACROSS every internal
+  // pass this invocation makes, not reset per pass, so the response
+  // reports the whole invocation's work, not just its last 8 seconds.
+  const startedAt = Date.now();
+  const SUB_INTERVAL_MS = 8_000;
+  const MAX_LOOP_MS = 50_000; // leaves ~10s of this function's 60s maxDuration for the final response/cleanup
+  let iterations = 0;
+  let lastCheckedCount = 0;
+  const closed: Array<{ positionId: number; symbol: string; reason: string | null; realizedPnl: number }> = [];
+  // undefined = not yet fetched this invocation; null = fetched, no session exists. Fetched at most once per INVOCATION (cached across passes), only if a GROWW-broker position actually needs to place a real closing order.
+  let growwTokenForClosing: string | null | undefined;
+
+  while (true) {
+    iterations++;
+    const { data: positions, error: posErr } = await supabase
+      .from('options_autotrade_positions').select('*, options_autotrade_legs(*)').eq('status', 'ACTIVE');
+    if (posErr) {
+      if (iterations === 1) { res.status(502).json({ ok: false, error: 'supabase_error', message: posErr.message }); return; }
+      await supabase.from('options_autotrade_log').insert({ level: 'error', message: `Position-monitor: pass #${iterations} failed to fetch open positions — stopping this invocation's sub-minute loop early.`, detail: { message: posErr.message } });
+      break;
+    }
+    lastCheckedCount = positions?.length ?? 0;
+    if (!positions?.length) break;
 
   // PRICE DISCOVERY always goes through Kite regardless of which broker
   // actually holds the position — Kite is this app's sole market-data
@@ -1966,10 +2002,6 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
   const kitePriceSymbolFor = (p: any, l: any): string | null =>
     p.broker === 'GROWW' ? (kiteSymbolByGrowwLeg.get(`${p.id}|${l.id}`) ?? null) : l.tradingsymbol;
 
-  /** Real net credit actually collected at entry, from each leg's own recorded fill_price — the true broker-filled premium, not the scan-time quote (p.max_profit/net_credit). Same sign convention as cost-to-close: a SELL leg's fill is a credit (+), a BUY leg's fill is a debit (-). Only meaningful for AUTO, whose legs hold a real order's fill_price — PAPER/SHADOW never place a real order, so their fill_price is just the quote used to compute max_profit already, and max_profit remains their correct baseline. */
-  const actualFillCreditFromLegs = (legs: any[]): number =>
-    legs.reduce((sum, l) => sum + (l.side === 'SELL' ? 1 : -1) * Number(l.fill_price) * l.quantity, 0);
-
   // Batch every quote this run needs across ALL open positions at once —
   // every leg's (Kite) tradingsymbol plus each distinct symbol's index
   // quote key — rather than one Kite call per position, so API usage
@@ -1998,9 +2030,6 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
   }
 
   const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-  const closed: Array<{ positionId: number; symbol: string; reason: string | null; realizedPnl: number }> = [];
-  // undefined = not yet fetched this invocation; null = fetched, no session exists. Fetched at most once per run, only if a GROWW-broker position actually needs to place a real closing order this cycle.
-  let growwTokenForClosing: string | null | undefined;
 
   for (const p of positions) {
     const legs = p.options_autotrade_legs ?? [];
@@ -2398,7 +2427,16 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
     closed.push({ positionId: p.id, symbol: p.symbol, reason: decision.reason, realizedPnl });
   }
 
-  res.status(200).json({ ok: true, checked: positions.length, closed });
+    // Only keep re-looping while there's genuine budget left for another
+    // FULL pass (quote batch + evaluate every position) — bailing out
+    // mid-pass on a tight deadline would leave positions unevaluated this
+    // invocation for no benefit, since the next cron tick covers them anyway.
+    const elapsedMs = Date.now() - startedAt;
+    if (elapsedMs + SUB_INTERVAL_MS > MAX_LOOP_MS) break;
+    await sleep(SUB_INTERVAL_MS);
+  }
+
+  res.status(200).json({ ok: true, iterations, checked: lastCheckedCount, closed });
 }
 
 /**

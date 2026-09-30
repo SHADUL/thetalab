@@ -11,6 +11,12 @@ name: Options Auto-Trader Position Monitor
 # closes at whatever the live re-quote is when a check catches the
 # condition); this workflow is manual-dispatch only, kept for on-demand
 # diagnosis.
+#
+# Cron services (this one included) floor at 1-minute granularity — there's
+# no external schedule finer than that to ask for. handlePositionMonitor
+# itself now re-quotes and re-evaluates internally roughly every 8 seconds
+# for up to ~50s per invocation (see its own doc comment), so each 1-minute
+# external tick actually produces several sub-minute checks, not one.
 on:
   workflow_dispatch: {}
 

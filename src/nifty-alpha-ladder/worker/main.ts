@@ -36,7 +36,7 @@ import { createSessionAccumulator, ingest, evaluateCurrentSignal, serializeCheck
 import { deriveHealthStatus, deriveSessionQuality, canFireNewSignal } from '../live/connectionSupervisor.ts';
 import { createSupabaseAlphaLadderStore } from '../persistence/store.ts';
 import { isTradingDay, isSignalWeekday } from '../calendar/signalCalendar.ts';
-import { nowIST, isWithinSignalWindow, MARKET_OPEN_MIN, SIGNAL_CUTOFF_MIN } from '../calendar/istClock.ts';
+import { nowIST, isWithinSignalWindow, isMarketOpen, MARKET_OPEN_MIN, SIGNAL_CUTOFF_MIN } from '../calendar/istClock.ts';
 
 /** Seconds from session origin (09:15 IST) to the 14:30 IST cutoff — a fixed constant every day, since both are IST clock times measured from the same origin. */
 const CUTOFF_SEC_FROM_ORIGIN = (SIGNAL_CUTOFF_MIN - MARKET_OPEN_MIN) * 60;
@@ -136,8 +136,14 @@ async function main() {
     // not re-derived from a UTC instant.
     const istCalendarDate = new Date(`${ist.dateISO}T00:00:00Z`);
     const isHolidayOrWeekend = !isTradingDay(istCalendarDate);
+    // A trading DAY is necessary but not sufficient — deriveHealthStatus's
+    // MARKET_CLOSED branch never fired outside a holiday/weekend even at
+    // 8pm IST on an ordinary Wednesday, because this previously checked
+    // only the day, never the clock. Real deploy caught this: the worker
+    // sat reporting CONNECTING all evening instead of MARKET_CLOSED.
+    const isMarketHours = !isHolidayOrWeekend && isMarketOpen(ist.minutesSinceMidnight);
     const health = deriveHealthStatus({
-      nowMs: Date.now(), lastSocketMessageAtMs, isMarketHours: !isHolidayOrWeekend,
+      nowMs: Date.now(), lastSocketMessageAtMs, isMarketHours,
       isWarmedUp: depthSource.getHealth().status === 'HEALTHY', hasUnrecoverableGapThisWeek: hasUnrecoverableGapToday,
     });
     const quality = deriveSessionQuality(health, hasUnrecoverableGapToday);

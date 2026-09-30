@@ -104,73 +104,66 @@ function RotatingTicker({ indices }) {
 }
 
 /**
- * One profile's own expandable section (migration 019): its own on/off
- * switch right in the collapsed header, plus — once expanded — its own
- * today's P&L, active-position count and lock state. Replaces the earlier
- * single shared row of three small pills: the user asked to be able to
- * "go inside one or two sections and turn it on and off" rather than
- * flip switches on a compact strip with no detail behind them.
- */
-function ProfileToggleCard({ profile, enabled, onToggle, saving, stats, activeCount, hideAmounts }) {
-  const [open, setOpen] = useState(false);
-  const color = MODE_COLOR[profile];
-  const fmt = (n) => (hideAmounts ? "••••••" : inr(n));
-  const realizedPnlToday = Number(stats?.realized_pnl) || 0;
-  return (
-    <div className="rounded-[var(--radius-md)] overflow-hidden flex-1 min-w-[150px]" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
-      <button type="button" onClick={() => setOpen((v) => !v)} className="w-full flex items-center gap-2 px-3 py-2.5 text-left">
-        <span className="text-[11.5px] font-bold flex-1 truncate">{profile}</span>
-        {stats?.locked && (
-          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0" style={{ background: "var(--c-warn-soft)", color: "var(--c-warn)" }}>LOCKED</span>
-        )}
-        <motion.button
-          whileTap={{ scale: 0.94 }}
-          onClick={(e) => { e.stopPropagation(); onToggle(!enabled); }}
-          disabled={saving} role="switch" aria-checked={enabled}
-          aria-label={`Turn ${profile} ${enabled ? "off" : "on"}`}
-          className="relative rounded-full shrink-0"
-          style={{
-            width: 34, height: 20,
-            background: enabled ? (profile === "AUTO" ? `linear-gradient(135deg, var(--oat-accent), var(--oat-accent-2))` : color.bg) : "var(--c-surface-3)",
-          }}
-        >
-          <motion.span animate={{ x: enabled ? 15 : 1 }} transition={{ type: "spring", stiffness: 500, damping: 32 }}
-            className="absolute top-[2px] rounded-full shadow-sm" style={{ width: 16, height: 16, background: "#fff" }} />
-        </motion.button>
-        {open ? <CaretUp size={11} weight="bold" className="text-faint shrink-0" /> : <CaretDown size={11} weight="bold" className="text-faint shrink-0" />}
-      </button>
-      {open && (
-        <div className="flex items-center gap-3 flex-wrap px-3 pb-2.5 pt-0.5 text-[10.5px] text-muted" style={{ borderTop: "1px solid var(--c-line)" }}>
-          <span>Today <strong className={`n ${realizedPnlToday >= 0 ? "text-gain" : "text-loss"}`}>{fmt(realizedPnlToday)}</strong></span>
-          <span>Active <strong className="n">{activeCount}</strong></span>
-          <span className="ml-auto">{profile === "AUTO" ? "Real broker orders" : "Simulated fills"}</span>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/**
- * Independent PAPER/SHADOW/AUTO execution profiles (migration 019) — any
- * subset can be enabled at once, each running its own full scan/entry/exit
- * cycle server-side. Shared between mobile and desktop (a responsive
- * flex-wrap row), so this section only needs to be built once.
+ * Independent PAPER/SHADOW/AUTO execution profiles (migration 019) — a
+ * KITE/GROWW-style segmented tab selector picks WHICH profile you're
+ * looking at, and only that one profile's own section renders below it
+ * (never all three at once): its own on/off switch, its own today's P&L,
+ * active-position count and lock state. Switching tabs never changes
+ * what's enabled — it only changes which profile's detail you're viewing;
+ * toggling the switch only ever affects the currently-selected profile.
  */
 function ExecutionProfilesPanel({ enabledProfiles, setProfileEnabled, saving, dailyStatsByMode, positions, hideAmounts }) {
+  const [tab, setTab] = useState("PAPER");
+  const enabled = enabledProfiles.includes(tab);
+  const stats = dailyStatsByMode[tab];
+  const activeCount = positions.active.filter((p) => (p.execution_mode ?? "PAPER") === tab).length;
+  const realizedPnlToday = Number(stats?.realized_pnl) || 0;
+  const fmt = (n) => (hideAmounts ? "••••••" : inr(n));
+  const color = MODE_COLOR[tab];
+
   return (
-    <div className="flex items-stretch gap-2 flex-wrap py-2 mb-3 order-[40]">
-      {["PAPER", "SHADOW", "AUTO"].map((profile) => (
-        <ProfileToggleCard
-          key={profile}
-          profile={profile}
-          enabled={enabledProfiles.includes(profile)}
-          onToggle={(v) => setProfileEnabled(profile, v)}
-          saving={saving}
-          stats={dailyStatsByMode[profile]}
-          activeCount={positions.active.filter((p) => (p.execution_mode ?? "PAPER") === profile).length}
-          hideAmounts={hideAmounts}
-        />
-      ))}
+    <div className="flex flex-col gap-2 py-2 mb-3 order-[40]">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[10.5px] font-semibold text-muted shrink-0">Profile</span>
+        <div className="seg-track">
+          {["PAPER", "SHADOW", "AUTO"].map((p) => (
+            <button key={p} role="tab" aria-selected={tab === p} data-on={tab === p}
+              onClick={() => setTab(p)} className="seg inline-flex items-center gap-1">
+              {p}
+              {enabledProfiles.includes(p) && <span className="live-dot" style={{ background: "currentColor" }} aria-hidden="true" />}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="rounded-[var(--radius-md)] px-3 py-2.5" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+        <div className="flex items-center gap-2">
+          <span className="text-[12px] font-bold flex-1">{tab}</span>
+          {stats?.locked && (
+            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0" style={{ background: "var(--c-warn-soft)", color: "var(--c-warn)" }}>LOCKED</span>
+          )}
+          <span className="text-[10.5px] font-semibold shrink-0" style={{ color: enabled ? color.fg : "var(--c-faint)" }}>{enabled ? "ON" : "OFF"}</span>
+          <motion.button
+            whileTap={{ scale: 0.94 }}
+            onClick={() => setProfileEnabled(tab, !enabled)}
+            disabled={saving} role="switch" aria-checked={enabled}
+            aria-label={`Turn ${tab} ${enabled ? "off" : "on"}`}
+            className="relative rounded-full shrink-0"
+            style={{
+              width: 34, height: 20,
+              background: enabled ? (tab === "AUTO" ? `linear-gradient(135deg, var(--oat-accent), var(--oat-accent-2))` : color.bg) : "var(--c-surface-3)",
+            }}
+          >
+            <motion.span animate={{ x: enabled ? 15 : 1 }} transition={{ type: "spring", stiffness: 500, damping: 32 }}
+              className="absolute top-[2px] rounded-full shadow-sm" style={{ width: 16, height: 16, background: "#fff" }} />
+          </motion.button>
+        </div>
+        <div className="flex items-center gap-3 flex-wrap pt-1.5 mt-1.5 text-[10.5px] text-muted" style={{ borderTop: "1px solid var(--c-line)" }}>
+          <span>Today <strong className={`n ${realizedPnlToday >= 0 ? "text-gain" : "text-loss"}`}>{fmt(realizedPnlToday)}</strong></span>
+          <span>Active <strong className="n">{activeCount}</strong></span>
+          <span className="ml-auto">{tab === "AUTO" ? "Real broker orders" : "Simulated fills"}</span>
+        </div>
+      </div>
     </div>
   );
 }

@@ -105,6 +105,84 @@ export function ingest(state: SessionAccumulatorState, observations: DepthLevelO
 
 const thresholdAt = (state: SessionAccumulatorState) => (side: 'b' | 'a') => state.referenceThresholds[side];
 
+// ---------------------------------------------------------------------------
+// Durable checkpoint (spec: "partial 3-minute bucket recovery") — serializes
+// exactly the in-progress state a restart must not lose: completed G2
+// snapshots, the CURRENT still-open interval's raw observations, and the
+// reference-threshold recursion state. Deliberately does NOT include
+// `rawObservations` (G1's full-day tick history) — persisting that is a
+// separate, already-disclosed limitation (unbounded storage volume, needs
+// its own retention design), not silently solved here.
+// ---------------------------------------------------------------------------
+
+export interface AccumulatorCheckpoint {
+  sessionOriginMs: number;
+  aggregateSnapshots: AggregateSnapshot[];
+  pendingIntervalObservations: DepthLevelObservation[];
+  lastIntervalEndMs: number;
+  referenceThresholds: { b: ReferenceThresholdState; a: ReferenceThresholdState };
+  pendingWindowObservations: { b: number[]; a: number[] };
+  lastWindowFoldedAtMs: number;
+}
+
+export function serializeCheckpoint(state: SessionAccumulatorState): AccumulatorCheckpoint {
+  return {
+    sessionOriginMs: state.sessionOriginMs,
+    aggregateSnapshots: state.aggregateSnapshots,
+    pendingIntervalObservations: state.pendingIntervalObservations,
+    lastIntervalEndMs: state.lastIntervalEndMs,
+    referenceThresholds: state.referenceThresholds,
+    pendingWindowObservations: state.pendingWindowObservations,
+    lastWindowFoldedAtMs: state.lastWindowFoldedAtMs,
+  };
+}
+
+/**
+ * Restores an accumulator from a checkpoint — `rawObservations` starts
+ * empty (see this section's header) but everything needed to correctly
+ * continue the CURRENT theta3/theta4 windows is restored exactly, so the
+ * in-progress bucket is never silently lost or padded with fabricated data.
+ */
+export function restoreFromCheckpoint(checkpoint: AccumulatorCheckpoint): SessionAccumulatorState {
+  return {
+    sessionOriginMs: checkpoint.sessionOriginMs,
+    rawObservations: [...checkpoint.pendingIntervalObservations], // at minimum, the still-open interval's own observations are real G1 input too
+    aggregateSnapshots: checkpoint.aggregateSnapshots,
+    referenceThresholds: checkpoint.referenceThresholds,
+    pendingWindowObservations: checkpoint.pendingWindowObservations,
+    lastWindowFoldedAtMs: checkpoint.lastWindowFoldedAtMs,
+    pendingIntervalObservations: checkpoint.pendingIntervalObservations,
+    lastIntervalEndMs: checkpoint.lastIntervalEndMs,
+  };
+}
+
+export interface RestoreDecision {
+  state: SessionAccumulatorState;
+  /** true iff the downtime between the checkpoint and now exceeded what can be trusted as a real, gap-free continuation — the caller must mark session quality accordingly (connectionSupervisor's INVALID_FOR_NEW_SIGNAL), never silently resume as if nothing happened. */
+  gapDetected: boolean;
+  gapDurationMs: number;
+}
+
+/**
+ * Decides whether to resume from a checkpoint or start fresh, and whether
+ * the downtime itself constitutes a genuine feed gap. Never fabricates
+ * observations for the missing window either way — a detected gap means
+ * "tell the caller to invalidate this week's signal," not "pad the data."
+ */
+export function restoreOrStartFresh(
+  checkpoint: AccumulatorCheckpoint | null,
+  sessionOriginMs: number,
+  nowMs: number,
+  maxRecoverableGapMs: number,
+): RestoreDecision {
+  if (!checkpoint) {
+    return { state: createSessionAccumulator(sessionOriginMs), gapDetected: false, gapDurationMs: 0 };
+  }
+  const gapDurationMs = nowMs - checkpoint.lastIntervalEndMs;
+  const gapDetected = gapDurationMs > maxRecoverableGapMs;
+  return { state: restoreFromCheckpoint(checkpoint), gapDetected, gapDurationMs };
+}
+
 /** Re-derives the current G1/G2 knot series from everything accumulated so far and evaluates the signal — identical math to Milestone 2's fixture-driven tests, now fed by live-accumulated data. */
 export function evaluateCurrentSignal(state: SessionAccumulatorState, nowSec: number, cutoffSec: number, vix: VixRead): SignalDecision {
   const events = buildLargeOrderEvents(state.rawObservations, (side) => thresholdAt(state)(side));

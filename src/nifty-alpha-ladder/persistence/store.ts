@@ -17,6 +17,7 @@
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Direction, ExecutionMode, LegSide, OptionRight, SignalRecord, SignalPath, SignedDirection } from '../types.ts';
+import type { AccumulatorCheckpoint } from '../live/sessionAccumulator.ts';
 
 export type CallKind = 'MONITOR' | 'STRUCTURE';
 export type CallStatus = 'PUBLISHED' | 'LIVE' | 'EXIT_REQUESTED' | 'EXITING' | 'CLOSED' | 'LEFTOVER_ALERT';
@@ -113,6 +114,10 @@ export interface AlphaLadderStore {
 
   // --- activity log ---
   logActivity(level: 'info' | 'error', message: string, detail?: unknown, callId?: number, positionId?: number): Promise<void>;
+
+  // --- accumulator checkpoint (partial-bucket recovery) ---
+  saveAccumulatorCheckpoint(sessionDate: string, checkpoint: AccumulatorCheckpoint): Promise<void>;
+  loadAccumulatorCheckpoint(sessionDate: string): Promise<AccumulatorCheckpoint | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -138,6 +143,7 @@ export function createInMemoryAlphaLadderStore(): AlphaLadderStore {
   let workerHealthId = 0;
   const workerHealth: WorkerHealthRow[] = [];
   const activityLog: Array<{ level: string; message: string; detail?: unknown; callId?: number; positionId?: number }> = [];
+  const checkpoints = new Map<string, AccumulatorCheckpoint>();
 
   return {
     async getSignalByWeekKey(weekKey) {
@@ -211,6 +217,12 @@ export function createInMemoryAlphaLadderStore(): AlphaLadderStore {
     },
     async logActivity(level, message, detail, callId, positionId) {
       activityLog.push({ level, message, detail, callId, positionId });
+    },
+    async saveAccumulatorCheckpoint(sessionDate, checkpoint) {
+      checkpoints.set(sessionDate, checkpoint);
+    },
+    async loadAccumulatorCheckpoint(sessionDate) {
+      return checkpoints.get(sessionDate) ?? null;
     },
   };
 }
@@ -310,6 +322,34 @@ export function createSupabaseAlphaLadderStore(client: SupabaseClient): AlphaLad
     },
     async logActivity(level, message, detail, callId, positionId) {
       await client.from('alpha_ladder_activity_log').insert({ level, message, detail: detail ?? null, call_id: callId ?? null, position_id: positionId ?? null });
+    },
+    async saveAccumulatorCheckpoint(sessionDate, checkpoint) {
+      await client.from('alpha_ladder_accumulator_checkpoint').upsert({
+        session_date: sessionDate,
+        session_origin_ms: checkpoint.sessionOriginMs,
+        aggregate_snapshots: checkpoint.aggregateSnapshots,
+        pending_interval_observations: checkpoint.pendingIntervalObservations,
+        last_interval_end_ms: checkpoint.lastIntervalEndMs,
+        reference_threshold_bid: checkpoint.referenceThresholds.b,
+        reference_threshold_ask: checkpoint.referenceThresholds.a,
+        pending_window_observations_bid: checkpoint.pendingWindowObservations.b,
+        pending_window_observations_ask: checkpoint.pendingWindowObservations.a,
+        last_window_folded_at_ms: checkpoint.lastWindowFoldedAtMs,
+        updated_at: new Date().toISOString(),
+      });
+    },
+    async loadAccumulatorCheckpoint(sessionDate) {
+      const { data } = await client.from('alpha_ladder_accumulator_checkpoint').select('*').eq('session_date', sessionDate).maybeSingle();
+      if (!data) return null;
+      return {
+        sessionOriginMs: data.session_origin_ms,
+        aggregateSnapshots: data.aggregate_snapshots,
+        pendingIntervalObservations: data.pending_interval_observations,
+        lastIntervalEndMs: data.last_interval_end_ms,
+        referenceThresholds: { b: data.reference_threshold_bid, a: data.reference_threshold_ask },
+        pendingWindowObservations: { b: data.pending_window_observations_bid, a: data.pending_window_observations_ask },
+        lastWindowFoldedAtMs: data.last_window_folded_at_ms,
+      };
     },
   };
 }

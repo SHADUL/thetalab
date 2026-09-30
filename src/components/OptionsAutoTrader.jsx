@@ -140,14 +140,23 @@ function ExecutionProfilesPanel({ selectedProfile, setSelectedProfile, enabledPr
         onClick={() => setProfileEnabled(selectedProfile, !enabled)}
         disabled={saving} role="switch" aria-checked={enabled}
         aria-label={`Turn ${selectedProfile} ${enabled ? "off" : "on"}`}
-        className="relative rounded-full shrink-0"
+        // Flexbox alignment slides the knob, not an absolute-positioned
+        // transform against an assumed track width — the knob (16px) can
+        // never render outside a 30px flex content box (34px track minus
+        // 2px padding each side) no matter what else on the page affects
+        // sizing, unlike the previous x-translate version which could
+        // overflow if the track's rendered width ever drifted from the
+        // 34px this component assumed.
+        className="inline-flex items-center shrink-0 rounded-full p-[2px] box-border"
         style={{
-          width: 34, height: 20, boxSizing: "border-box",
+          width: 34, height: 20,
+          justifyContent: enabled ? "flex-end" : "flex-start",
           background: enabled ? (selectedProfile === "AUTO" ? `linear-gradient(135deg, var(--oat-accent), var(--oat-accent-2))` : color.bg) : "var(--c-surface-3)",
+          border: enabled ? "none" : "1px solid var(--c-line)",
         }}
       >
-        <motion.span animate={{ x: enabled ? 16 : 2 }} transition={{ type: "spring", stiffness: 500, damping: 32 }}
-          className="absolute top-[2px] rounded-full shadow-sm" style={{ width: 16, height: 16, background: "#fff" }} />
+        <motion.span layout transition={{ type: "spring", stiffness: 500, damping: 32 }}
+          className="rounded-full shadow-sm" style={{ width: 16, height: 16, background: "#fff" }} />
       </motion.button>
     </div>
   );

@@ -564,14 +564,18 @@ function makeGrowwOrderPlacer(token: string): LiveOrderPlacer {
  * SDK's TypeScript typing implied (that typing was explicitly not trusted
  * for this money-critical code — see this file's Groww section header).
  *
- * Sign convention: Groww's per-symbol row carries separate
- * debit_quantity/credit_quantity counters rather than Kite's single signed
- * quantity, so net signed quantity is derived as
- * (debit_quantity - credit_quantity) — positive meaning net long, mirroring
- * Kite's convention so reconcile() (brokerReconciliation.ts) needs no
- * broker-specific branch. UNVERIFIED against a real non-zero position (the
- * live account had zero positions when this was built) — worth a second
- * look the first time a real Groww position actually exists.
+ * Sign convention: uses Groww's OWN pre-computed signed `quantity` field
+ * directly (positive = net long, negative = net short — same convention
+ * reconcile()/brokerReconciliation.ts already assumes for Kite, so no
+ * broker-specific branch needed there). A previous version of this
+ * function derived the sign itself as (debit_quantity - credit_quantity)
+ * because the live account had zero positions when it was written and
+ * this couldn't be checked — confirmed WRONG (backwards) the first time
+ * a real 2-leg position existed: reconciliation flagged a clean
+ * SIDE_MISMATCH on both legs, and reading the raw API response directly
+ * showed Groww's own `quantity` disagreeing with that derived formula's
+ * sign on every leg. Fixed by trusting Groww's own field instead of
+ * re-deriving it.
  */
 async function fetchGrowwBrokerPositions(token: string): Promise<BrokerPosition[] | null> {
   try {
@@ -580,7 +584,7 @@ async function fetchGrowwBrokerPositions(token: string): Promise<BrokerPosition[
     return positions
       .map((p) => ({
         tradingsymbol: String(p.trading_symbol),
-        quantity: (Number(p.debit_quantity) || 0) - (Number(p.credit_quantity) || 0),
+        quantity: Number(p.quantity) || 0,
       }))
       .filter((p) => p.quantity !== 0);
   } catch {
@@ -3579,6 +3583,28 @@ async function handleGrowwStatus(req: any, res: any, supabase: SupabaseClient) {
 }
 
 /**
+ * Unlike Groww's status (a token either exists or it doesn't — Groww's
+ * own mint call fails outright once it's genuinely invalid), Kite's
+ * token expires once per calendar day (~6am IST) but the OLD row is
+ * never cleared — a stale row from yesterday still has a real
+ * access_token in it. A plain `Boolean(access_token)` check would have
+ * shown "Connected" through the exact stale-session failure this
+ * resource exists to catch, so this additionally requires obtained_at
+ * to fall on TODAY's IST calendar date.
+ */
+async function handleKiteStatus(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const { data } = await supabase.from('kite_session').select('access_token, obtained_at').eq('id', 1).maybeSingle();
+  const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const obtainedIST = data?.obtained_at ? new Date(data.obtained_at).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }) : null;
+  res.status(200).json({
+    ok: true,
+    connected: Boolean(data?.access_token) && obtainedIST === todayIST,
+    obtainedAt: data?.obtained_at ?? null,
+  });
+}
+
+/**
  * Cron-triggered daily refresh of the Groww access token — Groww's own
  * dashboard resets it every day at 6 AM IST (see the "API key dashboard"
  * note), and unlike Kite's browser-OAuth login this mint is a pure
@@ -3783,6 +3809,7 @@ export default async function handler(req: any, res: any) {
   if (resource === 'groww-real-funds') return handleGrowwRealFunds(req, res, supabase);
   if (resource === 'groww-connect') return handleGrowwConnect(req, res, supabase);
   if (resource === 'groww-status') return handleGrowwStatus(req, res, supabase);
+  if (resource === 'kite-status') return handleKiteStatus(req, res, supabase);
   if (resource === 'indices') return handleIndices(req, res, supabase);
   if (resource === 'log') return handleLog(req, res, supabase);
   if (resource === 'kill-switch') return handleKillSwitch(req, res, supabase);

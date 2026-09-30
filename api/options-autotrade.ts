@@ -2074,8 +2074,29 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
       .filter((l: any) => l.side === 'SELL')
       .map((l: any) => ({ strike: Number(l.strike), right: l.option_right }));
 
+    // evaluateExit's own contract for `maxProfit` is "total credit
+    // collected at entry" (see exitEngine.ts) — for AUTO that's
+    // entryCreditBaseline (the real fill), not p.max_profit (the
+    // scan-time quote), same divergence already fixed for P&L above. Left
+    // as-is this silently mis-triggers PROFIT_TARGET / STOP_LOSS_CREDIT_
+    // MULTIPLE off the wrong baseline: position #37 closed labeled
+    // PROFIT_TARGET (50% of its ₹19,008 theoretical credit "captured")
+    // while its real credit was only ₹4,320 — against that real number
+    // the same cost-to-close was already well past the 2x stop-loss
+    // multiple, not a profit target.
+    // maxLoss must move with it to stay consistent: (theoretical
+    // maxProfit + theoretical maxLoss) is the structure's total rupee
+    // width (purely a function of strikes/quantity, invariant regardless
+    // of what credit actually filled) — so the real maxLoss, given the
+    // real credit actually collected, is that same width minus the real
+    // credit, not the stored (equally quote-based) p.max_loss.
+    const structuralWidth = (Number(p.max_profit) || 0) + (Number(p.max_loss) || 0);
+    const maxLossBaseline = p.execution_mode === 'AUTO'
+      ? structuralWidth - entryCreditBaseline
+      : (Number(p.max_loss) || 0);
+
     const decision = evaluateExit({
-      maxProfit: Number(p.max_profit) || 0, maxLoss: Number(p.max_loss) || 0, currentCostToClose, dte, underlyingPrice,
+      maxProfit: entryCreditBaseline, maxLoss: maxLossBaseline, currentCostToClose, dte, underlyingPrice,
       shortStrikes,
       profitTargetPct: settings.profit_target_pct, stopLossCreditMultiple: settings.stop_loss_credit_multiple,
       timeExitDte: settings.time_exit_dte, strikeBreachBufferPct: settings.strike_breach_buffer_pct,

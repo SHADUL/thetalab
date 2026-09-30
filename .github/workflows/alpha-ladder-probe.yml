@@ -1,0 +1,22 @@
+name: Nifty Alpha Ladder Market-Data Probe
+
+# One-off, read-only Kite capability check (A1/A7 empirical resolution) for
+# NIFTY_ALPHA_LADDER_MARKET_DATA_CAPABILITY_REPORT.md — never places,
+# modifies or cancels any order. Manual-dispatch only, kept for on-demand
+# re-verification (e.g. if Kite's depth/historical API shape ever changes).
+# Reuses the same OPTIONS_AUTOTRADE_CRON_SECRET shared-secret gate every
+# other server-triggered resource in this repo already uses — an
+# infrastructure concern, not strategy logic, so sharing it does not couple
+# Nifty Alpha Ladder's business logic to Options Auto-Trader's.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call the Nifty Alpha Ladder probe endpoint
+        run: |
+          curl -sf -X GET "https://thetalab-beta.vercel.app/api/nifty-alpha-ladder?resource=probe" \
+            -H "Authorization: Bearer ${{ secrets.OPTIONS_AUTOTRADE_CRON_SECRET }}" \
+            -w "\nHTTP %{http_code}\n"

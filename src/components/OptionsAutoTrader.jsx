@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { ChartLineUp, Info, Wallet, Gear, CaretDown, CaretUp, CaretLeft, CaretRight, Shield, Bell, Eye, EyeSlash, CalendarBlank, ListBullets } from "@phosphor-icons/react";
 import { inr, toneClass, scoreTone, scoreLabel } from "./swingFormat.js";
+import { kiteLoginUrl } from "../lib/kiteClient.js";
 
 const POLL_MS = 60_000; // this dashboard only reads already-computed state (settings/positions/log) — the live chain fetch itself runs on its own 30-min cron, not on this poll
 
@@ -169,9 +170,13 @@ function ExecutionProfilesPanel({ selectedProfile, setSelectedProfile, enabledPr
  * confirming. Same setActiveBroker/connectGroww handlers as the desktop
  * BrokerCapitalCard's left side, just the top-of-screen presentation.
  */
-function MobileBrokerBar({ settings, growwStatus, growwConnecting, connectGroww, setActiveBroker, saving }) {
+function MobileBrokerBar({ settings, growwStatus, growwConnecting, connectGroww, kiteStatus, setActiveBroker, saving }) {
   const activeBroker = settings?.active_broker ?? "KITE";
   const isGroww = activeBroker === "GROWW";
+  // KITE's server-side session (kite_session, read via resource=kite-status)
+  // is completely separate from Groww's — a real connected/not-connected
+  // check either way, not just shown for Groww.
+  const connected = isGroww ? growwStatus?.connected : kiteStatus?.connected;
   return (
     <div className="sm:hidden flex items-center gap-2 flex-wrap py-1.5 mb-2 order-[10]">
       <div className="seg-track">
@@ -182,17 +187,19 @@ function MobileBrokerBar({ settings, growwStatus, growwConnecting, connectGroww,
           </button>
         ))}
       </div>
-      {isGroww && (
-        <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold px-2 py-1 rounded-full"
-          style={{ background: growwStatus?.connected ? "var(--c-gain-soft)" : "var(--c-warn-soft)", color: growwStatus?.connected ? "var(--c-gain)" : "var(--c-warn)" }}>
-          <span className="live-dot" style={{ background: growwStatus?.connected ? "var(--c-gain)" : "var(--c-warn)" }} aria-hidden="true" />
-          {growwStatus?.connected ? "Connected" : "Not connected"}
-        </span>
-      )}
-      {isGroww && (
+      <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold px-2 py-1 rounded-full"
+        style={{ background: connected ? "var(--c-gain-soft)" : "var(--c-warn-soft)", color: connected ? "var(--c-gain)" : "var(--c-warn)" }}>
+        <span className="live-dot" style={{ background: connected ? "var(--c-gain)" : "var(--c-warn)" }} aria-hidden="true" />
+        {connected ? "Connected" : "Not connected"}
+      </span>
+      {isGroww ? (
         <button onClick={connectGroww} disabled={growwConnecting} className="topstep text-[10.5px] ml-auto" style={{ minHeight: 32 }}>
-          {growwConnecting ? "Connecting…" : growwStatus?.connected ? "Reconnect" : "Connect"}
+          {growwConnecting ? "Connecting…" : connected ? "Reconnect" : "Connect"}
         </button>
+      ) : (
+        <a href={kiteLoginUrl()} className="topstep text-[10.5px] ml-auto" style={{ minHeight: 32 }}>
+          {connected ? "Reconnect" : "Connect"}
+        </a>
       )}
     </div>
   );
@@ -212,12 +219,17 @@ function MobileBrokerBar({ settings, growwStatus, growwConnecting, connectGroww,
  * information order.
  */
 function UtilityBar({
-  settings, growwStatus, growwConnecting, connectGroww, setActiveBroker, saving,
+  settings, growwStatus, growwConnecting, connectGroww, kiteStatus, setActiveBroker, saving,
   enabledProfiles, settingsOpen, setSettingsOpen, showAllModes, setShowAllModes,
 }) {
   const [brokerInfoOpen, setBrokerInfoOpen] = useState(false);
   const activeBroker = settings?.active_broker ?? "KITE";
   const isGroww = activeBroker === "GROWW";
+  // KITE's server-side session (kite_session, read via resource=kite-status)
+  // is completely separate from Groww's — show a real connected/not-
+  // connected state either way, not just for Groww.
+  const brokerStatus = isGroww ? growwStatus : kiteStatus;
+  const connected = brokerStatus?.connected;
 
   return (
     <div className="hidden sm:block sm:order-[30] mb-3">
@@ -233,20 +245,22 @@ function UtilityBar({
               </button>
             ))}
           </div>
-          {isGroww && (
-            <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold px-2 py-0.5 rounded-full"
-              style={{ background: growwStatus?.connected ? "var(--c-gain-soft)" : "var(--c-warn-soft)", color: growwStatus?.connected ? "var(--c-gain)" : "var(--c-warn)" }}>
-              <span className="live-dot" style={{ background: growwStatus?.connected ? "var(--c-gain)" : "var(--c-warn)" }} aria-hidden="true" />
-              {growwStatus?.connected ? "Connected" : "Not connected"}
-            </span>
+          <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold px-2 py-0.5 rounded-full"
+            style={{ background: connected ? "var(--c-gain-soft)" : "var(--c-warn-soft)", color: connected ? "var(--c-gain)" : "var(--c-warn)" }}>
+            <span className="live-dot" style={{ background: connected ? "var(--c-gain)" : "var(--c-warn)" }} aria-hidden="true" />
+            {connected ? "Connected" : "Not connected"}
+          </span>
+          {connected && brokerStatus?.obtainedAt && (
+            <span className="text-[10.5px] text-faint">synced {agoLabel(brokerStatus.obtainedAt)}</span>
           )}
-          {isGroww && growwStatus?.connected && growwStatus.obtainedAt && (
-            <span className="text-[10.5px] text-faint">synced {agoLabel(growwStatus.obtainedAt)}</span>
-          )}
-          {isGroww && (
+          {isGroww ? (
             <button onClick={connectGroww} disabled={growwConnecting} className="text-[10.5px] font-medium text-accent hover:opacity-70">
-              {growwConnecting ? "Connecting…" : growwStatus?.connected ? "Reconnect" : "Connect"}
+              {growwConnecting ? "Connecting…" : connected ? "Reconnect" : "Connect"}
             </button>
+          ) : (
+            <a href={kiteLoginUrl()} className="text-[10.5px] font-medium text-accent hover:opacity-70">
+              {connected ? "Reconnect" : "Connect"}
+            </a>
           )}
           {isGroww && growwStatus?.error && <span className="text-[10.5px] text-loss">{growwStatus.error}</span>}
           <button onClick={() => setBrokerInfoOpen((v) => !v)} className="text-faint hover:text-muted" aria-label="About broker routing" title="About broker routing">
@@ -1088,6 +1102,7 @@ export default function OptionsAutoTrader() {
   const [indices, setIndices] = useState([]);
   const [showDesktopCalendar, setShowDesktopCalendar] = useState(false);
   const [growwStatus, setGrowwStatus] = useState(null);
+  const [kiteStatus, setKiteStatus] = useState(null);
   const [growwConnecting, setGrowwConnecting] = useState(false);
   const timerRef = useRef(null);
 
@@ -1101,6 +1116,7 @@ export default function OptionsAutoTrader() {
       fetch("/api/options-autotrade?resource=indices").then((r) => r.json()),
       fetch("/api/options-autotrade?resource=groww-status").then((r) => r.json()),
       fetch("/api/options-autotrade?resource=groww-real-funds").then((r) => r.json()),
+      fetch("/api/options-autotrade?resource=kite-status").then((r) => r.json()),
       // One per profile (migration 019 gave daily_stats an execution_mode
       // dimension) — each profile's own card shows its own P&L/lock state,
       // never a shared one.
@@ -1108,7 +1124,7 @@ export default function OptionsAutoTrader() {
       fetch("/api/options-autotrade?resource=daily-stats&mode=SHADOW").then((r) => r.json()),
       fetch("/api/options-autotrade?resource=daily-stats&mode=AUTO").then((r) => r.json()),
     ])
-      .then(([s, posBody, logBody, dailyBody, fundsBody, indicesBody, growwBody, growwFundsBody, paperDaily, shadowDaily, autoDaily]) => {
+      .then(([s, posBody, logBody, dailyBody, fundsBody, indicesBody, growwBody, growwFundsBody, kiteBody, paperDaily, shadowDaily, autoDaily]) => {
         if (s?.error) { setError(s.message || s.error); return; }
         setError(null);
         setSettings(s);
@@ -1121,6 +1137,7 @@ export default function OptionsAutoTrader() {
         setIndices(indicesBody?.indices ?? []);
         setGrowwStatus(growwBody);
         setGrowwRealFunds(growwFundsBody);
+        setKiteStatus(kiteBody);
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
@@ -1162,11 +1179,16 @@ export default function OptionsAutoTrader() {
   // happening in it" means viewing AUTO must show only AUTO, even if
   // SHADOW is also enabled and running in the background. showAllModes
   // opts back into seeing every profile's history together.
+  // Every position is also tagged with the broker it was actually routed
+  // through (or, for PAPER, whichever broker was active at scan time) —
+  // filtering by profile alone let a KITE-routed AUTO position and a
+  // GROWW-routed one show side by side while viewing just one broker tab.
+  const activeBroker = settings?.active_broker ?? "KITE";
   const visiblePositions = showAllModes
     ? positions
     : {
-        active: positions.active.filter((p) => (p.execution_mode ?? "PAPER") === selectedProfile),
-        closed: positions.closed.filter((p) => (p.execution_mode ?? "PAPER") === selectedProfile),
+        active: positions.active.filter((p) => (p.execution_mode ?? "PAPER") === selectedProfile && (p.broker ?? "KITE") === activeBroker),
+        closed: positions.closed.filter((p) => (p.execution_mode ?? "PAPER") === selectedProfile && (p.broker ?? "KITE") === activeBroker),
       };
 
   const clearDailyLock = (mode) => {
@@ -1296,7 +1318,7 @@ export default function OptionsAutoTrader() {
       {!mobileFullScreenTab && (
         <MobileBrokerBar
           settings={settings} growwStatus={growwStatus} growwConnecting={growwConnecting}
-          connectGroww={connectGroww} setActiveBroker={setActiveBroker} saving={saving}
+          connectGroww={connectGroww} kiteStatus={kiteStatus} setActiveBroker={setActiveBroker} saving={saving}
         />
       )}
 
@@ -1351,7 +1373,7 @@ export default function OptionsAutoTrader() {
           card. ── */}
       <UtilityBar
         settings={settings} growwStatus={growwStatus} growwConnecting={growwConnecting}
-        connectGroww={connectGroww} setActiveBroker={setActiveBroker} saving={saving}
+        connectGroww={connectGroww} kiteStatus={kiteStatus} setActiveBroker={setActiveBroker} saving={saving}
         enabledProfiles={enabledProfiles}
         settingsOpen={settingsOpen} setSettingsOpen={setSettingsOpen}
         showAllModes={showAllModes} setShowAllModes={setShowAllModes}

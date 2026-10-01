@@ -140,3 +140,58 @@ test('KiteAlphaLadderDepthSource: an intentional disconnect() does NOT schedule 
   await source.disconnect(); // this internally emits 'close' on the fake socket too
   assert.equal(scheduled.length, 0);
 });
+
+test('KiteAlphaLadderDepthSource: reconnect delay backs off exponentially on repeated failures, capped at a max', async () => {
+  const sockets: FakeSocket[] = [];
+  const delays: number[] = [];
+  const fakeSetTimeout = ((fn: () => void, ms: number) => { delays.push(ms); fn(); return 0 as any; }) as unknown as typeof setTimeout;
+  const source = new KiteAlphaLadderDepthSource({
+    apiKey: 'k', accessToken: 't', setTimeoutFn: fakeSetTimeout,
+    wsFactory: (url) => { const s = new FakeSocket(); sockets.push(s); return s; },
+  });
+  await source.connect();
+  // Fail repeatedly WITHOUT ever opening/receiving a message — each
+  // failure should back off further than the last, not retry at the same
+  // flat interval forever (the exact bug that turned one bad connection
+  // into ~370 rapid-fire attempts on the first real deployment).
+  for (let i = 0; i < 5; i++) sockets[sockets.length - 1].emit('close');
+  assert.deepEqual(delays, [3000, 6000, 12000, 24000, 48000]);
+});
+
+test('KiteAlphaLadderDepthSource: a successful message resets the backoff — a later drop retries fast again, not at whatever backoff an earlier incident reached', async () => {
+  const sockets: FakeSocket[] = [];
+  const delays: number[] = [];
+  const fakeSetTimeout = ((fn: () => void, ms: number) => { delays.push(ms); fn(); return 0 as any; }) as unknown as typeof setTimeout;
+  const source = new KiteAlphaLadderDepthSource({
+    apiKey: 'k', accessToken: 't', setTimeoutFn: fakeSetTimeout,
+    wsFactory: (url) => { const s = new FakeSocket(); sockets.push(s); return s; },
+  });
+  await source.connect();
+  sockets[0].emit('close'); // one failure, backs off to 3000
+  sockets[1].emit('open');
+  sockets[1].emit('message', buildMinimalFrame(12468226)); // a real message — resets the counter
+  sockets[1].emit('close'); // this failure should back off from ZERO again, not continue from the prior incident
+  assert.deepEqual(delays, [3000, 3000]);
+});
+
+test('KiteAlphaLadderDepthSource: gives up after too many consecutive failures and reports FAILED — never hammers the server forever', async () => {
+  const sockets: FakeSocket[] = [];
+  const delays: number[] = [];
+  const fakeSetTimeout = ((fn: () => void, ms: number) => { delays.push(ms); fn(); return 0 as any; }) as unknown as typeof setTimeout;
+  const source = new KiteAlphaLadderDepthSource({
+    apiKey: 'k', accessToken: 't', setTimeoutFn: fakeSetTimeout,
+    wsFactory: (url) => { const s = new FakeSocket(); sockets.push(s); return s; },
+  });
+  await source.connect();
+  for (let i = 0; i < 20; i++) {
+    if (source.getHealth().status === 'FAILED') break;
+    sockets[sockets.length - 1].emit('close');
+  }
+  assert.equal(source.getHealth().status, 'FAILED');
+  const attemptsBeforeGivingUp = sockets.length;
+  // Emitting more closes past this point must NOT schedule any further attempts.
+  const delaysBeforeGivingUp = delays.length;
+  sockets[sockets.length - 1].emit('close');
+  assert.equal(sockets.length, attemptsBeforeGivingUp); // no new socket was opened
+  assert.equal(delays.length, delaysBeforeGivingUp); // no new reconnect was scheduled
+});

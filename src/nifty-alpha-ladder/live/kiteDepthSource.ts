@@ -65,7 +65,21 @@ function tickToNormalizedTicks(tick: FullModeTick, receivedAtMs: number): Normal
   return out;
 }
 
-const RECONNECT_DELAY_MS = 3000;
+const RECONNECT_BASE_DELAY_MS = 3000;
+const RECONNECT_MAX_DELAY_MS = 60_000;
+// After this many CONSECUTIVE failed reconnect attempts (never reaching a
+// real message in between), stop retrying entirely rather than keep
+// hammering Kite's servers forever. A real incident on this milestone's
+// first live deploy: a flat, un-backed-off 3s retry fired ~370 times in
+// under 30 minutes with zero successful connections — a pattern that
+// looks exactly like abuse to anti-abuse infrastructure, and risks
+// getting the deploying IP throttled or flagged well beyond this one
+// worker. Silently retrying forever is not resilience; it's an unbounded
+// footgun. FAILED here means "a human needs to look at this," not "give
+// up on today's session" — the worker process itself keeps running so a
+// manual restart (which resets this counter) can recover without a full
+// redeploy.
+const MAX_CONSECUTIVE_RECONNECT_ATTEMPTS = 8;
 
 export class KiteAlphaLadderDepthSource implements AlphaLadderDepthSource {
   private socket: WebSocketLike | null = null;
@@ -73,10 +87,12 @@ export class KiteAlphaLadderDepthSource implements AlphaLadderDepthSource {
   private status: WorkerHealthStatus = 'STARTING';
   private connectionGeneration = 0;
   private reconnectCount = 0;
+  private consecutiveFailedAttempts = 0;
   private lastSocketMessageAtMs: number | null = null;
   private subscribedToken: number | null = null;
   private isOpen = false;
   private intentionallyDisconnected = false;
+  private circuitBroken = false;
   private readonly now: () => number;
   private readonly config: KiteDepthSourceConfig;
   private readonly setTimeoutFn: typeof setTimeout;
@@ -89,6 +105,8 @@ export class KiteAlphaLadderDepthSource implements AlphaLadderDepthSource {
 
   async connect(): Promise<void> {
     this.intentionallyDisconnected = false;
+    this.circuitBroken = false;
+    this.consecutiveFailedAttempts = 0;
     this.openSocket();
   }
 
@@ -115,6 +133,11 @@ export class KiteAlphaLadderDepthSource implements AlphaLadderDepthSource {
     });
     socket.on('message', (data: Buffer) => {
       this.lastSocketMessageAtMs = this.now();
+      // A real message is proof this connection genuinely works — reset
+      // the backoff/circuit-breaker state so a LATER transient drop (e.g.
+      // after hours of healthy streaming) gets the same fast first retry,
+      // not whatever backoff an earlier, unrelated incident had reached.
+      this.consecutiveFailedAttempts = 0;
       if (this.status === 'WARMING_UP') this.status = 'HEALTHY';
       if (!(data instanceof Buffer) || data.length < 2) return; // text control frames (e.g. order postbacks) are not depth frames
       const ticks = parseFrame(data);
@@ -125,11 +148,17 @@ export class KiteAlphaLadderDepthSource implements AlphaLadderDepthSource {
     });
     socket.on('close', () => {
       this.isOpen = false;
-      this.status = 'RECONNECTING';
       this.reconnectCount += 1;
-      if (!this.intentionallyDisconnected) {
-        this.setTimeoutFn(() => this.openSocket(), RECONNECT_DELAY_MS);
+      this.consecutiveFailedAttempts += 1;
+      if (this.intentionallyDisconnected) return;
+      if (this.consecutiveFailedAttempts >= MAX_CONSECUTIVE_RECONNECT_ATTEMPTS) {
+        this.circuitBroken = true;
+        this.status = 'FAILED';
+        return;
       }
+      this.status = 'RECONNECTING';
+      const delay = Math.min(RECONNECT_BASE_DELAY_MS * 2 ** (this.consecutiveFailedAttempts - 1), RECONNECT_MAX_DELAY_MS);
+      this.setTimeoutFn(() => this.openSocket(), delay);
     });
     socket.on('error', () => {
       this.status = 'FAILED';

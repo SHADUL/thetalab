@@ -734,9 +734,15 @@ async function fetchDbReconciliationInputs(supabase: SupabaseClient, broker: 'KI
     if (!rows.length) return [];
     const ids = rows.map((p: any) => p.id);
     const { data: legs } = await supabase.from('options_autotrade_legs')
-      .select('position_id,tradingsymbol,side,quantity,strike,option_right').in('position_id', ids);
+      .select('position_id,tradingsymbol,side,quantity,strike,option_right,exit_fill_price').in('position_id', ids);
     const legsByPosition = new Map<number, DbPositionSummary['legs']>();
     for (const l of legs ?? []) {
+      // A leg already closed individually (the per-leg "Close leg" button,
+      // or a prior partial unwind) no longer has a real position at the
+      // broker to match — feeding it in here would make reconciliation
+      // expect an open broker position that's correctly gone, and falsely
+      // flag the whole account MISMATCH/blocked.
+      if (l.exit_fill_price != null) continue;
       const list = legsByPosition.get(l.position_id) ?? [];
       list.push({ tradingsymbol: l.tradingsymbol, side: l.side, quantity: l.quantity, strike: Number(l.strike), right: l.option_right });
       legsByPosition.set(l.position_id, list);

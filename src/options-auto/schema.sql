@@ -62,6 +62,13 @@ create table options_autotrade_settings (
   time_exit_dte integer not null default 2,
   strike_breach_buffer_pct numeric not null default 0,
   max_consecutive_losses integer not null default 3,
+  -- Migration 020: skip a new entry outright if its sized max profit is
+  -- too small to be worth a 50% profit-target exit once round-trip
+  -- charges are factored in, and never open a NEW entry before this many
+  -- minutes past IST midnight (585 = 09:45) — existing positions still
+  -- close normally regardless of this gate.
+  min_max_profit_rupees numeric not null default 2000,
+  entry_window_start_minutes_ist integer not null default 585,
   -- Independent PAPER/SHADOW/AUTO toggles (migration 019) — replace
   -- execution_mode's mutual exclusivity. execution_mode is kept for
   -- backward compatibility (see executionProfiles.ts) but unused once

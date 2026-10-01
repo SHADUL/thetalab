@@ -343,6 +343,14 @@ const EDITABLE_GROUPS = [
       { key: "strike_breach_buffer_pct", label: "Strike breach buffer %", step: 0.1, min: 0 },
     ],
   },
+  {
+    title: "Entry Filters", fields: [
+      { key: "min_max_profit_rupees", label: "Min sized max profit (₹)", step: 100, min: 0,
+        hint: "Skip a new entry if its max profit after lot sizing falls below this — too small isn't worth the risk/charges once a profit-target exit is factored in." },
+      { key: "entry_window_start_minutes_ist", label: "No new entries before (min since IST midnight)", step: 5, min: 0, max: 900,
+        hint: "585 = 09:45 IST. Existing positions still close normally regardless of this." },
+    ],
+  },
 ];
 
 const DEFAULT_DRAFT = {
@@ -351,7 +359,7 @@ const DEFAULT_DRAFT = {
   max_underlying_delta: 300, max_gamma: 50, max_vega: 5000, max_correlated_group_risk_pct: 6,
   no_trade_below: 70, watch_below: 80, high_conviction_at_or_above: 90, min_dte: 2, max_dte: 60,
   profit_target_pct: 50, stop_loss_credit_multiple: 2, time_exit_dte: 2, strike_breach_buffer_pct: 0,
-  max_consecutive_losses: 3,
+  max_consecutive_losses: 3, min_max_profit_rupees: 2000, entry_window_start_minutes_ist: 585,
 };
 
 /** How stale a mark-to-market figure is — position-monitor only refreshes it every 5 minutes, so this is never presented as live-live. */
@@ -667,7 +675,7 @@ function SettingsFields({ draft, setField, saving, saveSettings }) {
           <div className="text-[10.5px] font-semibold text-muted mb-1.5">{group.title}</div>
           <div className="flex flex-col gap-1.5">
             {group.fields.map((f) => (
-              <label key={f.key} className="flex items-center justify-between gap-2 text-[11px]">
+              <label key={f.key} className="flex items-center justify-between gap-2 text-[11px]" title={f.hint}>
                 <span className="text-ink2">{f.label}</span>
                 <input
                   type="number" step={f.step} min={f.min} max={f.max}

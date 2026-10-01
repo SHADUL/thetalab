@@ -801,6 +801,12 @@ function isMarketOpenIST(now = new Date()): boolean {
   return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 40;
 }
 
+/** Minutes since IST midnight, right now. Used only for the entry-window gate below — isMarketOpenIST's own check is a separate, coarser "is the exchange open at all" question. */
+function istMinutesSinceMidnightNow(): number {
+  const ist = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  return ist.getHours() * 60 + ist.getMinutes();
+}
+
 /** Smallest gap between consecutive sorted strikes — self-derived rather than a hardcoded per-symbol constant, since it's already present in the synced instrument data. */
 function inferStrikeStep(sortedStrikes: number[]): number {
   let step = Infinity;
@@ -1065,6 +1071,17 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   await sharedEvent('SCAN_STARTED', { enabledModes });
 
   if (!isMarketOpenIST()) { res.status(200).json({ ok: true, skipped: 'outside_market_hours' }); return; }
+
+  // No NEW entries before this time (default 09:45 IST) — the opening
+  // 30 minutes often prices worse/less reliably than a few minutes in.
+  // Scoped strictly to new entries: position-monitor's own exit logic
+  // runs on its own schedule regardless and keeps managing/closing
+  // whatever is already open, unaffected by this gate.
+  const entryWindowStartMin = Number(settings.entry_window_start_minutes_ist) || 585;
+  if (istMinutesSinceMidnightNow() < entryWindowStartMin) {
+    res.status(200).json({ ok: true, skipped: 'before_entry_window_start', entryWindowStartMin });
+    return;
+  }
 
   // Daily risk lock — checked before any live Kite call, so a locked day
   // costs nothing beyond this one DB read. Stricter than positionSizing.ts's
@@ -1605,6 +1622,20 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
         maxCorrelatedGroupRiskPct: settings.max_correlated_group_risk_pct,
       },
     );
+
+    // A tiny sized max profit isn't worth the risk/margin tied up once a
+    // 50%-style profit-target exit and round-trip brokerage/STT/charges
+    // are factored in — e.g. a ₹853 max profit nets ~₹426 at a 50% target,
+    // and a 4-leg structure's charges can eat a real chunk of that. Checked
+    // on the FINAL sized max profit (post-lot-scaling), not the per-lot
+    // figure, since that's the real economic number for this position.
+    const minMaxProfit = Number(settings.min_max_profit_rupees) || 0;
+    if (sizing.lots > 0 && sizing.sizedMaxProfit < minMaxProfit) {
+      await event('ENTRY_SKIPPED', { reason: 'max_profit_too_small', sizedMaxProfit: sizing.sizedMaxProfit, minMaxProfit });
+      await log('info', `${modeLabel}: sized max profit ₹${sizing.sizedMaxProfit.toFixed(0)} for ${symbol} is below the ₹${minMaxProfit} floor — not worth the risk/charges, skipping.`);
+      perModeResults[modeLabel] = { ok: true, opened: false, skipped: 'max_profit_too_small', sizing };
+      continue;
+    }
 
     // Lots are only known AFTER sizing — legs above were built at exactly
     // ONE lot's quantity (to price the per-lot margin call). Scale every
@@ -2988,7 +3019,7 @@ const EDITABLE_SETTINGS_FIELDS = [
   'max_gamma', 'max_vega', 'max_correlated_group_risk_pct', 'no_trade_below', 'watch_below',
   'high_conviction_at_or_above', 'min_dte', 'max_dte',
   'profit_target_pct', 'stop_loss_credit_multiple', 'time_exit_dte', 'strike_breach_buffer_pct',
-  'max_consecutive_losses',
+  'max_consecutive_losses', 'min_max_profit_rupees', 'entry_window_start_minutes_ist',
 ] as const;
 
 /**

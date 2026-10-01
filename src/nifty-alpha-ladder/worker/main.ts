@@ -116,19 +116,22 @@ async function main() {
     ingest(accumulator, observations, Date.now());
   });
 
-  await depthSource.connect();
-
-  // NIFTY_NEAREST_FUTURE resolution (spec §2's chosen provider) — the
-  // socket opening is not the same as receiving any data: nothing streams
-  // until we tell Kite which token to subscribe in full mode. Missing
-  // entirely until this milestone's first real Railway deployment, where
-  // the worker connected but sat with lastSocketMessageAtMs stuck null
-  // forever because subscribe() was simply never called.
+  // NIFTY_NEAREST_FUTURE resolution (spec §2's chosen provider) — resolved
+  // BEFORE connecting, not after: the NFO instrument dump is a multi-
+  // megabyte CSV (36k+ rows), and parsing it synchronously right after the
+  // socket's 'open' event fires risked blocking the event loop long enough
+  // for Kite to time out waiting for a ping/pong and close the connection
+  // — a plausible explanation for the repeated near-immediate disconnects
+  // seen on this milestone's first real Railway deployment. Resolving
+  // first means connect() has nothing heavy to do once the socket is open
+  // except send the two short subscribe/mode frames.
   const nfoCsv = await fetchNfoInstrumentsCsv(apiKey, accessToken);
   const resolvedFuture = resolveNearestFuture(parseNfoFutures(nfoCsv), 'NIFTY', todayIST);
   if (!resolvedFuture) {
     throw new Error(`No non-expired NIFTY future found in Kite's instrument dump as of ${todayIST} — refusing to start with no instrument to subscribe.`);
   }
+
+  await depthSource.connect();
   await depthSource.subscribe({
     tradingsymbol: resolvedFuture.tradingsymbol, instrumentToken: resolvedFuture.instrumentToken, expiry: resolvedFuture.expiry,
   });

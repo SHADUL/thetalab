@@ -85,13 +85,58 @@ test('KiteAlphaLadderDepthSource: a close event increments reconnectCount and re
   assert.equal(health.reconnectCount, 1);
 });
 
-test('KiteAlphaLadderDepthSource: reconnecting bumps connectionGeneration', async () => {
+test('KiteAlphaLadderDepthSource: calling connect() again (e.g. after a full worker restart) bumps connectionGeneration', async () => {
   let sockets: FakeSocket[] = [];
   const source = new KiteAlphaLadderDepthSource({
     apiKey: 'k', accessToken: 't', wsFactory: (url) => { const s = new FakeSocket(); sockets.push(s); return s; },
   });
   await source.connect();
   assert.equal(source.getHealth().connectionGeneration, 1);
-  await source.connect(); // simulate the worker's own reconnect loop calling connect() again
+  await source.connect();
   assert.equal(source.getHealth().connectionGeneration, 2);
+});
+
+test('KiteAlphaLadderDepthSource: a dropped connection reconnects ITSELF automatically — no external caller needs to notice RECONNECTING and call connect() again', async () => {
+  // Missing entirely until this milestone's first real Railway deployment:
+  // the 'close' handler updated status/reconnectCount but never actually
+  // re-opened a socket, and worker/main.ts never called connect() a second
+  // time either — so a single disconnect silently killed the feed forever
+  // until a human manually restarted the whole process.
+  const sockets: FakeSocket[] = [];
+  const scheduled: Array<() => void> = [];
+  const fakeSetTimeout = ((fn: () => void) => { scheduled.push(fn); return 0 as any; }) as typeof setTimeout;
+  const source = new KiteAlphaLadderDepthSource({
+    apiKey: 'k', accessToken: 't', setTimeoutFn: fakeSetTimeout,
+    wsFactory: (url) => { const s = new FakeSocket(); sockets.push(s); return s; },
+  });
+  await source.subscribe({ tradingsymbol: 'NIFTY26OCTFUT', instrumentToken: 12468226, expiry: '2026-10-27' });
+  await source.connect();
+  sockets[0].emit('open');
+  assert.equal(source.getHealth().connectionGeneration, 1);
+
+  sockets[0].emit('close'); // the connection drops
+  assert.equal(source.getHealth().status, 'RECONNECTING');
+  assert.equal(scheduled.length, 1); // a reconnect was scheduled, not left to a caller to notice
+
+  scheduled[0](); // let the scheduled reconnect fire
+  assert.equal(sockets.length, 2); // a SECOND real socket was actually opened
+  assert.equal(source.getHealth().connectionGeneration, 2);
+
+  sockets[1].emit('open');
+  assert.equal(sockets[1].sent.length, 2); // re-subscribed automatically using the remembered instrument
+  assert.match(sockets[1].sent[0], /"a":"subscribe"/);
+});
+
+test('KiteAlphaLadderDepthSource: an intentional disconnect() does NOT schedule a reconnect', async () => {
+  const sockets: FakeSocket[] = [];
+  const scheduled: Array<() => void> = [];
+  const fakeSetTimeout = ((fn: () => void) => { scheduled.push(fn); return 0 as any; }) as typeof setTimeout;
+  const source = new KiteAlphaLadderDepthSource({
+    apiKey: 'k', accessToken: 't', setTimeoutFn: fakeSetTimeout,
+    wsFactory: (url) => { const s = new FakeSocket(); sockets.push(s); return s; },
+  });
+  await source.connect();
+  sockets[0].emit('open');
+  await source.disconnect(); // this internally emits 'close' on the fake socket too
+  assert.equal(scheduled.length, 0);
 });

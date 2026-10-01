@@ -29,6 +29,8 @@ export interface KiteDepthSourceConfig {
   /** Injectable clock, defaults to Date.now — makes health timestamps testable. */
   now?: () => number;
   wsUrl?: string; // override for tests; defaults to Kite's real endpoint
+  /** Injectable timer, defaults to the real setTimeout — lets reconnect-scheduling tests run without a real 3s delay. */
+  setTimeoutFn?: typeof setTimeout;
 }
 
 function tickToNormalizedTicks(tick: FullModeTick, receivedAtMs: number): NormalizedDepthTick[] {
@@ -63,6 +65,8 @@ function tickToNormalizedTicks(tick: FullModeTick, receivedAtMs: number): Normal
   return out;
 }
 
+const RECONNECT_DELAY_MS = 3000;
+
 export class KiteAlphaLadderDepthSource implements AlphaLadderDepthSource {
   private socket: WebSocketLike | null = null;
   private handlers: Array<(ticks: NormalizedDepthTick[]) => void> = [];
@@ -72,15 +76,32 @@ export class KiteAlphaLadderDepthSource implements AlphaLadderDepthSource {
   private lastSocketMessageAtMs: number | null = null;
   private subscribedToken: number | null = null;
   private isOpen = false;
+  private intentionallyDisconnected = false;
   private readonly now: () => number;
   private readonly config: KiteDepthSourceConfig;
+  private readonly setTimeoutFn: typeof setTimeout;
 
   constructor(config: KiteDepthSourceConfig) {
     this.config = config;
     this.now = config.now ?? Date.now;
+    this.setTimeoutFn = config.setTimeoutFn ?? setTimeout;
   }
 
   async connect(): Promise<void> {
+    this.intentionallyDisconnected = false;
+    this.openSocket();
+  }
+
+  // Separated from connect() so a dropped connection can re-dial itself
+  // without incrementing connectionGeneration again — connect() is the
+  // caller-facing "start a session" entry point (spec's own connection-
+  // generation semantics: a real new session, e.g. after a full worker
+  // restart), while this re-establishes the SAME session's transport.
+  // Missing entirely until this milestone's first real Railway deploy: the
+  // 'close' handler updated status/reconnectCount but never actually
+  // re-opened a socket, so any single disconnect killed the feed
+  // permanently until the whole process was restarted by hand.
+  private openSocket(): void {
     this.status = 'CONNECTING';
     this.connectionGeneration += 1;
     const url = this.config.wsUrl ?? `wss://ws.kite.trade?api_key=${this.config.apiKey}&access_token=${this.config.accessToken}`;
@@ -106,6 +127,9 @@ export class KiteAlphaLadderDepthSource implements AlphaLadderDepthSource {
       this.isOpen = false;
       this.status = 'RECONNECTING';
       this.reconnectCount += 1;
+      if (!this.intentionallyDisconnected) {
+        this.setTimeoutFn(() => this.openSocket(), RECONNECT_DELAY_MS);
+      }
     });
     socket.on('error', () => {
       this.status = 'FAILED';
@@ -113,6 +137,7 @@ export class KiteAlphaLadderDepthSource implements AlphaLadderDepthSource {
   }
 
   async disconnect(): Promise<void> {
+    this.intentionallyDisconnected = true;
     this.socket?.close();
     this.socket = null;
     this.isOpen = false;

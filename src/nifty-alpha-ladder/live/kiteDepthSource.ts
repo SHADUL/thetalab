@@ -133,15 +133,21 @@ export class KiteAlphaLadderDepthSource implements AlphaLadderDepthSource {
     });
     socket.on('message', (data: Buffer) => {
       this.lastSocketMessageAtMs = this.now();
-      // A real message is proof this connection genuinely works — reset
-      // the backoff/circuit-breaker state so a LATER transient drop (e.g.
-      // after hours of healthy streaming) gets the same fast first retry,
-      // not whatever backoff an earlier, unrelated incident had reached.
-      this.consecutiveFailedAttempts = 0;
       if (this.status === 'WARMING_UP') this.status = 'HEALTHY';
       if (!(data instanceof Buffer) || data.length < 2) return; // text control frames (e.g. order postbacks) are not depth frames
       const ticks = parseFrame(data);
       if (ticks.length === 0) return;
+      // Reset the backoff/circuit-breaker state only on a REAL parsed
+      // depth tick, never on the bare fact that *some* message arrived —
+      // Kite sends harmless text control frames (e.g. "instruments_meta",
+      // "app_code") immediately on every connection, even one that is
+      // about to die moments later with zero real data. Resetting on
+      // those alone silently defeated the entire backoff: every single
+      // reconnect attempt "succeeded" at getting one control frame,
+      // zeroing the counter right before the next failure, producing a
+      // flat ~4s retry cadence indistinguishable from no backoff at all —
+      // exactly what was observed on the second real deployment attempt.
+      this.consecutiveFailedAttempts = 0;
       const receivedAtMs = this.lastSocketMessageAtMs;
       const normalized = ticks.flatMap((t) => tickToNormalizedTicks(t, receivedAtMs));
       for (const handler of this.handlers) handler(normalized);

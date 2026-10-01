@@ -59,8 +59,19 @@ export default function Root() {
 
   return (
     <div className="flex flex-col min-h-screen">
+      {/* transform forces this bar onto its own compositing layer — Safari/
+          WebKit has a known bug where content stacked directly above a
+          `backdrop-filter: blur()` element (OptionsAutoTrader's own
+          ".oat-glass" bars, right below this one) silently fails to paint
+          on first load, even though it's fully present and correctly
+          styled in the DOM (confirmed via Cmd+F and devtools — the text
+          and selector were there, just never painted). Reproduced in
+          Safari, Safari Private Browsing, and mobile Safari alike; never
+          in a plain DOM/accessibility-tree inspection, which is what made
+          it so easy to misdiagnose as "not rendering" rather than "not
+          painting." */}
       <div className="flex items-center justify-between px-3 py-1.5 shrink-0"
-        style={{ borderBottom: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+        style={{ borderBottom: "1px solid var(--c-line)", background: "var(--c-surface)", position: "relative", zIndex: 1, isolation: "isolate" }}>
         <span className="flex items-center gap-1.5">
           <img src="/favicon.svg" alt="" width={18} height={18} className="shrink-0" />
           <span className="text-[12px] font-bold tracking-[-0.02em]">

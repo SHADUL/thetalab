@@ -2141,6 +2141,16 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
     let missingQuote = false;
     const legQuoteUpdates: Array<{ id: number; price: number }> = [];
     for (const l of legs) {
+      // A leg already closed (manually, from the dashboard's per-leg
+      // close button) has a LOCKED exit price — use that fixed number,
+      // never a fresh quote, and never try to re-close it below. Without
+      // this, a manually-closed leg would keep getting re-priced here
+      // forever, and an AUTO exit later would try to place a SECOND real
+      // closing order against a leg that no longer exists at the broker.
+      if (l.exit_fill_price != null) {
+        currentCostToClose += (l.side === 'SELL' ? 1 : -1) * Number(l.exit_fill_price) * l.quantity;
+        continue;
+      }
       const kiteSymbol = kitePriceSymbolFor(p, l);
       const price = kiteSymbol ? midOrLastPrice(quoteMap.get(`${exchange}:${kiteSymbol}`)) : null;
       if (price == null) { missingQuote = true; continue; }
@@ -2266,9 +2276,20 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
       } else {
         placer = makeLiveOrderPlacer(token, apiKey);
       }
-      const orderedClose = [...legs.filter((l: any) => l.side === 'SELL'), ...legs.filter((l: any) => l.side === 'BUY')];
+      // Already-manually-closed legs (exit_fill_price set via the
+      // per-leg close button) are excluded here — placing a SECOND
+      // closing order against a leg that no longer exists at the broker
+      // would either get rejected (tripping CLOSE_FAILED on a leg that's
+      // actually fine) or, worse, open an unintended new position.
+      const openLegs = legs.filter((l: any) => l.exit_fill_price == null);
+      const orderedClose = [...openLegs.filter((l: any) => l.side === 'SELL'), ...openLegs.filter((l: any) => l.side === 'BUY')];
       let allClosed = true;
-      let actualCostToClose = 0;
+      // Seed with whatever's already locked in from prior per-leg closes
+      // so the final realizedPnl below reflects the WHOLE position, not
+      // just the legs this pass closed.
+      let actualCostToClose = legs
+        .filter((l: any) => l.exit_fill_price != null)
+        .reduce((sum: number, l: any) => sum + (l.side === 'SELL' ? 1 : -1) * Number(l.exit_fill_price) * l.quantity, 0);
       for (const l of orderedClose) {
         try {
           const orderId = await placer.closeLeg(
@@ -3116,6 +3137,133 @@ async function handleSettings(req: any, res: any, supabase: SupabaseClient) {
 }
 
 /**
+ * Browser-facing: close ONE leg of an ACTIVE position, leaving the rest
+ * open — for the case where only part of a multi-leg structure (e.g. one
+ * side of an iron condor) needs to come off, whether that's a deliberate
+ * partial unwind or reconciling a leg the user already closed directly in
+ * Kite/Groww. For AUTO this places a single real closing order for just
+ * that leg against whichever broker holds the position. The leg's
+ * exit_fill_price, once set, is a LOCK: position-monitor's own quote loop
+ * and exit-execution loop (and this app's full "close manually" button)
+ * both skip any leg with exit_fill_price already set, using its locked
+ * price instead of a fresh quote — so this can never result in the same
+ * leg being closed twice. If this was the LAST open leg, the whole
+ * position is closed out here too (same realized-P&L accounting as a full
+ * close, just reached one leg at a time instead of all at once).
+ */
+async function handleManualCloseLeg(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const legId = Number(req.body?.legId);
+  if (!Number.isFinite(legId)) { res.status(400).json({ error: 'bad_request', message: 'legId required' }); return; }
+
+  const log = (level: 'info' | 'error', message: string, detail?: unknown, mode?: string | null) =>
+    supabase.from('options_autotrade_log').insert({ level, message, detail: detail ?? null, execution_mode: mode ?? null });
+
+  const { data: leg, error: legErr } = await supabase.from('options_autotrade_legs').select('*').eq('id', legId).maybeSingle();
+  if (legErr) { res.status(502).json({ error: 'supabase_error', message: legErr.message }); return; }
+  if (!leg) { res.status(404).json({ error: 'not_found' }); return; }
+  if (leg.exit_fill_price != null) { res.status(400).json({ error: 'bad_request', message: 'This leg is already closed.' }); return; }
+
+  const { data: p, error: posErr } = await supabase
+    .from('options_autotrade_positions').select('*, options_autotrade_legs(*)').eq('id', leg.position_id).maybeSingle();
+  if (posErr) { res.status(502).json({ error: 'supabase_error', message: posErr.message }); return; }
+  if (!p) { res.status(404).json({ error: 'not_found' }); return; }
+  if (p.status !== 'ACTIVE') { res.status(400).json({ error: 'bad_request', message: `Position #${p.id} is already ${p.status}, not ACTIVE.` }); return; }
+
+  const legs = p.options_autotrade_legs ?? [];
+  const symbolExchanges = OPTIONS_SYMBOLS as Record<string, string>;
+  const exchange = symbolExchanges[p.symbol] ?? 'NFO';
+  const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const actualFillCreditFromLegs = (ls: any[]): number =>
+    ls.reduce((sum, l) => sum + (l.side === 'SELL' ? 1 : -1) * Number(l.fill_price) * l.quantity, 0);
+  /** Already-locked cost from every OTHER leg that's already closed (prior per-leg closes), at its own fixed exit price. */
+  const lockedCostFromOtherClosedLegs = legs
+    .filter((l: any) => l.id !== leg.id && l.exit_fill_price != null)
+    .reduce((sum: number, l: any) => sum + (l.side === 'SELL' ? 1 : -1) * Number(l.exit_fill_price) * l.quantity, 0);
+
+  /** True once every leg (including this one) has a locked exit price — i.e. this was the last open leg, so the whole position closes out now. */
+  const finishPositionIfFullyClosed = async (thisLegExitPrice: number) => {
+    const stillOpen = legs.some((l: any) => l.id !== leg.id && l.exit_fill_price == null);
+    if (stillOpen) {
+      await log('info', `Position #${p.id} (${p.symbol} ${p.strategy_label}): leg ${leg.side} ${leg.tradingsymbol} manually closed — position stays ACTIVE with the remaining leg(s) still open.`, undefined, p.execution_mode);
+      res.status(200).json({ ok: true, status: 'LEG_CLOSED', positionStatus: 'ACTIVE' });
+      return;
+    }
+    const actualCostToClose = lockedCostFromOtherClosedLegs + (leg.side === 'SELL' ? 1 : -1) * thisLegExitPrice * leg.quantity;
+    const realizedPnl = actualFillCreditFromLegs(legs) - actualCostToClose;
+    await supabase.from('options_autotrade_positions').update({
+      status: 'CLOSED', execution_state: 'CLOSED', exit_date: todayIST, exit_reason: 'MANUAL_CLOSE',
+      realized_pnl: realizedPnl, updated_at: new Date().toISOString(),
+    }).eq('id', p.id);
+    await log('info', `Position #${p.id} (${p.symbol} ${p.strategy_label}) fully closed — last remaining leg (${leg.side} ${leg.tradingsymbol}) closed manually. Realized P&L ₹${realizedPnl.toFixed(0)}.`, undefined, p.execution_mode);
+    res.status(200).json({ ok: true, status: 'CLOSED', positionStatus: 'CLOSED', realizedPnl });
+  };
+
+  if (p.execution_mode === 'AUTO') {
+    const apiKey = process.env.KITE_API_KEY;
+    if (!apiKey) { res.status(500).json({ error: 'server_misconfigured' }); return; }
+    let placer: LiveOrderPlacer;
+    let closeExchange = exchange;
+    if (p.broker === 'GROWW') {
+      const { data: growwSessionRow } = await supabase.from('groww_session').select('access_token').eq('id', 1).maybeSingle();
+      const growwToken = growwSessionRow?.access_token ?? null;
+      if (!growwToken) { res.status(400).json({ error: 'no_groww_session', message: 'No Groww session — cannot place a real closing order.' }); return; }
+      placer = makeGrowwOrderPlacer(growwToken);
+      closeExchange = GROWW_EXCHANGE_FOR_KITE_EXCHANGE[exchange] ?? 'NSE';
+    } else {
+      const { data: session } = await supabase.from('kite_session').select('access_token').eq('id', 1).maybeSingle();
+      const token = session?.access_token;
+      if (!token) { res.status(400).json({ error: 'no_kite_session', message: 'No Kite session — cannot place a real closing order.' }); return; }
+      placer = makeLiveOrderPlacer(token, apiKey);
+    }
+    try {
+      const orderId = await placer.closeLeg(
+        { side: leg.side, right: leg.option_right, strike: Number(leg.strike), tradingsymbol: leg.tradingsymbol, quantity: leg.quantity, fillPrice: 0 },
+        closeExchange,
+      );
+      const fill = await placer.awaitFill(orderId, 15_000);
+      if (fill.status !== 'COMPLETE' || fill.averagePrice == null) {
+        await log('error', `Position #${p.id}: MANUAL closing order for leg ${leg.side} ${leg.tradingsymbol} ended ${fill.status} — THIS LEG MAY STILL BE OPEN AT THE BROKER. Manual check required immediately.`, undefined, p.execution_mode);
+        res.status(200).json({ ok: false, message: `Closing order ended ${fill.status} — check ${p.broker} directly before retrying.` });
+        return;
+      }
+      await supabase.from('options_autotrade_legs').update({ exit_order_id: orderId, exit_fill_price: fill.averagePrice }).eq('id', leg.id);
+      await finishPositionIfFullyClosed(fill.averagePrice);
+    } catch (err: any) {
+      await log('error', `Position #${p.id}: MANUAL closing order request FAILED for leg ${leg.side} ${leg.tradingsymbol} — ${err.message}. THIS LEG MAY STILL BE OPEN AT THE BROKER. Manual check required immediately.`, undefined, p.execution_mode);
+      res.status(200).json({ ok: false, message: `Order request failed: ${err.message} — check ${p.broker} directly before retrying.` });
+    }
+    return;
+  }
+
+  // PAPER / SHADOW — no real broker position to touch. Best-effort a
+  // fresh quote for this one leg's P&L estimate; falls back to its own
+  // entry fill_price (zero marked move) if the quote can't be fetched.
+  const apiKey = process.env.KITE_API_KEY;
+  const { data: session } = await supabase.from('kite_session').select('access_token').eq('id', 1).maybeSingle();
+  const token = session?.access_token;
+  let kiteSymbol: string | null = p.broker === 'GROWW' ? null : leg.tradingsymbol;
+  if (p.broker === 'GROWW' && apiKey && token) {
+    const { data: match } = await supabase.from('options_instruments')
+      .select('tradingsymbol').eq('symbol', p.symbol).eq('expiry', p.expiry)
+      .eq('strike', leg.strike).eq('option_right', leg.option_right).maybeSingle();
+    kiteSymbol = match?.tradingsymbol ?? null;
+  }
+  let price = Number(leg.fill_price);
+  if (kiteSymbol && apiKey && token) {
+    try {
+      const data = await kiteFetch(`/quote?i=${encodeURIComponent(`${exchange}:${kiteSymbol}`)}`, { token, apiKey });
+      const q = midOrLastPrice(data?.[`${exchange}:${kiteSymbol}`]);
+      if (q != null) price = q;
+    } catch (err: any) {
+      await log('error', `Position #${p.id}: manual leg-close quote fetch failed — falling back to entry fill price.`, { message: err.message }, p.execution_mode);
+    }
+  }
+  await supabase.from('options_autotrade_legs').update({ exit_fill_price: price }).eq('id', leg.id);
+  await finishPositionIfFullyClosed(price);
+}
+
+/**
  * Browser-facing: close one ACTIVE position right now, on demand, instead
  * of waiting for position-monitor's own exit conditions. For AUTO this
  * places REAL closing orders against whichever broker actually holds the
@@ -3170,9 +3318,15 @@ async function handleManualClose(req: any, res: any, supabase: SupabaseClient) {
       placer = makeLiveOrderPlacer(token, apiKey);
     }
 
-    const orderedClose = [...legs.filter((l: any) => l.side === 'SELL'), ...legs.filter((l: any) => l.side === 'BUY')];
+    // Skip legs already closed individually via the per-leg close button —
+    // placing a second closing order against one would either get
+    // rejected at the broker or open an unintended new position.
+    const openLegs = legs.filter((l: any) => l.exit_fill_price == null);
+    const orderedClose = [...openLegs.filter((l: any) => l.side === 'SELL'), ...openLegs.filter((l: any) => l.side === 'BUY')];
     let allClosed = true;
-    let actualCostToClose = 0;
+    let actualCostToClose = legs
+      .filter((l: any) => l.exit_fill_price != null)
+      .reduce((sum: number, l: any) => sum + (l.side === 'SELL' ? 1 : -1) * Number(l.exit_fill_price) * l.quantity, 0);
     for (const l of orderedClose) {
       try {
         const orderId = await placer.closeLeg(
@@ -3246,6 +3400,12 @@ async function handleManualClose(req: any, res: any, supabase: SupabaseClient) {
   }
   let currentCostToClose = 0;
   for (const l of legs) {
+    // Already closed individually (per-leg close button) — use its
+    // locked price, never a fresh quote.
+    if (l.exit_fill_price != null) {
+      currentCostToClose += (l.side === 'SELL' ? 1 : -1) * Number(l.exit_fill_price) * l.quantity;
+      continue;
+    }
     const kiteSymbol = p.broker === 'GROWW' ? kiteSymbolByLeg.get(String(l.id)) : l.tradingsymbol;
     const price = (kiteSymbol ? midOrLastPrice(quoteMap.get(`${exchange}:${kiteSymbol}`)) : null) ?? Number(l.fill_price);
     currentCostToClose += (l.side === 'SELL' ? 1 : -1) * price * l.quantity;
@@ -4180,6 +4340,7 @@ export default async function handler(req: any, res: any) {
   if (resource === 'settings') return handleSettings(req, res, supabase);
   if (resource === 'positions') return handlePositions(req, res, supabase);
   if (resource === 'manual-close') return handleManualClose(req, res, supabase);
+  if (resource === 'manual-close-leg') return handleManualCloseLeg(req, res, supabase);
   if (resource === 'real-funds') return handleRealFunds(req, res, supabase);
   if (resource === 'groww-real-funds') return handleGrowwRealFunds(req, res, supabase);
   if (resource === 'groww-connect') return handleGrowwConnect(req, res, supabase);

@@ -995,7 +995,30 @@ function PositionRow({ p, onClosed }) {
   const [expanded, setExpanded] = useState(false);
   const [closing, setClosing] = useState(false);
   const [closeError, setCloseError] = useState(null);
+  const [closingLegId, setClosingLegId] = useState(null);
+  const [legCloseError, setLegCloseError] = useState(null);
   const legs = p.options_autotrade_legs ?? [];
+
+  const closeLegManually = (l) => {
+    const warning = p.execution_mode === "AUTO"
+      ? `This places a REAL closing order on ${p.broker ?? "your broker"} for just this leg: ${l.side} ${l.strike}${l.option_right} (${l.tradingsymbol}). The rest of the position stays open. Continue?`
+      : `Close just this leg (${l.side} ${l.strike}${l.option_right}) now? This only updates this dashboard's record — the rest of the position stays open.`;
+    if (!window.confirm(warning)) return;
+    setClosingLegId(l.id);
+    setLegCloseError(null);
+    fetch("/api/options-autotrade?resource=manual-close-leg", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ legId: l.id }),
+    })
+      .then((r) => r.json())
+      .then((body) => {
+        if (body?.error) { setLegCloseError(body.message || body.error); return; }
+        if (body?.ok === false) { setLegCloseError(body.message || "Leg close failed — check the broker directly."); }
+        onClosed?.();
+      })
+      .catch((e) => setLegCloseError(e.message))
+      .finally(() => setClosingLegId(null));
+  };
   const modeColor = MODE_COLOR[p.execution_mode] ?? MODE_COLOR.PAPER;
   const pnl = p.status === "ACTIVE" ? p.unrealized_pnl : p.realized_pnl;
   const rr = p.max_loss > 0 && p.max_profit != null ? p.max_profit / p.max_loss : null;
@@ -1081,12 +1104,25 @@ function PositionRow({ p, onClosed }) {
                           <td className={`py-0.5 pr-2 text-right n font-medium ${legP == null ? "text-faint" : legPositive ? "text-gain" : "text-loss"}`}>
                             {legP != null ? `${legPositive ? "+" : ""}${inr(legP)}` : "—"}
                           </td>
-                          <td className="py-0.5 text-[10px] text-faint">{l.status}</td>
+                          <td className="py-0.5 pr-2 text-[10px] text-faint">{l.exit_fill_price != null ? "CLOSED" : l.status}</td>
+                          <td className="py-0.5">
+                            {p.status === "ACTIVE" && l.exit_fill_price == null && (
+                              <button
+                                onClick={() => closeLegManually(l)}
+                                disabled={closingLegId === l.id}
+                                className="text-[9.5px] font-semibold px-1.5 py-0.5 rounded-[3px]"
+                                style={{ background: "var(--c-loss-bg, #fde8e8)", color: "var(--c-loss, #b42318)" }}
+                              >
+                                {closingLegId === l.id ? "Closing…" : "Close leg"}
+                              </button>
+                            )}
+                          </td>
                         </tr>
                       );
                     })}
                   </tbody>
                 </table>
+                {legCloseError && <div className="text-[10px] text-loss mt-1">{legCloseError}</div>}
               </div>
               <div>
                 <div className="text-[10.5px] font-semibold text-muted mb-1">Decision Explanation</div>

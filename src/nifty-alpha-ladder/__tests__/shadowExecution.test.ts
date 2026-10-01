@@ -212,6 +212,19 @@ test('health status: HEALTHY requires fresh messages AND completed warmup', () =
   assert.equal(status, 'WARMING_UP');
 });
 
+test('health status: a circuit-broken depth source is reported FAILED, never CONNECTING', () => {
+  // lastSocketMessageAtMs is null here too — a circuit-broken feed never
+  // got a tick this generation — but it must NOT be reported as still
+  // connecting; it has given up retrying and needs a human/redeploy.
+  const status = deriveHealthStatus({ nowMs: 100_000, lastSocketMessageAtMs: null, isMarketHours: true, isWarmedUp: false, hasUnrecoverableGapThisWeek: false, isCircuitBroken: true });
+  assert.equal(status, 'FAILED');
+});
+
+test('health status: market-closed still takes priority over a tripped circuit breaker', () => {
+  const status = deriveHealthStatus({ nowMs: 100_000, lastSocketMessageAtMs: null, isMarketHours: false, isWarmedUp: false, hasUnrecoverableGapThisWeek: false, isCircuitBroken: true });
+  assert.equal(status, 'MARKET_CLOSED');
+});
+
 test('session quality: a material gap invalidates the whole week, not just the gap moment', () => {
   assert.equal(deriveSessionQuality('HEALTHY', true), 'INVALID_FOR_NEW_SIGNAL');
   assert.equal(canFireNewSignal(deriveSessionQuality('HEALTHY', true)), false);

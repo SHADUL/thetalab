@@ -167,6 +167,7 @@ async function main() {
     const health = deriveHealthStatus({
       nowMs: Date.now(), lastSocketMessageAtMs, isMarketHours,
       isWarmedUp: depthSource.getHealth().status === 'HEALTHY', hasUnrecoverableGapThisWeek: hasUnrecoverableGapToday,
+      isCircuitBroken: depthSource.getHealth().status === 'FAILED',
     });
     const quality = deriveSessionQuality(health, hasUnrecoverableGapToday);
 

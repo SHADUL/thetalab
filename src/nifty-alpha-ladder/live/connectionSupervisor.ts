@@ -18,6 +18,8 @@ export interface FreshnessInput {
   isWarmedUp: boolean;
   /** A material gap (per spec §7) that could have changed the quantile reference, large-order events, G1 or G2. */
   hasUnrecoverableGapThisWeek: boolean;
+  /** The depth source's own circuit breaker has tripped (too many consecutive reconnect failures) — it has given up retrying on its own. Optional so existing callers/tests keep compiling unchanged; omitted/false preserves prior behavior exactly. */
+  isCircuitBroken?: boolean;
 }
 
 const STALE_AFTER_MS = 30_000; // no socket message for 30s during market hours is stale, not merely quiet
@@ -31,6 +33,12 @@ const STALE_AFTER_MS = 30_000; // no socket message for 30s during market hours 
  */
 export function deriveHealthStatus(input: FreshnessInput): WorkerHealthStatus {
   if (!input.isMarketHours) return 'MARKET_CLOSED';
+  // Checked BEFORE the null-timestamp branch below: a circuit-broken feed
+  // has lastSocketMessageAtMs === null too (it never got a tick this
+  // generation), but it is NOT "still connecting" — it has given up and
+  // needs a human/redeploy, not a dashboard that just says CONNECTING
+  // indefinitely.
+  if (input.isCircuitBroken) return 'FAILED';
   if (input.lastSocketMessageAtMs === null) return 'CONNECTING';
   const age = input.nowMs - input.lastSocketMessageAtMs;
   if (age > STALE_AFTER_MS) return 'STALE';

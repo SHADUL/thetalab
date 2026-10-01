@@ -991,12 +991,35 @@ function PnLCalendar({ positions, hideAmounts }) {
  * credit/max-profit/max-loss as one visual triplet, a single P&L column
  * that shows whichever of unrealized/realized applies) rather than 14
  * equally-weighted columns. Same data/fields as before, no column removed. */
-function PositionRow({ p }) {
+function PositionRow({ p, onClosed }) {
   const [expanded, setExpanded] = useState(false);
+  const [closing, setClosing] = useState(false);
+  const [closeError, setCloseError] = useState(null);
   const legs = p.options_autotrade_legs ?? [];
   const modeColor = MODE_COLOR[p.execution_mode] ?? MODE_COLOR.PAPER;
   const pnl = p.status === "ACTIVE" ? p.unrealized_pnl : p.realized_pnl;
   const rr = p.max_loss > 0 && p.max_profit != null ? p.max_profit / p.max_loss : null;
+
+  const closeManually = () => {
+    const warning = p.execution_mode === "AUTO"
+      ? `This places REAL closing orders on ${p.broker ?? "your broker"} for every leg of position #${p.id} (${p.symbol} ${p.strategy_label}). If you've already closed a leg manually in Kite/Groww, do that check first — this will still try to close ALL legs. Continue?`
+      : `Close position #${p.id} (${p.symbol} ${p.strategy_label}, ${p.execution_mode}) now? This only updates this dashboard's own record — there's no real broker position to touch in ${p.execution_mode} mode.`;
+    if (!window.confirm(warning)) return;
+    setClosing(true);
+    setCloseError(null);
+    fetch("/api/options-autotrade?resource=manual-close", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ positionId: p.id }),
+    })
+      .then((r) => r.json())
+      .then((body) => {
+        if (body?.error) { setCloseError(body.message || body.error); return; }
+        if (body?.ok === false) { setCloseError(body.message || "Close failed — check the broker directly."); }
+        onClosed?.();
+      })
+      .catch((e) => setCloseError(e.message))
+      .finally(() => setClosing(false));
+  };
 
   return (
     <>
@@ -1068,6 +1091,19 @@ function PositionRow({ p }) {
               <div>
                 <div className="text-[10.5px] font-semibold text-muted mb-1">Decision Explanation</div>
                 <pre className="text-[10.5px] text-ink2 whitespace-pre-wrap font-sans">{p.decision_explanation ?? "—"}</pre>
+                {p.status === "ACTIVE" && (
+                  <div className="mt-2">
+                    <button
+                      onClick={closeManually}
+                      disabled={closing}
+                      className="text-[10.5px] font-semibold px-2 py-1 rounded-[4px]"
+                      style={{ background: "var(--c-loss-bg, #fde8e8)", color: "var(--c-loss, #b42318)" }}
+                    >
+                      {closing ? "Closing…" : p.execution_mode === "AUTO" ? "Close manually (real order)" : "Close manually"}
+                    </button>
+                    {closeError && <div className="text-[10px] text-loss mt-1">{closeError}</div>}
+                  </div>
+                )}
               </div>
             </div>
           </td>
@@ -1542,7 +1578,7 @@ export default function OptionsAutoTrader() {
                   </tr>
                 </thead>
                 <tbody>
-                  {[...visiblePositions.active, ...visiblePositions.closed].map((p) => <PositionRow key={p.id} p={p} />)}
+                  {[...visiblePositions.active, ...visiblePositions.closed].map((p) => <PositionRow key={p.id} p={p} onClosed={load} />)}
                 </tbody>
               </table>
             </div>

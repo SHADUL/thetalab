@@ -3115,6 +3115,150 @@ async function handleSettings(req: any, res: any, supabase: SupabaseClient) {
   res.status(405).json({ error: 'method_not_allowed' });
 }
 
+/**
+ * Browser-facing: close one ACTIVE position right now, on demand, instead
+ * of waiting for position-monitor's own exit conditions. For AUTO this
+ * places REAL closing orders against whichever broker actually holds the
+ * position (p.broker) — same SELL-then-BUY ordering and same
+ * CLOSE_FAILED-on-partial-failure posture as position-monitor's own exit
+ * path, so this button's real-money behavior is identical to an automatic
+ * exit, just manually triggered. For PAPER/SHADOW there is no real broker
+ * position to touch — this just marks the row closed using a fresh quote
+ * for the P&L estimate. This exists specifically for the case where the
+ * user has ALREADY closed the position (or one leg of it) directly in
+ * Kite/Groww — it brings this app's own bookkeeping back in line with
+ * reality rather than leaving position-monitor to keep pricing/attempting
+ * to close a leg that no longer exists at the broker.
+ */
+async function handleManualClose(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const positionId = Number(req.body?.positionId);
+  if (!Number.isFinite(positionId)) { res.status(400).json({ error: 'bad_request', message: 'positionId required' }); return; }
+
+  const log = (level: 'info' | 'error', message: string, detail?: unknown, mode?: string | null) =>
+    supabase.from('options_autotrade_log').insert({ level, message, detail: detail ?? null, execution_mode: mode ?? null });
+
+  const { data: p, error: posErr } = await supabase
+    .from('options_autotrade_positions').select('*, options_autotrade_legs(*)').eq('id', positionId).maybeSingle();
+  if (posErr) { res.status(502).json({ error: 'supabase_error', message: posErr.message }); return; }
+  if (!p) { res.status(404).json({ error: 'not_found' }); return; }
+  if (p.status !== 'ACTIVE') { res.status(400).json({ error: 'bad_request', message: `Position #${positionId} is already ${p.status}, not ACTIVE.` }); return; }
+
+  const legs = p.options_autotrade_legs ?? [];
+  const symbolExchanges = OPTIONS_SYMBOLS as Record<string, string>;
+  const exchange = symbolExchanges[p.symbol] ?? 'NFO';
+  const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const actualFillCreditFromLegs = (ls: any[]): number =>
+    ls.reduce((sum, l) => sum + (l.side === 'SELL' ? 1 : -1) * Number(l.fill_price) * l.quantity, 0);
+
+  if (p.execution_mode === 'AUTO') {
+    const apiKey = process.env.KITE_API_KEY;
+    if (!apiKey) { res.status(500).json({ error: 'server_misconfigured' }); return; }
+
+    let placer: LiveOrderPlacer;
+    let closeExchange = exchange;
+    if (p.broker === 'GROWW') {
+      const { data: growwSessionRow } = await supabase.from('groww_session').select('access_token').eq('id', 1).maybeSingle();
+      const growwToken = growwSessionRow?.access_token ?? null;
+      if (!growwToken) { res.status(400).json({ error: 'no_groww_session', message: 'No Groww session — cannot place a real closing order.' }); return; }
+      placer = makeGrowwOrderPlacer(growwToken);
+      closeExchange = GROWW_EXCHANGE_FOR_KITE_EXCHANGE[exchange] ?? 'NSE';
+    } else {
+      const { data: session } = await supabase.from('kite_session').select('access_token').eq('id', 1).maybeSingle();
+      const token = session?.access_token;
+      if (!token) { res.status(400).json({ error: 'no_kite_session', message: 'No Kite session — cannot place a real closing order.' }); return; }
+      placer = makeLiveOrderPlacer(token, apiKey);
+    }
+
+    const orderedClose = [...legs.filter((l: any) => l.side === 'SELL'), ...legs.filter((l: any) => l.side === 'BUY')];
+    let allClosed = true;
+    let actualCostToClose = 0;
+    for (const l of orderedClose) {
+      try {
+        const orderId = await placer.closeLeg(
+          { side: l.side, right: l.option_right, strike: Number(l.strike), tradingsymbol: l.tradingsymbol, quantity: l.quantity, fillPrice: 0 },
+          closeExchange,
+        );
+        const fill = await placer.awaitFill(orderId, 15_000);
+        if (fill.status === 'COMPLETE' && fill.averagePrice != null) {
+          actualCostToClose += (l.side === 'SELL' ? 1 : -1) * fill.averagePrice * l.quantity;
+          await supabase.from('options_autotrade_legs').update({ exit_order_id: orderId, exit_fill_price: fill.averagePrice }).eq('id', l.id);
+        } else {
+          allClosed = false;
+          await log('error', `Position #${p.id}: MANUAL closing order for ${l.side} ${l.tradingsymbol} ended ${fill.status} — THIS LEG MAY STILL BE OPEN AT THE BROKER. Manual check required immediately.`, undefined, p.execution_mode);
+        }
+      } catch (err: any) {
+        allClosed = false;
+        await log('error', `Position #${p.id}: MANUAL closing order request FAILED for ${l.side} ${l.tradingsymbol} — ${err.message}. THIS LEG MAY STILL BE OPEN AT THE BROKER. Manual check required immediately.`, undefined, p.execution_mode);
+      }
+    }
+    if (!allClosed) {
+      await supabase.from('options_autotrade_positions').update({
+        status: 'CLOSE_FAILED', exit_reason: 'MANUAL_CLOSE_PARTIAL', updated_at: new Date().toISOString(),
+      }).eq('id', p.id);
+      await log('error', `Position #${p.id}: manual close marked CLOSE_FAILED — at least one real closing order did not confirm. Verify against the broker and resolve manually.`, undefined, p.execution_mode);
+      res.status(200).json({ ok: false, status: 'CLOSE_FAILED', message: 'At least one leg did not confirm closed at the broker — check Kite/Groww directly.' });
+      return;
+    }
+    const realizedPnl = actualFillCreditFromLegs(legs) - actualCostToClose;
+    await supabase.from('options_autotrade_positions').update({
+      status: 'CLOSED', execution_state: 'CLOSED', exit_date: todayIST, exit_reason: 'MANUAL_CLOSE',
+      realized_pnl: realizedPnl, updated_at: new Date().toISOString(),
+    }).eq('id', p.id);
+    await log('info', `Position #${p.id} (${p.symbol} ${p.strategy_label}) manually closed from the dashboard — real closing orders confirmed on ${p.broker}. Realized P&L ₹${realizedPnl.toFixed(0)}.`, undefined, p.execution_mode);
+    res.status(200).json({ ok: true, status: 'CLOSED', realizedPnl });
+    return;
+  }
+
+  // PAPER / SHADOW — no real broker position to touch. Best-effort a fresh
+  // quote per leg for the P&L estimate; a leg whose quote can't be fetched
+  // falls back to its own entry fill_price (zero marked move assumed) so a
+  // missing quote never blocks the user from closing the row outright —
+  // unlike position-monitor's own exit path, there is no "skip this cycle
+  // and retry later" option here; the user explicitly asked to close now.
+  const apiKey = process.env.KITE_API_KEY;
+  const { data: session } = await supabase.from('kite_session').select('access_token').eq('id', 1).maybeSingle();
+  const token = session?.access_token;
+  let kiteSymbolByLeg = new Map<string, string>();
+  if (p.broker === 'GROWW' && apiKey && token) {
+    const { data: kiteInstrumentRows } = await supabase.from('options_instruments')
+      .select('symbol, expiry, strike, option_right, tradingsymbol')
+      .eq('symbol', p.symbol).eq('expiry', p.expiry);
+    for (const l of legs) {
+      const match = (kiteInstrumentRows ?? []).find((r: any) => Number(r.strike) === Number(l.strike) && r.option_right === l.option_right);
+      if (match) kiteSymbolByLeg.set(String(l.id), match.tradingsymbol);
+    }
+  }
+  const quoteMap = new Map<string, any>();
+  if (apiKey && token) {
+    const keys = legs
+      .map((l: any) => p.broker === 'GROWW' ? kiteSymbolByLeg.get(String(l.id)) : l.tradingsymbol)
+      .filter(Boolean)
+      .map((sym: string) => `${exchange}:${sym}`);
+    if (keys.length) {
+      try {
+        const data = await kiteFetch(`/quote?${[...new Set(keys)].map((k) => `i=${encodeURIComponent(k)}`).join('&')}`, { token, apiKey });
+        for (const k of keys) if (data?.[k]) quoteMap.set(k, data[k]);
+      } catch (err: any) {
+        await log('error', `Position #${p.id}: manual close quote fetch failed — falling back to entry fill prices for the P&L estimate.`, { message: err.message }, p.execution_mode);
+      }
+    }
+  }
+  let currentCostToClose = 0;
+  for (const l of legs) {
+    const kiteSymbol = p.broker === 'GROWW' ? kiteSymbolByLeg.get(String(l.id)) : l.tradingsymbol;
+    const price = (kiteSymbol ? midOrLastPrice(quoteMap.get(`${exchange}:${kiteSymbol}`)) : null) ?? Number(l.fill_price);
+    currentCostToClose += (l.side === 'SELL' ? 1 : -1) * price * l.quantity;
+  }
+  const realizedPnl = (Number(p.max_profit) || 0) - currentCostToClose;
+  await supabase.from('options_autotrade_positions').update({
+    status: 'CLOSED', execution_state: 'CLOSED', exit_date: todayIST, exit_reason: 'MANUAL_CLOSE',
+    realized_pnl: realizedPnl, updated_at: new Date().toISOString(),
+  }).eq('id', p.id);
+  await log('info', `Position #${p.id} (${p.symbol} ${p.strategy_label}, ${p.execution_mode}) manually closed from the dashboard. Realized P&L estimate ₹${realizedPnl.toFixed(0)}.`, undefined, p.execution_mode);
+  res.status(200).json({ ok: true, status: 'CLOSED', realizedPnl });
+}
+
 /** Browser-facing: list positions with their legs, active and closed separately. No shared-secret gate — same reasoning as handleSettings. */
 async function handlePositions(req: any, res: any, supabase: SupabaseClient) {
   if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
@@ -4035,6 +4179,7 @@ export default async function handler(req: any, res: any) {
   // api/intraday.js's settings/positions convention).
   if (resource === 'settings') return handleSettings(req, res, supabase);
   if (resource === 'positions') return handlePositions(req, res, supabase);
+  if (resource === 'manual-close') return handleManualClose(req, res, supabase);
   if (resource === 'real-funds') return handleRealFunds(req, res, supabase);
   if (resource === 'groww-real-funds') return handleGrowwRealFunds(req, res, supabase);
   if (resource === 'groww-connect') return handleGrowwConnect(req, res, supabase);

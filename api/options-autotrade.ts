@@ -125,13 +125,11 @@ import { createSessionToken, buildSetCookieHeader, buildClearCookieHeader, readC
 
 const KITE_BASE = 'https://api.kite.trade';
 
-// Temporary equity floor for SHADOW mode sizing — see the header comment
-// where this is used (handlePaperScan's sizing block) for the full
-// rationale. Added 2026-09-29; remove once no longer needed (the real
-// account balance will simply exceed this once funded, so nothing breaks
-// if this constant is left in place indefinitely — it just stops
-// mattering).
-const SHADOW_EQUITY_FLOOR_RUPEES = 250_000;
+// SHADOW's sizing equity — fixed, not a real balance (changed 2026-10-01,
+// explicit request): SHADOW no longer sizes against the real KITE/GROWW
+// account at all, on either broker. See the header comment where this is
+// used (handlePaperScan's sizing block) for the full rationale.
+const SHADOW_FIXED_EQUITY_RUPEES = 500_000;
 
 // Kite's standard index quote keys — all three confirmed against live
 // paper-scan runs (2026-09-21). NIFTY/SENSEX were already used elsewhere
@@ -1496,11 +1494,14 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     // allocation a human typed in, not a live account balance. A failed
     // fetch refuses the trade outright rather than falling back to
     // reserved_fund, which would size a real order against a number nobody
-    // has verified the account actually holds. SHADOW sizes against the SAME
-    // real balance (never reserved_fund either) so its recorded hypothetical
-    // intent reflects what AUTO would actually have sized — see this file's
-    // header note on isShadow above.
-    const usesRealFunds = isLive || isShadow;
+    // has verified the account actually holds. SHADOW deliberately does
+    // NOT use the real balance at all (changed 2026-10-01, explicit
+    // request): it sizes against a fixed SHADOW_FIXED_EQUITY_RUPEES on
+    // EITHER broker, independent of whatever the real KITE/GROWW account
+    // actually holds — so SHADOW's hypothetical sizing stops being
+    // bottlenecked by a real account that may be thin or unfunded, at the
+    // cost of no longer reflecting "what AUTO would actually have sized."
+    const usesRealFunds = isLive;
     const realAvailableFunds = usesRealFunds
       ? (routesRealOrdersThroughGroww ? (growwToken ? await fetchGrowwAvailableFunds(growwToken) : null) : await fetchRealAvailableFunds(token, apiKey))
       : null;
@@ -1590,27 +1591,26 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
         underlyingGroup: candidateSymbolGroup,
       },
       {
-        // AUTO and SHADOW both base every %-of-equity risk cap (max
-        // risk/trade, daily/weekly loss, portfolio risk, correlated-group
-        // risk) on the REAL account balance — reserved_fund is a self-
-        // declared number a human typed in, and letting real risk limits key
-        // off it would let those caps drift arbitrarily far from what the
-        // account can actually absorb. PAPER keeps using reserved_fund,
-        // since there's no real balance to check it against.
+        // AUTO bases every %-of-equity risk cap (max risk/trade, daily/
+        // weekly loss, portfolio risk, correlated-group risk) on the REAL
+        // account balance — reserved_fund is a self-declared number a
+        // human typed in, and letting real risk limits key off it would
+        // let those caps drift arbitrarily far from what the account can
+        // actually absorb. PAPER keeps using reserved_fund, since there's
+        // no real balance to check it against.
         //
-        // SHADOW gets one deliberate exception: a temporary equity FLOOR
-        // (SHADOW_EQUITY_FLOOR_RUPEES), applied as max(real funds, floor) —
-        // added 2026-09-29 because the real account currently shows ₹0
-        // available (not yet funded; ₹1L is being loaded soon) and SHADOW
-        // sizing to zero lots on every scan was producing no forward-
-        // validation signal at all. This is a floor, not an override: once
-        // real funds exceed the floor, SHADOW automatically reverts to
-        // sizing off the real balance with no code change needed — AUTO is
-        // NEVER floored, since it fires real orders and must only ever size
+        // SHADOW sizes against a FIXED equity (SHADOW_FIXED_EQUITY_RUPEES,
+        // ₹5L) on either broker, never the real balance — changed
+        // 2026-10-01 on explicit request: SHADOW's own real-funds sizing
+        // was being bottlenecked by whatever the real KITE/GROWW account
+        // actually held at scan time (sometimes ₹0, sometimes just enough
+        // to size zero lots), which blocked SHADOW from generating a
+        // signal at all regardless of real account funding. AUTO is NEVER
+        // affected by this — it fires real orders and must only ever size
         // against what the account actually holds.
-        equity: isShadow ? Math.max(realAvailableFunds ?? 0, SHADOW_EQUITY_FLOOR_RUPEES)
+        equity: isShadow ? SHADOW_FIXED_EQUITY_RUPEES
           : usesRealFunds ? (realAvailableFunds ?? 0) : Number(settings.reserved_fund) || 0,
-        availableFunds: isShadow ? Math.max(realAvailableFunds ?? 0, SHADOW_EQUITY_FLOOR_RUPEES)
+        availableFunds: isShadow ? SHADOW_FIXED_EQUITY_RUPEES
           : usesRealFunds ? (realAvailableFunds ?? 0) : Number(settings.reserved_fund) || 0,
       },
       portfolio,

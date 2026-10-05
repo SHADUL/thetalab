@@ -1163,9 +1163,14 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   }
 
   const allExpiries = [...new Set(instrumentRows.map((r: any) => r.expiry as string))].sort();
+  // An entry must never be inside the exit engine's own forced time-exit
+  // window (dte <= time_exit_dte): it would open and be force-closed on the
+  // very next monitor cycle, paying real charges for nothing (seen live:
+  // three AUTO NIFTY spreads opened 1 DTE and closed within a minute).
+  const effectiveMinDte = Math.max(Number(settings.min_dte) || 0, (Number(settings.time_exit_dte) || 0) + 1);
   const eligibleExpiries = allExpiries.filter((expiry) => {
     const dte = Math.round((Date.parse(`${expiry}T00:00:00Z`) - Date.parse(`${todayIST}T00:00:00Z`)) / 86_400_000);
-    return dte >= settings.min_dte && dte <= settings.max_dte;
+    return dte >= effectiveMinDte && dte <= settings.max_dte;
   });
   if (!eligibleExpiries.length) {
     res.status(200).json({ ok: true, skipped: 'no_eligible_expiries', allExpiries });
@@ -1335,7 +1340,7 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   const evaluations = evaluateExpiries(enriched, {
     lotSize: lotSize && lotSize > 0 ? lotSize : 1,
     wingWidths,
-    minDte: settings.min_dte,
+    minDte: effectiveMinDte,
     maxDte: settings.max_dte,
     ivRank: primaryIvRank,
     historicalCloses,

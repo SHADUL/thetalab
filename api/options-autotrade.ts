@@ -1595,6 +1595,21 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     }
     if (reconciliationBlocked) continue;
 
+    // Real-money liquidity gate. The engine's own hard gate only rejects
+    // UNTRADABLE; a POOR leg (spread above the 5% acceptable threshold, or
+    // OI/volume under the minimums) still passes it, and PAPER/SHADOW fill
+    // at the quote so they never feel the cost. AUTO does: the two worst
+    // real trades (#37 at a 17.7% avg spread, #39 at 5.8%) were both POOR
+    // far-month BANKNIFTY spreads that filled far off their planned credit.
+    // PAPER/SHADOW are left alone so they keep generating comparison data.
+    if (isLive && (best.liquidity.tier === 'POOR' || best.liquidity.tier === 'UNTRADABLE')) {
+      const why = best.liquidity.legs.flatMap((l: any) => l.reasons).slice(0, 3).join('; ');
+      await event('ENTRY_SKIPPED', { reason: 'liquidity_too_poor', tier: best.liquidity.tier });
+      await log('info', `${modeLabel}: ${symbol} candidate liquidity is ${best.liquidity.tier} (${why}) — real orders would fill far off the quoted credit, skipping.`);
+      perModeResults[modeLabel] = { ok: true, opened: false, skipped: 'liquidity_too_poor' };
+      continue;
+    }
+
     const sizing = computePositionSize(
       {
         pricing: { maxLoss: best.result.maxLoss, maxProfit: best.result.maxProfit, netCredit: best.result.netCredit, netGreeks: best.result.netGreeks },

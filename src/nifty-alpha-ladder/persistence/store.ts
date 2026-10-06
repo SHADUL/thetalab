@@ -121,9 +121,19 @@ export interface AlphaLadderStore {
   saveAccumulatorCheckpoint(sessionDate: string, checkpoint: AccumulatorCheckpoint): Promise<void>;
   loadAccumulatorCheckpoint(sessionDate: string): Promise<AccumulatorCheckpoint | null>;
 
+  // --- settings (allocated capital / mode) ---
+  getSettings(): Promise<AlphaLadderSettings | null>;
+
   // --- feed gaps / session integrity (a gap row IS the durable invalidation record) ---
   insertFeedGap(row: FeedGapRow): Promise<void>;
   getFeedGapsSince(sinceIso: string): Promise<FeedGapRow[]>;
+}
+
+export interface AlphaLadderSettings {
+  executionMode: ExecutionMode;
+  allocatedCapital: number;
+  sizingMode: 'unit' | 'quantity';
+  configuredUnitQuantity: number;
 }
 
 export interface FeedGapRow {
@@ -140,7 +150,7 @@ export interface FeedGapRow {
 // migration's unique constraints do, without needing a live database.
 // ---------------------------------------------------------------------------
 
-export function createInMemoryAlphaLadderStore(): AlphaLadderStore {
+export function createInMemoryAlphaLadderStore(initialSettings: AlphaLadderSettings | null = null): AlphaLadderStore {
   let signalId = 0;
   const signals: SignalRow[] = [];
   let callId = 0;
@@ -160,6 +170,7 @@ export function createInMemoryAlphaLadderStore(): AlphaLadderStore {
   const activityLog: Array<{ level: string; message: string; detail?: unknown; callId?: number; positionId?: number }> = [];
   const checkpoints = new Map<string, AccumulatorCheckpoint>();
   const feedGaps: FeedGapRow[] = [];
+  const settings: AlphaLadderSettings | null = initialSettings;
 
   return {
     async getSignalByWeekKey(weekKey) {
@@ -239,6 +250,9 @@ export function createInMemoryAlphaLadderStore(): AlphaLadderStore {
     },
     async loadAccumulatorCheckpoint(sessionDate) {
       return checkpoints.get(sessionDate) ?? null;
+    },
+    async getSettings() {
+      return settings;
     },
     async insertFeedGap(row) {
       feedGaps.push(row);
@@ -381,6 +395,13 @@ export function createSupabaseAlphaLadderStore(client: SupabaseClient): AlphaLad
         pendingWindowObservations: { b: data.pending_window_observations_bid, a: data.pending_window_observations_ask },
         lastWindowFoldedAtMs: data.last_window_folded_at_ms,
       };
+    },
+    async getSettings() {
+      const { data } = await client.from('alpha_ladder_settings').select('*').eq('id', 1).maybeSingle();
+      return data ? {
+        executionMode: data.execution_mode, allocatedCapital: Number(data.allocated_capital) || 0,
+        sizingMode: data.sizing_mode, configuredUnitQuantity: Number(data.configured_unit_quantity) || 0,
+      } : null;
     },
     async insertFeedGap(row) {
       await client.from('alpha_ladder_feed_gaps').insert({

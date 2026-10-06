@@ -38,6 +38,7 @@ import { createSupabaseAlphaLadderStore } from '../persistence/store.ts';
 import { isTradingDay, isSignalWeekday } from '../calendar/signalCalendar.ts';
 import { nowIST, isWithinSignalWindow, isMarketOpen, MARKET_OPEN_MIN, SIGNAL_CUTOFF_MIN } from '../calendar/istClock.ts';
 import { fetchNfoInstrumentsCsv, parseNfoFutures, resolveNearestFuture } from '../live/futuresResolver.ts';
+import { handleFiredSignal } from './signalIntake.ts';
 import { assessSessionIntegrity, type SessionIntegrity, type SessionIntegrityReason } from '../live/sessionIntegrity.ts';
 
 /** Seconds from session origin (09:15 IST) to the 14:30 IST cutoff — a fixed constant every day, since both are IST clock times measured from the same origin. */
@@ -221,10 +222,9 @@ async function main() {
     const nowSec = (Date.now() - accumulator.sessionOriginMs) / 1000;
     const decision = evaluateCurrentSignal(accumulator, nowSec, CUTOFF_SEC_FROM_ORIGIN, { value: null, available: false });
     if (decision.fired) {
-      await store.logActivity('info', `Signal fired: direction=${decision.finalDirection}, path=${decision.path}`, decision);
-      // Structure resolution / call publication / entry simulation wiring
-      // is NOT yet connected to this loop — see the Milestone 3 report's
-      // "BUILT + NOT LIVE-VERIFIED" section.
+      // Idempotent per week key — the signal re-evaluates every minute, only the first fire persists.
+      await handleFiredSignal(store, decision, ist.dateISO, Date.now());
+      // Structure resolution / SHADOW entry simulation is NOT yet connected — see the Milestone 3 report.
     }
   }, EVALUATION_POLL_MS);
 }

@@ -80,6 +80,10 @@ import {
   parseDirectionConfirmationMode, normalizeTrend,
 } from '../src/quant/strategies/directionConfirmation.ts';
 import { evaluateExpiriesWithConfirmation, type ConfirmationTelemetry } from '../src/quant/strategies/directionConfirmationEval.ts';
+import {
+  parseOrderFlowConfirmationMode, assessFeatureAvailability, classifyRawFlow, classifyAlphaFlow, compareRrToFlow, hypotheticalStructure,
+  type OrderFlowFeatureRow,
+} from '../src/quant/strategies/orderFlowConfirmation.ts';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
@@ -1013,6 +1017,55 @@ function serializeExpiryEvaluation(e: ReturnType<typeof evaluateExpiries>[number
 }
 
 /**
+ * OBSERVE-ONLY order-flow experiment: one row per evaluated expiry per
+ * minute, recording RR, trend, the Alpha Ladder order-flow features (read
+ * from the worker's published snapshot), both flow variants, MATCH/CONFLICT,
+ * and the hypothetical structure. Nothing here can place, size, block or
+ * modify an order; it is failure-tolerant (missing table/feature row is
+ * logged, never thrown) and P&L is joined later via the position link.
+ */
+async function recordOrderFlowObservation(
+  supabase: SupabaseClient, symbol: string, scanId: string, todayISO: string,
+  evaluations: ReturnType<typeof evaluateExpiries>, trendState: string,
+  log: (level: 'info' | 'error', message: string, detail?: unknown) => unknown,
+): Promise<void> {
+  try {
+    const rowsOut: any[] = [];
+    const { data: featureRow, error: featErr } = await supabase
+      .from('alpha_ladder_order_flow_features').select('*').order('created_at', { ascending: false }).limit(1).maybeSingle();
+    const feature = (featErr ? null : featureRow) as OrderFlowFeatureRow | null;
+    const availability = assessFeatureAvailability(feature, Date.now(), todayISO);
+    const flowA = classifyRawFlow(feature, availability);
+    const flowB = classifyAlphaFlow(feature, availability);
+    const bucket = new Date(Math.floor(Date.now() / 60_000) * 60_000).toISOString();
+    for (const e of evaluations) {
+      if (e.riskReversal === undefined) continue; // excluded by the DTE band before any candidate was evaluated
+      const rrBias = e.riskReversal === null ? null : e.bias;
+      rowsOut.push({
+        symbol, expiry: new Date(e.expiry).toISOString().slice(0, 10), bucket_start: bucket, scan_id: scanId, mode: 'OBSERVE',
+        raw_risk_reversal: e.riskReversal, rr_direction: rrBias ?? 'UNAVAILABLE', trend_regime: trendState,
+        g1: feature?.g1 ?? null, a1: feature?.a1 ?? null, d1: feature?.d1 ?? null,
+        g2: feature?.g2 ?? null, a2: feature?.a2 ?? null, d2: feature?.d2 ?? null, d2_basis: feature?.d2_basis ?? null,
+        alignment: feature?.alpha === 1 ? 'ALIGNED' : feature?.alpha === 0 ? 'DIVERGENT' : null,
+        flow_raw: flowA, flow_alpha_d: flowB,
+        match_raw: compareRrToFlow(rrBias, flowA), match_alpha_d: compareRrToFlow(rrBias, flowB),
+        current_structure: e.strategyLabel,
+        hypothetical_structure_raw: hypotheticalStructure(rrBias, e.strategyLabel, flowA),
+        hypothetical_structure_alpha_d: hypotheticalStructure(rrBias, e.strategyLabel, flowB),
+        feature_available: availability.available, feature_reason: availability.reason, feature_age_sec: availability.ageSec,
+        feature_session_valid: feature?.session_valid ?? null, feature_created_at: feature?.created_at ?? null,
+      });
+    }
+    if (!rowsOut.length) return;
+    const { error } = await supabase.from('options_order_flow_confirmation_log')
+      .upsert(rowsOut, { onConflict: 'symbol,expiry,bucket_start', ignoreDuplicates: true });
+    if (error) await log('error', 'Order-flow observation not persisted (is migration 022 applied?)', { message: error.message });
+  } catch (err: any) {
+    await log('error', 'Order-flow observation not persisted', { message: err.message });
+  }
+}
+
+/**
  * Persists direction-confirmation telemetry, one row per evaluated expiry,
  * deduplicated to one row per (symbol, expiry, minute) so the 30-second scan
  * cadence doesn't double-write. Failure-tolerant by design: telemetry must
@@ -1440,6 +1493,12 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     directionConfirmation: { mode: directionMode, telemetry: confirmed.telemetry },
     evaluations: evaluations.map(serializeExpiryEvaluation),
   };
+
+  // Order-flow OBSERVE-ONLY experiment (setting order_flow_confirmation_mode: OFF | OBSERVE, default OBSERVE).
+  const orderFlowMode = parseOrderFlowConfirmationMode(settings.order_flow_confirmation_mode);
+  if (orderFlowMode === 'OBSERVE') {
+    await recordOrderFlowObservation(supabase, symbol, scanId, todayIST, confirmed.original, marketRegime?.trend?.state ?? 'UNKNOWN', sharedLog);
+  }
 
   await sharedLog('info', `${scanLabel} scan decision for ${symbol}: ${decision.action}`, { rejectedRows: rejected.length, decision: decision.explanation });
 
@@ -1999,6 +2058,15 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     }));
     await supabase.from('options_autotrade_legs').insert(legRows);
     await intentStore.updateStatus(claim.intentId, { status: 'COMPLETED', positionId: inserted.id });
+    // Link this position to the order-flow observation for later P&L join
+    // (best-effort: a missing table must never affect position handling).
+    if (orderFlowMode === 'OBSERVE') {
+      try {
+        await supabase.from('options_order_flow_position_link').upsert({
+          position_id: inserted.id, scan_id: scanId, symbol, expiry: expiryDateStr, execution_mode: modeLabel,
+        });
+      } catch { /* observational only */ }
+    }
     await event('POSITION_ACTIVE', { intentId: claim.intentId, positionId: inserted.id, lots: sizing.lots });
     await log('info', `Opened ${modeLabel} position #${inserted.id}: ${decision.expiryEvaluation.strategyLabel} on ${symbol}, ${sizing.lots} lot(s).`, isLive ? { log: execResult.log } : undefined);
 
@@ -3169,6 +3237,10 @@ async function handleSettings(req: any, res: any, supabase: SupabaseClient) {
       res.status(400).json({ error: 'bad_request', message: `execution_mode must be OFF, PAPER, SHADOW, or AUTO — ALERT_ONLY/SEMI_AUTO aren't implemented yet.` });
       return;
     }
+    if (body.order_flow_confirmation_mode !== undefined && !['OFF', 'OBSERVE'].includes(body.order_flow_confirmation_mode)) {
+      res.status(400).json({ error: 'bad_request', message: 'order_flow_confirmation_mode must be OFF or OBSERVE (there is no enforced mode).' });
+      return;
+    }
     if (body.direction_confirmation_mode !== undefined &&
         !['RR_ONLY', 'RR_TREND_OBSERVE', 'RR_TREND_ENFORCED'].includes(body.direction_confirmation_mode)) {
       res.status(400).json({ error: 'bad_request', message: 'direction_confirmation_mode must be RR_ONLY, RR_TREND_OBSERVE, or RR_TREND_ENFORCED.' });
@@ -3217,6 +3289,7 @@ async function handleSettings(req: any, res: any, supabase: SupabaseClient) {
     if (body.auto_enabled !== undefined) update.auto_enabled = body.auto_enabled;
     if (body.active_broker !== undefined) update.active_broker = body.active_broker;
     if (body.direction_confirmation_mode !== undefined) update.direction_confirmation_mode = body.direction_confirmation_mode;
+    if (body.order_flow_confirmation_mode !== undefined) update.order_flow_confirmation_mode = body.order_flow_confirmation_mode;
     if (body.paused_symbols !== undefined) update.paused_symbols = body.paused_symbols;
     if (body.manually_allowed_tradingsymbols !== undefined) update.manually_allowed_tradingsymbols = body.manually_allowed_tradingsymbols;
     for (const key of EDITABLE_SETTINGS_FIELDS) {

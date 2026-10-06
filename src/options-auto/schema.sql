@@ -410,3 +410,6 @@ create unique index if not exists forward_validation_runs_one_active_per_symbol_
 -- Migration 021: direction confirmation (RR + trend). See migrations/021_direction_confirmation.sql
 -- options_autotrade_settings.direction_confirmation_mode text default 'RR_TREND_OBSERVE'
 -- options_direction_confirmation_log: per-evaluated-expiry telemetry (RR, trend, proposed structure, reason code, optimizer/score, eligibility)
+-- Migration 022: order-flow OBSERVE-ONLY experiment. See migrations/022_order_flow_observation.sql
+-- options_autotrade_settings.order_flow_confirmation_mode text default 'OBSERVE' (OFF | OBSERVE)
+-- options_order_flow_confirmation_log, options_order_flow_position_link

@@ -18,6 +18,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Direction, ExecutionMode, LegSide, OptionRight, SignalRecord, SignalPath, SignedDirection } from '../types.ts';
 import type { AccumulatorCheckpoint } from '../live/sessionAccumulator.ts';
+import type { OrderFlowFeatures } from '../live/orderFlowFeatures.ts';
 
 export type CallKind = 'MONITOR' | 'STRUCTURE';
 export type CallStatus = 'PUBLISHED' | 'LIVE' | 'EXIT_REQUESTED' | 'EXITING' | 'CLOSED' | 'LEFTOVER_ALERT';
@@ -121,12 +122,22 @@ export interface AlphaLadderStore {
   saveAccumulatorCheckpoint(sessionDate: string, checkpoint: AccumulatorCheckpoint): Promise<void>;
   loadAccumulatorCheckpoint(sessionDate: string): Promise<AccumulatorCheckpoint | null>;
 
+  // --- read-only order-flow features for observe-only external consumers ---
+  insertOrderFlowFeature(row: OrderFlowFeatureRow): Promise<void>;
+
   // --- settings (allocated capital / mode) ---
   getSettings(): Promise<AlphaLadderSettings | null>;
 
   // --- feed gaps / session integrity (a gap row IS the durable invalidation record) ---
   insertFeedGap(row: FeedGapRow): Promise<void>;
   getFeedGapsSince(sinceIso: string): Promise<FeedGapRow[]>;
+}
+
+export interface OrderFlowFeatureRow extends OrderFlowFeatures {
+  sessionDate: string;
+  workerInstance: string;
+  sessionValid: boolean;
+  sessionIntegrityReason: string | null;
 }
 
 export interface AlphaLadderSettings {
@@ -170,6 +181,7 @@ export function createInMemoryAlphaLadderStore(initialSettings: AlphaLadderSetti
   const activityLog: Array<{ level: string; message: string; detail?: unknown; callId?: number; positionId?: number }> = [];
   const checkpoints = new Map<string, AccumulatorCheckpoint>();
   const feedGaps: FeedGapRow[] = [];
+  const orderFlowFeatures: OrderFlowFeatureRow[] = [];
   const settings: AlphaLadderSettings | null = initialSettings;
 
   return {
@@ -253,6 +265,9 @@ export function createInMemoryAlphaLadderStore(initialSettings: AlphaLadderSetti
     },
     async getSettings() {
       return settings;
+    },
+    async insertOrderFlowFeature(row) {
+      orderFlowFeatures.push(row);
     },
     async insertFeedGap(row) {
       feedGaps.push(row);
@@ -395,6 +410,16 @@ export function createSupabaseAlphaLadderStore(client: SupabaseClient): AlphaLad
         pendingWindowObservations: { b: data.pending_window_observations_bid, a: data.pending_window_observations_ask },
         lastWindowFoldedAtMs: data.last_window_folded_at_ms,
       };
+    },
+    async insertOrderFlowFeature(row) {
+      await client.from('alpha_ladder_order_flow_features').insert({
+        session_date: row.sessionDate, worker_instance: row.workerInstance, as_of_sec: row.asOfSec,
+        g1: row.g1, a1: row.a1, d1: row.d1, g2: row.g2, a2: row.a2, d2: row.d2, d2_basis: row.d2Basis,
+        g2_crossed: row.g2Crossed, crossing_value: row.crossingValue, alpha: row.alpha,
+        base_direction: row.baseDirection, final_direction: row.finalDirection,
+        variation_c_acted: row.variationCActed, vix_available: row.vixAvailable, g1_active: row.g1Active,
+        session_valid: row.sessionValid, session_integrity_reason: row.sessionIntegrityReason,
+      });
     },
     async getSettings() {
       const { data } = await client.from('alpha_ladder_settings').select('*').eq('id', 1).maybeSingle();

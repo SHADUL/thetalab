@@ -39,6 +39,7 @@ import { isTradingDay, isSignalWeekday } from '../calendar/signalCalendar.ts';
 import { nowIST, isWithinSignalWindow, isMarketOpen, MARKET_OPEN_MIN, SIGNAL_CUTOFF_MIN } from '../calendar/istClock.ts';
 import { fetchNfoInstrumentsCsv, parseNfoFutures, resolveNearestFuture } from '../live/futuresResolver.ts';
 import { handleFiredSignal } from './signalIntake.ts';
+import { computeOrderFlowFeatures } from '../live/orderFlowFeatures.ts';
 import { assessSessionIntegrity, type SessionIntegrity, type SessionIntegrityReason } from '../live/sessionIntegrity.ts';
 
 /** Seconds from session origin (09:15 IST) to the 14:30 IST cutoff — a fixed constant every day, since both are IST clock times measured from the same origin. */
@@ -215,6 +216,19 @@ async function main() {
       status: health, workerStartedAt: new Date().toISOString(), reconnectCount: depthSource.getHealth().reconnectCount,
       currentInstrumentToken: resolvedFuture.instrumentToken, currentFutureSymbol: resolvedFuture.tradingsymbol,
     });
+
+    // Read-only feature publication for observe-only external consumers
+    // (Options Auto-Trader). Runs before the signal gate, never throws,
+    // and nothing in the signal path reads what it writes.
+    if (isMarketHours && accumulator) {
+      try {
+        const features = computeOrderFlowFeatures(accumulator, (Date.now() - accumulator.sessionOriginMs) / 1000, CUTOFF_SEC_FROM_ORIGIN, { value: null, available: false });
+        await store.insertOrderFlowFeature({
+          ...features, sessionDate: ist.dateISO, workerInstance: WORKER_INSTANCE,
+          sessionValid: !hasUnrecoverableGapToday, sessionIntegrityReason: hasUnrecoverableGapToday ? 'SESSION_INVALID_FOR_NEW_SIGNAL' : null,
+        });
+      } catch { /* observational only — a feature-publish failure must never affect the worker */ }
+    }
 
     const isSignalDay = isSignalWeekday(istCalendarDate, false); // TODO: real "did the preceding Wednesday have data" tracking — Gate 5.2's own fallback logic, not yet wired to a real prior-day check
     if (!isSignalDay || !isWithinSignalWindow(ist.minutesSinceMidnight) || !canFireNewSignal(quality) || !accumulator) return;

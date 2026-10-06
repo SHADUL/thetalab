@@ -76,6 +76,10 @@ import type { HistoricalClose } from '../src/quant/analytics/realizedVolatility.
 import { ivRankAndPercentile, type IvHistoryPoint, type IvRankResult } from '../src/quant/analytics/ivRank.ts';
 import { atmIvOf } from '../src/quant/analytics/atmIv.ts';
 import { classifyMarketRegime, type MarketRegimeResult } from '../src/quant/analytics/marketRegime.ts';
+import {
+  parseDirectionConfirmationMode, normalizeTrend,
+} from '../src/quant/strategies/directionConfirmation.ts';
+import { evaluateExpiriesWithConfirmation, type ConfirmationTelemetry } from '../src/quant/strategies/directionConfirmationEval.ts';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
@@ -1009,6 +1013,38 @@ function serializeExpiryEvaluation(e: ReturnType<typeof evaluateExpiries>[number
 }
 
 /**
+ * Persists direction-confirmation telemetry, one row per evaluated expiry,
+ * deduplicated to one row per (symbol, expiry, minute) so the 30-second scan
+ * cadence doesn't double-write. Failure-tolerant by design: telemetry must
+ * never be able to break a scan (the table may not exist until migration
+ * 021 is applied), so errors are logged once and swallowed.
+ */
+async function persistDirectionConfirmation(
+  supabase: SupabaseClient, symbol: string, scanId: string, mode: string,
+  rows: Array<ConfirmationTelemetry & { entryEligibleOriginal: boolean; entryEligibleProposed: boolean }>,
+  log: (level: 'info' | 'error', message: string, detail?: unknown) => unknown,
+): Promise<void> {
+  if (!rows.length) return;
+  const bucket = new Date(Math.floor(Date.now() / 60_000) * 60_000).toISOString();
+  try {
+    const { error } = await supabase.from('options_direction_confirmation_log').upsert(rows.map((t) => ({
+      symbol, expiry: new Date(t.expiry).toISOString().slice(0, 10), bucket_start: bucket, scan_id: scanId, mode,
+      dte: t.dte, raw_risk_reversal: t.rawRiskReversal, rr_direction: t.rrDirection,
+      trend_state: t.trendState, trend_stale: t.trendStale, trend_age_days: t.trendAgeDays, trend_as_of: t.trendAsOfDate,
+      trend_value: t.trendValue, trend_source: t.trendSource, alignment: t.alignment,
+      original_structure: t.originalStructure, proposed_structure: t.proposedStructure, proposed_structure_b: t.proposedStructureB,
+      decision: t.decision, reason_code: t.reasonCode, reason: t.reason,
+      optimizer_original: t.optimizerOriginal, optimizer_proposed: t.optimizerProposed,
+      score_original: t.scoreOriginal, score_proposed: t.scoreProposed,
+      entry_eligible_original: t.entryEligibleOriginal, entry_eligible_proposed: t.entryEligibleProposed,
+    })), { onConflict: 'symbol,expiry,bucket_start', ignoreDuplicates: true });
+    if (error) await log('error', 'Direction-confirmation telemetry not persisted (is migration 021 applied?)', { message: error.message });
+  } catch (err: any) {
+    await log('error', 'Direction-confirmation telemetry not persisted', { message: err.message });
+  }
+}
+
+/**
  * The paper-execution orchestrator: builds a live chain for one symbol,
  * runs the full decision pipeline (skew -> strategy -> optimizer -> expiry
  * selection -> quality score -> NO_TRADE/WATCH/CANDIDATE/HIGH_CONVICTION),
@@ -1337,25 +1373,9 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   // PAPER/SHADOW/AUTO always act on the identical candidate this cycle.
   const step = enriched.slices[0]?.forward ? inferStrikeStep(enriched.slices[0].quotes.map((q) => q.quote.strike)) : 50;
   const wingWidths = [2, 4, 6].map((m) => m * step);
-  const evaluations = evaluateExpiries(enriched, {
-    lotSize: lotSize && lotSize > 0 ? lotSize : 1,
-    wingWidths,
-    minDte: effectiveMinDte,
-    maxDte: settings.max_dte,
-    ivRank: primaryIvRank,
-    historicalCloses,
-  });
-  const thresholds: DecisionThresholds = {
-    noTradeBelow: settings.no_trade_below,
-    watchBelow: settings.watch_below,
-    highConvictionAtOrAbove: settings.high_conviction_at_or_above,
-  };
-
-  // Market regime — genuinely independent of skew (see
-  // analytics/marketRegime.ts's own header): computed from the real
-  // historicalCloses/spot/VIX/OHLC already fetched above, never from
-  // regimeSelect.ts's skew-derived bias. null (not fabricated) when there
-  // isn't enough real history yet.
+  // Market regime is computed BEFORE the optimizer so the direction-
+  // confirmation selector can use the existing trend read (it only depends
+  // on historicalCloses/spot/VIX/OHLC, never on the evaluations).
   let marketRegime: MarketRegimeResult | null = null;
   try {
     marketRegime = classifyMarketRegime({ historicalCloses, currentSpot: spot, indiaVix, gapAndRange });
@@ -1363,7 +1383,52 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     await sharedLog('error', `Market regime classification failed for ${symbol}`, { message: err.message });
   }
 
-  const decision = decideTrade(evaluations, thresholds, marketRegime);
+  // Direction confirmation (RR + existing trend classifier). RR_ONLY and
+  // RR_TREND_OBSERVE hand the pipeline the UNTOUCHED RR-only evaluations;
+  // only RR_TREND_ENFORCED lets the confirmed set drive entries. Missing
+  // setting/column => OBSERVE (never ENFORCED by accident).
+  const directionMode = parseDirectionConfirmationMode(settings.direction_confirmation_mode);
+  const latestCloseDate = historicalCloses.length ? historicalCloses.reduce((m, c) => (c.date > m ? c.date : m), historicalCloses[0].date) : null;
+  const confirmed = evaluateExpiriesWithConfirmation(enriched, {
+    lotSize: lotSize && lotSize > 0 ? lotSize : 1,
+    wingWidths,
+    minDte: effectiveMinDte,
+    maxDte: settings.max_dte,
+    ivRank: primaryIvRank,
+    historicalCloses,
+  }, {
+    mode: directionMode,
+    trend: normalizeTrend(marketRegime?.trend ?? null, latestCloseDate, todayIST),
+    trendDetail: marketRegime?.trend
+      ? { spotVsEmaSlowPct: marketRegime.trend.spotVsEmaSlowPct, emaFastVsSlowPct: marketRegime.trend.emaFastVsSlowPct } : null,
+  });
+  const evaluations = confirmed.evaluations;
+  const thresholds: DecisionThresholds = {
+    noTradeBelow: settings.no_trade_below,
+    watchBelow: settings.watch_below,
+    highConvictionAtOrAbove: settings.high_conviction_at_or_above,
+  };
+
+  // (Market regime — independent of skew — is computed above, before the optimizer.)
+  let decision = decideTrade(evaluations, thresholds, marketRegime);
+
+  // Direction-confirmation telemetry: what the RR-only decision and the
+  // confirmed decision each would do, persisted per evaluated expiry. In
+  // OBSERVE this is purely observational — `decision` above is the RR-only
+  // decision and nothing here can reach a broker order.
+  if (directionMode !== 'RR_ONLY') {
+    const originalDecision = decideTrade(confirmed.original, thresholds, marketRegime);
+    const proposedDecision = confirmed.proposed ? decideTrade(confirmed.proposed, thresholds, marketRegime) : null;
+    const eligible = (d: typeof decision | null, expiry: number) =>
+      !!d && d.action !== 'NO_TRADE' && !!d.expiryEvaluation?.best && d.expiryEvaluation.expiry === expiry;
+    await persistDirectionConfirmation(supabase, symbol, scanId, directionMode, confirmed.telemetry.map((t) => ({
+      ...t, entryEligibleOriginal: eligible(originalDecision, t.expiry), entryEligibleProposed: eligible(proposedDecision, t.expiry),
+    })), sharedLog);
+    if (directionMode === 'RR_TREND_ENFORCED') {
+      const chosen = confirmed.telemetry.find((t) => t.expiry === decision.expiryEvaluation?.expiry);
+      if (chosen) decision = { ...decision, explanation: `${decision.explanation}\nDirection confirmation (${chosen.reasonCode}): ${chosen.reason} Original RR-only structure: ${chosen.originalStructure}.` };
+    }
+  }
   const diagnostics = {
     spot, symbol, scannedAt: new Date(now).toISOString(),
     eligibleExpiries, rejectedRows: rejected.length,
@@ -1372,6 +1437,7 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     currentAtmIvForRank,
     ivRankByLookback,
     marketRegime,
+    directionConfirmation: { mode: directionMode, telemetry: confirmed.telemetry },
     evaluations: evaluations.map(serializeExpiryEvaluation),
   };
 
@@ -3103,6 +3169,11 @@ async function handleSettings(req: any, res: any, supabase: SupabaseClient) {
       res.status(400).json({ error: 'bad_request', message: `execution_mode must be OFF, PAPER, SHADOW, or AUTO — ALERT_ONLY/SEMI_AUTO aren't implemented yet.` });
       return;
     }
+    if (body.direction_confirmation_mode !== undefined &&
+        !['RR_ONLY', 'RR_TREND_OBSERVE', 'RR_TREND_ENFORCED'].includes(body.direction_confirmation_mode)) {
+      res.status(400).json({ error: 'bad_request', message: 'direction_confirmation_mode must be RR_ONLY, RR_TREND_OBSERVE, or RR_TREND_ENFORCED.' });
+      return;
+    }
     // Independent per-profile toggles (migration 019) — once any of these
     // is explicitly set, executionProfiles.ts's derivation switches this
     // settings row over to multi-profile semantics and execution_mode is
@@ -3145,6 +3216,7 @@ async function handleSettings(req: any, res: any, supabase: SupabaseClient) {
     if (body.shadow_enabled !== undefined) update.shadow_enabled = body.shadow_enabled;
     if (body.auto_enabled !== undefined) update.auto_enabled = body.auto_enabled;
     if (body.active_broker !== undefined) update.active_broker = body.active_broker;
+    if (body.direction_confirmation_mode !== undefined) update.direction_confirmation_mode = body.direction_confirmation_mode;
     if (body.paused_symbols !== undefined) update.paused_symbols = body.paused_symbols;
     if (body.manually_allowed_tradingsymbols !== undefined) update.manually_allowed_tradingsymbols = body.manually_allowed_tradingsymbols;
     for (const key of EDITABLE_SETTINGS_FIELDS) {

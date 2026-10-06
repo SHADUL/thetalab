@@ -405,3 +405,8 @@ alter table forward_validation_runs add constraint forward_validation_runs_statu
 -- Atomic claim: no two ACTIVE runs for the same symbol+baseline_version at once.
 create unique index if not exists forward_validation_runs_one_active_per_symbol_baseline_idx
   on forward_validation_runs (symbol, baseline_version) where status = 'ACTIVE';
+
+
+-- Migration 021: direction confirmation (RR + trend). See migrations/021_direction_confirmation.sql
+-- options_autotrade_settings.direction_confirmation_mode text default 'RR_TREND_OBSERVE'
+-- options_direction_confirmation_log: per-evaluated-expiry telemetry (RR, trend, proposed structure, reason code, optimizer/score, eligibility)

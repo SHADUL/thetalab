@@ -80,7 +80,19 @@ export interface ExpirySelectorParams {
   /** Excludes expiries with more days to expiry than this. Default 60. */
   maxDte?: number;
   weights?: TradeQualityWeights;
+  /**
+   * Optional hook run per expiry AFTER the RR-derived bias is known and
+   * BEFORE the strike/wing optimizer runs (see directionConfirmation.ts).
+   * Returns the structure to optimize, or label:null to decline this
+   * expiry outright (no candidates are generated). Omitted => behavior is
+   * exactly the original RR-only mapping.
+   */
+  strategyLabelPolicy?: StrategyLabelPolicy;
 }
+
+export type StrategyLabelPolicy = (ctx: {
+  expiry: number; dte: number; bias: Bias; biasReason: string; riskReversal: number | null;
+}) => { label: StrikeOptimizerParams['strategyLabel'] } | { label: null; reason: string };
 
 export interface ExpiryEvaluation {
   expiry: number;
@@ -88,6 +100,8 @@ export interface ExpiryEvaluation {
   bias: Bias;
   biasReason: string;
   strategyLabel: StrikeOptimizerParams['strategyLabel'];
+  /** Raw 25-delta risk reversal (call IV - put IV) for this expiry, null when no usable skew reading existed. */
+  riskReversal?: number | null;
   candidateCount: number;
   failureCount: number;
   /** The single best candidate for this expiry, ranked by evPerUnitRisk — null if none priced. */
@@ -130,8 +144,20 @@ function evaluateOne(slice: EnrichedSlice, params: ExpirySelectorParams): Expiry
   const atmIv = atmIvOf(slice);
   const skew = computeSkew(slice, atmIv);
   const { bias, reason: biasReason } = classifyBias(skew, params.skewThreshold);
-  const strategyLabel: StrikeOptimizerParams['strategyLabel'] =
+  const riskReversal = skew ? skew.riskReversal : null;
+  let strategyLabel: StrikeOptimizerParams['strategyLabel'] =
     bias === 'bullish' ? 'Bull Put Spread' : bias === 'bearish' ? 'Bear Call Spread' : 'Iron Condor';
+  if (params.strategyLabelPolicy) {
+    const chosen = params.strategyLabelPolicy({ expiry: slice.expiry, dte, bias, biasReason, riskReversal });
+    if (chosen.label === null) {
+      return {
+        expiry: slice.expiry, dte, bias, biasReason, strategyLabel, riskReversal,
+        candidateCount: 0, failureCount: 0, best: null, premiumEdge: null,
+        skipReason: `Direction confirmation declined this expiry: ${chosen.reason}`,
+      };
+    }
+    strategyLabel = chosen.label;
+  }
 
   const premiumEdge = computePremiumEdgeForExpiry(slice, atmIv, dte, params.historicalCloses);
 
@@ -143,7 +169,7 @@ function evaluateOne(slice: EnrichedSlice, params: ExpirySelectorParams): Expiry
   if (candidates.length === 0) {
     const reasons = [...new Set(failures.map((f) => f.reason))].slice(0, 3).join('; ');
     return {
-      expiry: slice.expiry, dte, bias, biasReason, strategyLabel,
+      expiry: slice.expiry, dte, bias, biasReason, strategyLabel, riskReversal,
       candidateCount: 0, failureCount: failures.length, best: null, premiumEdge,
       skipReason: `No candidate priced for this expiry${reasons ? ` (${reasons})` : ''}.`,
     };
@@ -179,7 +205,7 @@ function evaluateOne(slice: EnrichedSlice, params: ExpirySelectorParams): Expiry
   );
 
   return {
-    expiry: slice.expiry, dte, bias, biasReason, strategyLabel,
+    expiry: slice.expiry, dte, bias, biasReason, strategyLabel, riskReversal,
     candidateCount: candidates.length, failureCount: failures.length,
     best: { ...top, qualityScore }, premiumEdge, skipReason: null,
   };

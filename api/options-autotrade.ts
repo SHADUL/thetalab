@@ -4658,5 +4658,21 @@ async function handleAlphaLadderHealth(req: any, res: any, supabase: SupabaseCli
     supabase.from('alpha_ladder_feed_gaps').select('*').order('created_at', { ascending: false }).limit(20),
   ]);
   if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
-  res.status(200).json({ health: health ?? [], gaps: gaps ?? [] });
+  // Session integrity is separate from worker health: a HEALTHY worker can
+  // still be on an incomplete path. The worker persists an invalidation as a
+  // feed-gap row whose reason starts with its code; today's session (since
+  // 09:15 IST) is INVALID_FOR_NEW_SIGNAL if any such row exists.
+  const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const sessionOpenMs = Date.parse(`${todayIST}T09:15:00+05:30`);
+  const invalidating = (gaps ?? []).find((g: any) =>
+    Date.parse(g.gap_start) >= sessionOpenMs &&
+    (String(g.reason).startsWith('LATE_SESSION_START') || String(g.reason).startsWith('UNRECOVERABLE_FEED_GAP')));
+  const sessionIntegrity = invalidating
+    ? {
+        sessionQuality: 'INVALID_FOR_NEW_SIGNAL',
+        reason: String(invalidating.reason).split(':')[0],
+        detail: String(invalidating.reason).slice(String(invalidating.reason).indexOf(':') + 1).trim(),
+      }
+    : { sessionQuality: 'VALID', reason: null, detail: null };
+  res.status(200).json({ health: health ?? [], gaps: gaps ?? [], sessionIntegrity });
 }

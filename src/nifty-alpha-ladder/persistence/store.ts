@@ -120,6 +120,19 @@ export interface AlphaLadderStore {
   // --- accumulator checkpoint (partial-bucket recovery) ---
   saveAccumulatorCheckpoint(sessionDate: string, checkpoint: AccumulatorCheckpoint): Promise<void>;
   loadAccumulatorCheckpoint(sessionDate: string): Promise<AccumulatorCheckpoint | null>;
+
+  // --- feed gaps / session integrity (a gap row IS the durable invalidation record) ---
+  insertFeedGap(row: FeedGapRow): Promise<void>;
+  getFeedGapsSince(sinceIso: string): Promise<FeedGapRow[]>;
+}
+
+export interface FeedGapRow {
+  connectionGeneration: number;
+  gapStart: string;
+  gapEnd: string | null;
+  durationMs: number | null;
+  /** Prefixed with the SessionIntegrityReason code, e.g. "LATE_SESSION_START: Late start — ...". */
+  reason: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +159,7 @@ export function createInMemoryAlphaLadderStore(): AlphaLadderStore {
   const workerHealth: WorkerHealthRow[] = [];
   const activityLog: Array<{ level: string; message: string; detail?: unknown; callId?: number; positionId?: number }> = [];
   const checkpoints = new Map<string, AccumulatorCheckpoint>();
+  const feedGaps: FeedGapRow[] = [];
 
   return {
     async getSignalByWeekKey(weekKey) {
@@ -225,6 +239,12 @@ export function createInMemoryAlphaLadderStore(): AlphaLadderStore {
     },
     async loadAccumulatorCheckpoint(sessionDate) {
       return checkpoints.get(sessionDate) ?? null;
+    },
+    async insertFeedGap(row) {
+      feedGaps.push(row);
+    },
+    async getFeedGapsSince(sinceIso) {
+      return feedGaps.filter((g) => Date.parse(g.gapStart) >= Date.parse(sinceIso));
     },
   };
 }
@@ -361,6 +381,18 @@ export function createSupabaseAlphaLadderStore(client: SupabaseClient): AlphaLad
         pendingWindowObservations: { b: data.pending_window_observations_bid, a: data.pending_window_observations_ask },
         lastWindowFoldedAtMs: data.last_window_folded_at_ms,
       };
+    },
+    async insertFeedGap(row) {
+      await client.from('alpha_ladder_feed_gaps').insert({
+        connection_generation: row.connectionGeneration, gap_start: row.gapStart, gap_end: row.gapEnd,
+        duration_ms: row.durationMs, reason: row.reason,
+      });
+    },
+    async getFeedGapsSince(sinceIso) {
+      const { data } = await client.from('alpha_ladder_feed_gaps').select('*').gte('gap_start', sinceIso);
+      return (data ?? []).map((g: any) => ({
+        connectionGeneration: g.connection_generation, gapStart: g.gap_start, gapEnd: g.gap_end, durationMs: g.duration_ms, reason: g.reason,
+      }));
     },
   };
 }

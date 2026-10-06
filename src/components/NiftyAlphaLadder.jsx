@@ -111,13 +111,24 @@ function MonitorCard() {
 
 function HealthCard({ health }) {
   const latest = health?.health?.[0];
+  const integrity = health?.sessionIntegrity;
+  const invalid = integrity?.sessionQuality === "INVALID_FOR_NEW_SIGNAL";
   return (
-    <div className="rounded-[var(--radius-md)] p-2.5 flex items-center justify-between" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
-      <div className="flex items-center gap-4 text-[11px]">
-        <div><span className="text-faint">Market feed</span> <span className="font-semibold ml-1">{latest?.status ?? "no worker running"}</span></div>
-        <div><span className="text-faint">Depth source</span> <span className="font-semibold ml-1">Nearest NIFTY Future</span></div>
+    <div className="rounded-[var(--radius-md)] p-2.5" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-4 text-[11px]">
+          <div><span className="text-faint">Market feed</span> <span className="font-semibold ml-1">{latest?.status ?? "no worker running"}</span></div>
+          <div><span className="text-faint">Depth source</span> <span className="font-semibold ml-1">Nearest NIFTY Future</span></div>
+        </div>
+        <span className="text-[10px] text-faint">{latest ? new Date(latest.updated_at).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" }) : "—"}</span>
       </div>
-      <span className="text-[10px] text-faint">{latest ? new Date(latest.updated_at).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" }) : "—"}</span>
+      {integrity && (
+        <div className="mt-1.5 pt-1.5 text-[11px]" style={{ borderTop: "1px solid var(--c-line)" }}>
+          <span className="text-faint">SESSION QUALITY</span>{" "}
+          <span className={`font-semibold ml-1 ${invalid ? "text-loss" : "text-gain"}`}>{invalid ? "INVALID FOR NEW SIGNAL" : "VALID"}</span>
+          {invalid && integrity.detail && <div className="text-[10.5px] text-faint mt-0.5">Reason: {integrity.detail}</div>}
+        </div>
+      )}
     </div>
   );
 }

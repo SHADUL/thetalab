@@ -95,7 +95,16 @@ export function ingest(state: SessionAccumulatorState, observations: DepthLevelO
         if (obs.side === 'b') bidQty += obs.quantity; else askQty += obs.quantity;
       }
     }
-    state.aggregateSnapshots.push({ timeSec: (intervalEnd - state.sessionOriginMs) / 1000, bidQty, askQty });
+    // A bucket with ZERO observations is a bucket in which this process saw
+    // no market data at all (a late start, or the downtime of a restart) —
+    // missing observation, not "zero imbalance". Emitting {0,0} would feed
+    // a fabricated flat segment into cumulative G2/A2, so no snapshot is
+    // emitted; the interval still advances so the loop stays aligned to the
+    // 09:15 grid. Callers detect the resulting discontinuity via
+    // sessionIntegrity.ts and invalidate the session for new signals.
+    if (inInterval.length > 0) {
+      state.aggregateSnapshots.push({ timeSec: (intervalEnd - state.sessionOriginMs) / 1000, bidQty, askQty });
+    }
     state.pendingIntervalObservations = state.pendingIntervalObservations.filter((o) => o.timestampMs > intervalEnd);
     state.lastIntervalEndMs = intervalEnd;
   }

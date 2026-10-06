@@ -38,6 +38,7 @@ import { createSupabaseAlphaLadderStore } from '../persistence/store.ts';
 import { isTradingDay, isSignalWeekday } from '../calendar/signalCalendar.ts';
 import { nowIST, isWithinSignalWindow, isMarketOpen, MARKET_OPEN_MIN, SIGNAL_CUTOFF_MIN } from '../calendar/istClock.ts';
 import { fetchNfoInstrumentsCsv, parseNfoFutures, resolveNearestFuture } from '../live/futuresResolver.ts';
+import { assessSessionIntegrity, type SessionIntegrity, type SessionIntegrityReason } from '../live/sessionIntegrity.ts';
 
 /** Seconds from session origin (09:15 IST) to the 14:30 IST cutoff — a fixed constant every day, since both are IST clock times measured from the same origin. */
 const CUTOFF_SEC_FROM_ORIGIN = (SIGNAL_CUTOFF_MIN - MARKET_OPEN_MIN) * 60;
@@ -136,6 +137,43 @@ async function main() {
     tradingsymbol: resolvedFuture.tradingsymbol, instrumentToken: resolvedFuture.instrumentToken, expiry: resolvedFuture.expiry,
   });
   await store.logActivity('info', `Resolved and subscribed to nearest NIFTY future: ${resolvedFuture.tradingsymbol} (token ${resolvedFuture.instrumentToken}, expiry ${resolvedFuture.expiry}).`);
+
+  // Session-integrity guard (separate from worker health): a signal needs
+  // continuous coverage from 09:15, so a start after the open with nothing
+  // durable proving prior continuous observation invalidates the session
+  // for NEW signals. The invalidation is persisted as a feed-gap row so it
+  // survives restarts and is what the dashboard reads. Worker health is
+  // unaffected — HEALTHY and INVALID_FOR_NEW_SIGNAL can both be true.
+  const collectionStartMs = Date.now();
+  const startIST = nowIST(collectionStartMs);
+  const sessionStillRelevant = isTradingDay(new Date(`${startIST.dateISO}T00:00:00Z`)) &&
+    (startIST.minutesSinceMidnight < MARKET_OPEN_MIN || isMarketOpen(startIST.minutesSinceMidnight));
+  if (sessionStillRelevant) {
+    const gapsToday = await store.getFeedGapsSince(new Date(sessionOriginMs).toISOString());
+    const priorGap = gapsToday.find((g) => g.reason.startsWith('LATE_SESSION_START') || g.reason.startsWith('UNRECOVERABLE_FEED_GAP'));
+    const priorInvalidation: SessionIntegrity | null = priorGap ? {
+      valid: false,
+      reason: priorGap.reason.split(':')[0] as SessionIntegrityReason,
+      detail: priorGap.reason.slice(priorGap.reason.indexOf(':') + 1).trim(),
+    } : null;
+    const integrity = assessSessionIntegrity({
+      startMs: collectionStartMs, sessionOriginMs, checkpoint: existingCheckpoint,
+      gapDetected: restoreDecision.gapDetected, gapDurationMs: restoreDecision.gapDurationMs, priorInvalidation,
+    });
+    if (!integrity.valid) {
+      hasUnrecoverableGapToday = true;
+      if (!priorInvalidation) {
+        await store.insertFeedGap({
+          connectionGeneration: depthSource.getHealth().connectionGeneration,
+          gapStart: new Date(sessionOriginMs).toISOString(), gapEnd: new Date(collectionStartMs).toISOString(),
+          durationMs: collectionStartMs - sessionOriginMs, reason: `${integrity.reason}: ${integrity.detail}`,
+        });
+        if (integrity.reason === 'LATE_SESSION_START') {
+          await store.logActivity('error', `${integrity.detail}. Session marked INVALID_FOR_NEW_SIGNAL; missing intervals were NOT filled with zero observations.`);
+        }
+      }
+    }
+  }
 
   await store.insertWorkerHealth({
     workerInstance: WORKER_INSTANCE, connectionGeneration: depthSource.getHealth().connectionGeneration,

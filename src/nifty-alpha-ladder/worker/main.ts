@@ -40,6 +40,8 @@ import { nowIST, isWithinSignalWindow, isMarketOpen, MARKET_OPEN_MIN, SIGNAL_CUT
 import { fetchNfoInstrumentsCsv, parseNfoFutures, resolveNearestFuture } from '../live/futuresResolver.ts';
 import { handleFiredSignal } from './signalIntake.ts';
 import { computeOrderFlowFeatures } from '../live/orderFlowFeatures.ts';
+import { chooseStartingReferenceState, buildPersistedState, shouldPersistReference, type ReferenceSource } from '../live/referenceState.ts';
+import { THETA } from '../parameters.ts';
 import { assessSessionIntegrity, type SessionIntegrity, type SessionIntegrityReason } from '../live/sessionIntegrity.ts';
 
 /** Seconds from session origin (09:15 IST) to the 14:30 IST cutoff — a fixed constant every day, since both are IST clock times measured from the same origin. */
@@ -134,6 +136,52 @@ async function main() {
     throw new Error(`No non-expired NIFTY future found in Kite's instrument dump as of ${todayIST} — refusing to start with no instrument to subscribe.`);
   }
 
+  // Cross-session G1 reference state (persistence plumbing only — the
+  // recursion/quantile/window/warm-up logic is untouched). A same-day
+  // checkpoint is authoritative (it already holds in-session progress); on
+  // a fresh session the persisted state is restored ONLY if it was built
+  // from this same futures contract, otherwise the warm-up restarts for the
+  // new contract with the reason logged. Seeded BEFORE connecting so no tick
+  // is ever ingested against an unseeded estimator.
+  const referenceSource: ReferenceSource = { instrumentToken: resolvedFuture.instrumentToken, tradingsymbol: resolvedFuture.tradingsymbol };
+  let persistedBid: unknown = null;
+  let persistedAsk: unknown = null;
+  if (!existingCheckpoint) {
+    try {
+      [persistedBid, persistedAsk] = await Promise.all([store.loadReferenceState('b'), store.loadReferenceState('a')]);
+    } catch (err: any) {
+      await store.logActivity('error', `Could not load persisted G1 reference state (${err.message}) — starting reference warm-up from zero.`);
+    }
+  }
+  const startingReference = chooseStartingReferenceState({ checkpoint: existingCheckpoint, persistedBid, persistedAsk, source: referenceSource, nowMs: Date.now() });
+  if (accumulator && startingReference.origin === 'PERSISTED') accumulator.referenceThresholds = startingReference.state;
+  {
+    const warm = THETA.LARGE_ORDER_WARMUP_COUNT;
+    const describe = (label: string, side: 'b' | 'a') => {
+      const o = startingReference.outcomes[side];
+      return `${label} ${startingReference.state[side].cumulativeCount}/${warm}${o ? (o.restored ? ' (restored)' : ` (reset: ${o.reason} — ${o.detail})`) : ' (from today\'s checkpoint)'}`;
+    };
+    await store.logActivity(startingReference.outcomes.b?.reason === 'SOURCE_CHANGED' || startingReference.outcomes.a?.reason === 'SOURCE_CHANGED' ? 'error' : 'info',
+      `G1 reference warm-up on ${referenceSource.tradingsymbol}: ${describe('BID', 'b')}; ${describe('ASK', 'a')}.`);
+  }
+
+  let lastPersistedFoldMs: number | null = null;
+  let referencePersistFailureLogged = false;
+  const persistReference = async (why: string) => {
+    if (!accumulator) return;
+    try {
+      for (const side of ['b', 'a'] as const) {
+        await store.saveReferenceState(buildPersistedState(side, accumulator.referenceThresholds[side], referenceSource, accumulator.lastWindowFoldedAtMs, Date.now()));
+      }
+      lastPersistedFoldMs = accumulator.lastWindowFoldedAtMs;
+    } catch (err: any) {
+      if (!referencePersistFailureLogged) {
+        referencePersistFailureLogged = true;
+        await store.logActivity('error', `G1 reference-state persistence failed (${why}): ${err.message} — is migration 004 applied?`);
+      }
+    }
+  };
+
   await depthSource.connect();
   await depthSource.subscribe({
     tradingsymbol: resolvedFuture.tradingsymbol, instrumentToken: resolvedFuture.instrumentToken, expiry: resolvedFuture.expiry,
@@ -185,8 +233,12 @@ async function main() {
 
   // Persist the checkpoint on a fixed cadence — never only on clean
   // shutdown, since a real restart is by definition NOT a clean shutdown.
+  await persistReference('startup');
   setInterval(() => {
     if (accumulator) store.saveAccumulatorCheckpoint(todayIST, serializeCheckpoint(accumulator));
+    // The estimator only changes when a 15-minute reference window completes,
+    // so persist exactly then (idempotent upsert, at most one save per fold).
+    if (accumulator && shouldPersistReference(lastPersistedFoldMs, accumulator.lastWindowFoldedAtMs)) void persistReference('window');
   }, CHECKPOINT_SAVE_MS);
 
   setInterval(async () => {

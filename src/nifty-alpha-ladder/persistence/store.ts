@@ -19,6 +19,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Direction, ExecutionMode, LegSide, OptionRight, SignalRecord, SignalPath, SignedDirection } from '../types.ts';
 import type { AccumulatorCheckpoint } from '../live/sessionAccumulator.ts';
 import type { OrderFlowFeatures } from '../live/orderFlowFeatures.ts';
+import type { PersistedReferenceState } from '../live/referenceState.ts';
 
 export type CallKind = 'MONITOR' | 'STRUCTURE';
 export type CallStatus = 'PUBLISHED' | 'LIVE' | 'EXIT_REQUESTED' | 'EXITING' | 'CLOSED' | 'LEFTOVER_ALERT';
@@ -111,6 +112,10 @@ export interface AlphaLadderStore {
   getReferenceThreshold(side: 'b' | 'a'): Promise<{ cumulativeCount: number; runningThreshold: number }>;
   setReferenceThreshold(side: 'b' | 'a', state: { cumulativeCount: number; runningThreshold: number }): Promise<void>;
 
+  // --- cross-session reference state (source-keyed; see live/referenceState.ts) ---
+  loadReferenceState(side: 'b' | 'a'): Promise<PersistedReferenceState | null>;
+  saveReferenceState(row: PersistedReferenceState): Promise<void>;
+
   // --- worker health ---
   insertWorkerHealth(row: Omit<WorkerHealthRow, 'id'>): Promise<WorkerHealthRow>;
   getLatestWorkerHealth(workerInstance: string): Promise<WorkerHealthRow | null>;
@@ -181,6 +186,7 @@ export function createInMemoryAlphaLadderStore(initialSettings: AlphaLadderSetti
   const activityLog: Array<{ level: string; message: string; detail?: unknown; callId?: number; positionId?: number }> = [];
   const checkpoints = new Map<string, AccumulatorCheckpoint>();
   const feedGaps: FeedGapRow[] = [];
+  const referenceStates = new Map<'b' | 'a', PersistedReferenceState>();
   const orderFlowFeatures: OrderFlowFeatureRow[] = [];
   const settings: AlphaLadderSettings | null = initialSettings;
 
@@ -244,6 +250,12 @@ export function createInMemoryAlphaLadderStore(initialSettings: AlphaLadderSetti
     },
     async setReferenceThreshold(side, state) {
       referenceThresholds.set(side, state);
+    },
+    async loadReferenceState(side) {
+      return referenceStates.get(side) ?? null;
+    },
+    async saveReferenceState(row) {
+      referenceStates.set(row.side, row);
     },
     async insertWorkerHealth(row) {
       const stored: WorkerHealthRow = { id: ++workerHealthId, ...row };
@@ -355,6 +367,25 @@ export function createSupabaseAlphaLadderStore(client: SupabaseClient): AlphaLad
     },
     async setReferenceThreshold(side, state) {
       await client.from('alpha_ladder_large_order_reference').upsert({ side, cumulative_count: state.cumulativeCount, running_threshold: state.runningThreshold, updated_at: new Date().toISOString() });
+    },
+    async loadReferenceState(side) {
+      const { data } = await client.from('alpha_ladder_large_order_reference').select('*').eq('side', side).maybeSingle();
+      if (!data) return null;
+      return {
+        side: data.side, sourceInstrumentToken: data.source_instrument_token, sourceTradingsymbol: data.source_tradingsymbol,
+        cumulativeCount: Number(data.cumulative_count), runningThreshold: Number(data.running_threshold),
+        lastWindowFoldedAtMs: Number(data.last_window_folded_at_ms), strategyVersion: data.strategy_version, sourceMode: data.source_mode,
+        updatedAtMs: Date.parse(data.updated_at),
+      } as PersistedReferenceState;
+    },
+    async saveReferenceState(row) {
+      const { error } = await client.from('alpha_ladder_large_order_reference').upsert({
+        side: row.side, cumulative_count: row.cumulativeCount, running_threshold: row.runningThreshold,
+        source_instrument_token: row.sourceInstrumentToken, source_tradingsymbol: row.sourceTradingsymbol,
+        last_window_folded_at_ms: row.lastWindowFoldedAtMs, strategy_version: row.strategyVersion, source_mode: row.sourceMode,
+        updated_at: new Date(row.updatedAtMs).toISOString(),
+      });
+      if (error) throw new Error(error.message);
     },
     async insertWorkerHealth(row) {
       const { data } = await client

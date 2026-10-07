@@ -1066,6 +1066,28 @@ async function recordOrderFlowObservation(
 }
 
 /**
+ * Reads every row of a query, 1000 at a time. PostgREST/Supabase silently
+ * caps an unpaged select at 1000 rows — no error, just a truncated result —
+ * and options_instruments holds thousands of rows per symbol (it keeps
+ * expired expiries and years of far-dated ones). An unpaged read returned
+ * only the OLDEST (already-expired) expiries, so the scan saw a nearly
+ * empty chain near spot and ended silently with no entries.
+ */
+async function fetchAllPages<T = any>(
+  page: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
+): Promise<{ data: T[]; error: { message: string } | null }> {
+  const SIZE = 1000;
+  const out: T[] = [];
+  for (let from = 0; ; from += SIZE) {
+    const { data, error } = await page(from, from + SIZE - 1);
+    if (error) return { data: out, error };
+    out.push(...(data ?? []));
+    if (!data || data.length < SIZE) break;
+  }
+  return { data: out, error: null };
+}
+
+/**
  * Persists direction-confirmation telemetry, one row per evaluated expiry,
  * deduplicated to one row per (symbol, expiry, minute) so the 30-second scan
  * cadence doesn't double-write. Failure-tolerant by design: telemetry must
@@ -1218,8 +1240,14 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   if (!token) { res.status(200).json({ ok: true, skipped: 'no_kite_session' }); return; }
 
   // 1. Which expiries/strikes are actually available for this symbol.
-  const { data: instrumentRows, error: instrumentsErr } = await supabase
-    .from('options_instruments').select('*').eq('symbol', symbol).order('expiry', { ascending: true });
+  // Only expiries that can still be eligible (not yet expired, within the
+  // configured max DTE), and paged — see fetchAllPages for why an unpaged
+  // read here silently broke every scan once the table passed 1000 rows.
+  const maxExpiryISO = new Date(Date.parse(`${todayIST}T00:00:00Z`) + (Number(settings.max_dte) || 60) * 86_400_000).toISOString().slice(0, 10);
+  const { data: instrumentRows, error: instrumentsErr } = await fetchAllPages((from, to) => supabase
+    .from('options_instruments').select('*').eq('symbol', symbol)
+    .gte('expiry', todayIST).lte('expiry', maxExpiryISO)
+    .order('expiry', { ascending: true }).order('tradingsymbol', { ascending: true }).range(from, to));
   if (instrumentsErr) { res.status(502).json({ ok: false, error: 'supabase_error', message: instrumentsErr.message }); return; }
   if (!instrumentRows?.length) {
     res.status(200).json({ ok: true, skipped: 'no_instruments_synced', message: 'Run instruments-sync first.' });
@@ -2237,9 +2265,10 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
   if (growwBrokerPositions.length) {
     const expiries = [...new Set(growwBrokerPositions.map((p: any) => p.expiry))];
     const symbolsForLookup = [...new Set(growwBrokerPositions.map((p: any) => p.symbol))];
-    const { data: kiteInstrumentRows } = await supabase.from('options_instruments')
+    const { data: kiteInstrumentRows } = await fetchAllPages((from, to) => supabase.from('options_instruments')
       .select('symbol, expiry, strike, option_right, tradingsymbol')
-      .in('symbol', symbolsForLookup).in('expiry', expiries);
+      .in('symbol', symbolsForLookup).in('expiry', expiries)
+      .order('tradingsymbol', { ascending: true }).range(from, to));
     for (const p of growwBrokerPositions) {
       for (const l of (p.options_autotrade_legs ?? [])) {
         const match = (kiteInstrumentRows ?? []).find((r: any) =>

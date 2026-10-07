@@ -1582,7 +1582,15 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     // 2 ACTIVE PAPER positions (₹2,44,864 margin) were blocking every SHADOW
     // entry via maxMarginUtilization, despite zero ACTIVE SHADOW positions
     // existing.
-    const { data: openRows } = await supabase.from('options_autotrade_positions').select('*').eq('status', 'ACTIVE').eq('execution_mode', modeLabel);
+    // SHADOW additionally keeps one separate fixed-₹5L book PER BROKER: a
+    // Kite SHADOW position's margin must not eat into the Groww SHADOW
+    // book's cap (and vice versa) — found 2026-10-07 when Kite SHADOW
+    // positions (₹3.15L margin) left only ₹17k of a shared ₹4L cap, so
+    // Groww SHADOW could not open a 1-lot candidate despite its own book
+    // holding just one position. AUTO/PAPER pooling is deliberately unchanged.
+    let openQuery = supabase.from('options_autotrade_positions').select('*').eq('status', 'ACTIVE').eq('execution_mode', modeLabel);
+    if (isShadow) openQuery = openQuery.eq('broker', activeBroker);
+    const { data: openRows } = await openQuery;
     const openPositions: OpenPositionSummary[] = (openRows ?? []).map((p: any) => ({
       underlyingGroup: p.symbol,
       maxLoss: Number(p.max_loss) || 0,

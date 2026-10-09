@@ -14,6 +14,7 @@ create table if not exists alpha_edge_settings (
   updated_at timestamptz not null default now(),
   constraint alpha_edge_settings_singleton check (id = 1)
 );
+alter table alpha_edge_settings enable row level security;
 insert into alpha_edge_settings (id) values (1) on conflict (id) do nothing;
 
 create table if not exists alpha_edge_positions (

@@ -2249,7 +2249,10 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
   // reports the whole invocation's work, not just its last 8 seconds.
   const startedAt = Date.now();
   const SUB_INTERVAL_MS = 8_000;
-  const MAX_LOOP_MS = 50_000; // leaves ~10s of this function's 60s maxDuration for the final response/cleanup
+  // Must finish inside the external cron's 30 s request timeout (cron-job.org's
+  // maximum) — a longer loop made every run report "Failed (timeout)" and
+  // risked the scheduler auto-disabling the job that drives all exits.
+  const MAX_LOOP_MS = 25_000;
   let iterations = 0;
   let lastCheckedCount = 0;
   const closed: Array<{ positionId: number; symbol: string; reason: string | null; realizedPnl: number }> = [];
@@ -2258,6 +2261,7 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
 
   while (true) {
     iterations++;
+    const passStartedAt = Date.now();
     const { data: positions, error: posErr } = await supabase
       .from('options_autotrade_positions').select('*, options_autotrade_legs(*)').eq('status', 'ACTIVE');
     if (posErr) {
@@ -2764,8 +2768,10 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
     // FULL pass (quote batch + evaluate every position) — bailing out
     // mid-pass on a tight deadline would leave positions unevaluated this
     // invocation for no benefit, since the next cron tick covers them anyway.
+    // Budget for the wait PLUS another pass as long as this one took.
     const elapsedMs = Date.now() - startedAt;
-    if (elapsedMs + SUB_INTERVAL_MS > MAX_LOOP_MS) break;
+    const lastPassMs = Date.now() - passStartedAt;
+    if (elapsedMs + SUB_INTERVAL_MS + lastPassMs > MAX_LOOP_MS) break;
     await sleep(SUB_INTERVAL_MS);
   }
 

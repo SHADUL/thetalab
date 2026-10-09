@@ -4855,9 +4855,11 @@ async function handleAlphaLadderActivity(req: any, res: any, supabase: SupabaseC
 /** Worker health history — for the UI's "data quality" panel and expandable diagnostics. */
 async function handleAlphaLadderHealth(req: any, res: any, supabase: SupabaseClient) {
   if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
-  const [{ data: health, error }, { data: gaps }] = await Promise.all([
+  const [{ data: health, error }, { data: gaps }, { data: refRows }, { data: liveFeatures }] = await Promise.all([
     supabase.from('alpha_ladder_worker_health').select('*').order('updated_at', { ascending: false }).limit(20),
     supabase.from('alpha_ladder_feed_gaps').select('*').order('created_at', { ascending: false }).limit(20),
+    supabase.from('alpha_ladder_large_order_reference').select('side, cumulative_count, running_threshold, source_tradingsymbol'),
+    supabase.from('alpha_ladder_order_flow_features').select('*').order('created_at', { ascending: false }).limit(1).maybeSingle(),
   ]);
   if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
   // Session integrity is separate from worker health: a HEALTHY worker can
@@ -4876,7 +4878,13 @@ async function handleAlphaLadderHealth(req: any, res: any, supabase: SupabaseCli
         detail: String(invalidating.reason).slice(String(invalidating.reason).indexOf(':') + 1).trim(),
       }
     : { sessionQuality: 'VALID', reason: null, detail: null };
-  res.status(200).json({ health: health ?? [], gaps: gaps ?? [], sessionIntegrity });
+  const side = (k: string) => (refRows ?? []).find((r: any) => r.side === k);
+  const warmup = {
+    bid: Number(side('b')?.cumulative_count ?? 0), ask: Number(side('a')?.cumulative_count ?? 0), target: 150_000,
+    bidThreshold: side('b')?.running_threshold ?? null, askThreshold: side('a')?.running_threshold ?? null,
+    contract: side('b')?.source_tradingsymbol ?? null,
+  };
+  res.status(200).json({ health: health ?? [], gaps: gaps ?? [], sessionIntegrity, warmup, liveFeatures: liveFeatures ?? null });
 }
 
 

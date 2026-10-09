@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -6,6 +6,8 @@ import {
   Warning, CheckCircle, Hourglass, ChartLineUp, Waveform, CaretRight,
 } from "@phosphor-icons/react";
 import { inr } from "./swingFormat.js";
+import { OAT_VARS, EASE, dirLabel, dirTone, signed, pts, istNow, msToNextWindow, fmtDuration, useTicker } from "./alphaFormat.js";
+import { Card, Pill, Stat, Toggle, PayoffChart, EngineCard, ActivityCard } from "./alphaUi.jsx";
 
 // Nifty Alpha Edge (hedged131) — weekly order-flow-directed vertical
 // credit spread. Reads one consolidated summary from the API; every action
@@ -13,163 +15,9 @@ import { inr } from "./swingFormat.js";
 // endpoint. AUTO can only be switched on with a typed confirmation.
 
 const API = "/api/options-autotrade";
+const POLL_MS = 20_000;
 // The page's --oat-* tokens are scoped to .oat-page; portalled UI (the
 // settings drawer) lives outside it and needs them passed explicitly.
-const OAT_VARS = { "--oat-accent": "#5A55F7", "--oat-accent-2": "#6A63FF", "--oat-blue": "#3B82F6", "--oat-hairline": "rgba(20, 30, 55, 0.07)" };
-const POLL_MS = 20_000;
-const EASE = [0.2, 0.8, 0.2, 1];
-
-const dirLabel = (d) => (d > 0 ? "BULLISH" : d < 0 ? "BEARISH" : "—");
-const dirTone = (d) => (d > 0 ? "var(--c-gain)" : d < 0 ? "var(--c-loss)" : "var(--c-muted)");
-const signed = (n) => (n == null ? "—" : `${n >= 0 ? "+" : "−"}${inr(Math.abs(n))}`);
-const pts = (n, dp = 2) => (n == null ? "—" : Number(n).toFixed(dp));
-
-function istNow() {
-  const p = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, weekday: "short" }).formatToParts(new Date());
-  const g = (t) => p.find((x) => x.type === t)?.value;
-  return { date: `${g("year")}-${g("month")}-${g("day")}`, h: Number(g("hour")) % 24, m: Number(g("minute")), s: Number(g("second")), wd: g("weekday") };
-}
-
-/** Milliseconds until the next Wednesday 09:31 IST signal window (0 while a window is open). */
-function msToNextWindow() {
-  const n = istNow();
-  const order = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-  const today = order.indexOf(n.wd);
-  const minutes = n.h * 60 + n.m;
-  if (today === 3 && minutes >= 571 && minutes <= 871) return 0;
-  let days = (3 - today + 7) % 7;
-  if (days === 0 && minutes > 871) days = 7;
-  const secondsToday = n.h * 3600 + n.m * 60 + n.s;
-  return (days * 86400 + 571 * 60 - secondsToday) * 1000;
-}
-
-function fmtDuration(ms) {
-  if (ms <= 0) return "now";
-  const s = Math.floor(ms / 1000);
-  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
-  return d > 0 ? `${d}d ${h}h ${m}m` : h > 0 ? `${h}h ${m}m` : `${m}m ${s % 60}s`;
-}
-
-function useTicker(ms = 1000) {
-  const [, set] = useState(0);
-  useEffect(() => { const t = setInterval(() => set((x) => x + 1), ms); return () => clearInterval(t); }, [ms]);
-}
-
-// ------------------------------------------------------------------ primitives
-
-function Card({ title, icon: Icon, right, children, className = "", delay = 0 }) {
-  return (
-    <motion.section
-      initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.35, ease: EASE, delay }}
-      className={`oat-glass rounded-[var(--radius-lg)] p-4 sm:p-5 ${className}`}
-    >
-      {(title || right) && (
-        <div className="flex items-center justify-between gap-3 mb-3.5">
-          <div className="flex items-center gap-2">
-            {Icon && <span className="flex items-center justify-center rounded-[8px]" style={{ width: 26, height: 26, background: "var(--c-accent-soft)", color: "var(--oat-accent)" }}><Icon size={14} weight="bold" /></span>}
-            <h3 className="text-[12px] font-semibold tracking-wide text-muted uppercase">{title}</h3>
-          </div>
-          {right}
-        </div>
-      )}
-      {children}
-    </motion.section>
-  );
-}
-
-function Pill({ tone = "neutral", children, icon: Icon }) {
-  const tones = {
-    gain: { bg: "var(--c-gain-soft)", fg: "var(--c-gain)" },
-    loss: { bg: "var(--c-loss-soft)", fg: "var(--c-loss)" },
-    warn: { bg: "var(--c-warn-soft)", fg: "var(--c-warn)" },
-    accent: { bg: "var(--c-accent-soft)", fg: "var(--oat-accent)" },
-    neutral: { bg: "var(--c-surface-3)", fg: "var(--c-text-2)" },
-  }[tone];
-  return (
-    <span className="inline-flex items-center gap-1 rounded-full px-2 py-[3px] text-[10.5px] font-semibold tracking-wide whitespace-nowrap" style={{ background: tones.bg, color: tones.fg }}>
-      {Icon && <Icon size={11} weight="bold" />}{children}
-    </span>
-  );
-}
-
-function Stat({ label, value, tone, sub }) {
-  const color = tone === "gain" ? "var(--c-gain)" : tone === "loss" ? "var(--c-loss)" : "var(--c-text)";
-  return (
-    <div className="min-w-0">
-      <div className="text-[10.5px] font-semibold text-muted tracking-wide mb-1">{label}</div>
-      <div className="font-display text-[19px] sm:text-[21px] font-bold n leading-none truncate" style={{ color }}>{value}</div>
-      {sub && <div className="text-[10.5px] text-faint mt-1 truncate">{sub}</div>}
-    </div>
-  );
-}
-
-function Toggle({ on, onClick, disabled, label }) {
-  return (
-    <button onClick={onClick} disabled={disabled} aria-pressed={on} aria-label={label}
-      className="relative shrink-0 rounded-full transition-colors"
-      style={{ width: 36, height: 20, background: on ? "var(--oat-accent)" : "var(--c-line-2)", opacity: disabled ? 0.45 : 1 }}>
-      <motion.span layout transition={{ duration: 0.2, ease: EASE }} className="absolute top-[2px] rounded-full bg-white"
-        style={{ width: 16, height: 16, left: on ? 18 : 2, boxShadow: "0 1px 3px rgba(0,0,0,.2)" }} />
-    </button>
-  );
-}
-
-// ------------------------------------------------------------------ payoff chart
-
-function PayoffChart({ curve, position, spot }) {
-  const W = 640, H = 220, pad = { l: 8, r: 8, t: 14, b: 26 };
-  const view = useMemo(() => {
-    if (!curve?.length) return null;
-    const xs = curve.map((p) => p.spot), ys = curve.map((p) => p.pnl);
-    const minX = Math.min(...xs), maxX = Math.max(...xs);
-    const minY = Math.min(...ys, 0), maxY = Math.max(...ys, 0);
-    const span = maxY - minY || 1;
-    const x = (v) => pad.l + ((v - minX) / (maxX - minX)) * (W - pad.l - pad.r);
-    const y = (v) => pad.t + (1 - (v - (minY - span * 0.08)) / (span * 1.16)) * (H - pad.t - pad.b);
-    const line = curve.map((p, i) => `${i ? "L" : "M"}${x(p.spot).toFixed(1)},${y(p.pnl).toFixed(1)}`).join(" ");
-    const zero = y(0);
-    const area = `${line} L${x(maxX).toFixed(1)},${zero.toFixed(1)} L${x(minX).toFixed(1)},${zero.toFixed(1)} Z`;
-    return { x, y, line, area, zero, minX, maxX, maxY, minY };
-  }, [curve]);
-  if (!view) return null;
-  const atm = Number(position.atm), be = Number(position.breakeven);
-  const wing = atm + (position.direction < 0 ? 1 : -1) * Number(position.wing_points);
-  const inRange = (v) => v >= view.minX && v <= view.maxX;
-  const marker = (v, label, color, dash, top = false) => inRange(v) && (
-    <g key={label}>
-      <line x1={view.x(v)} x2={view.x(v)} y1={pad.t} y2={H - pad.b} stroke={color} strokeWidth="1" strokeDasharray={dash ? "3 3" : undefined} opacity="0.75" />
-      <text x={view.x(v)} y={top ? pad.t + 24 : H - 9} textAnchor="middle" fontSize="10" fill={color} fontWeight="600"
-        stroke="var(--c-surface-2)" strokeWidth={top ? 3 : 0} paintOrder="stroke">{label}</text>
-    </g>
-  );
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto" role="img" aria-label="Payoff at expiry">
-      <defs>
-        <clipPath id="ane-above"><rect x="0" y="0" width={W} height={view.zero} /></clipPath>
-        <clipPath id="ane-below"><rect x="0" y={view.zero} width={W} height={H - view.zero} /></clipPath>
-        <linearGradient id="ane-gain" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="var(--c-gain)" stopOpacity="0.28" /><stop offset="100%" stopColor="var(--c-gain)" stopOpacity="0.02" /></linearGradient>
-        <linearGradient id="ane-loss" x1="0" y1="1" x2="0" y2="0"><stop offset="0%" stopColor="var(--c-loss)" stopOpacity="0.26" /><stop offset="100%" stopColor="var(--c-loss)" stopOpacity="0.02" /></linearGradient>
-      </defs>
-      <path d={view.area} fill="url(#ane-gain)" clipPath="url(#ane-above)" />
-      <path d={view.area} fill="url(#ane-loss)" clipPath="url(#ane-below)" />
-      <line x1={pad.l} x2={W - pad.r} y1={view.zero} y2={view.zero} stroke="var(--c-line-2)" strokeWidth="1" />
-      <path d={view.line} fill="none" stroke="var(--oat-accent)" strokeWidth="2" strokeLinejoin="round" />
-      {marker(atm, `ATM ${atm}`, "var(--c-text-2)", true)}
-      {marker(wing, `Wing ${wing}`, "var(--c-muted)", true)}
-      {Number.isFinite(be) && marker(be, `BE ${be.toFixed(0)}`, "var(--c-warn)", true, true)}
-      {spot && inRange(spot) && (
-        <g>
-          <line x1={view.x(spot)} x2={view.x(spot)} y1={pad.t} y2={H - pad.b} stroke="var(--oat-accent)" strokeWidth="1.5" />
-          <circle cx={view.x(spot)} cy={pad.t + 2} r="4" fill="var(--oat-accent)" />
-          <text x={view.x(spot) + 6} y={pad.t + 6} fontSize="10" fill="var(--oat-accent)" fontWeight="700">NIFTY {spot.toFixed(0)}</text>
-        </g>
-      )}
-      <text x={W - pad.r} y={view.y(view.maxY) - 4} textAnchor="end" fontSize="10" fill="var(--c-gain)" fontWeight="600">max gain {inr(view.maxY)}</text>
-      <text x={W - pad.r} y={view.y(view.minY) + 12} textAnchor="end" fontSize="10" fill="var(--c-loss)" fontWeight="600">max loss {inr(Math.abs(view.minY))}</text>
-    </svg>
-  );
-}
-
 // ------------------------------------------------------------------ cards
 
 function SignalCard({ signal, decision }) {
@@ -218,41 +66,6 @@ function SignalCard({ signal, decision }) {
   );
 }
 
-function EngineCard({ engine }) {
-  const pct = (n) => Math.min(100, (n / engine.warmup.target) * 100);
-  const ready = engine.warmup.bid >= engine.warmup.target && engine.warmup.ask >= engine.warmup.target;
-  const w = engine.worker;
-  const fresh = w && Date.now() - Date.parse(w.updated_at) < 3 * 60_000;
-  return (
-    <Card title="Signal engine" icon={Waveform} delay={0.1} right={<Pill tone={fresh && w.status === "HEALTHY" ? "gain" : "neutral"} icon={Pulse}>{fresh ? w.status : "OFFLINE"}</Pill>}>
-      <div className="flex flex-col gap-3">
-        {[["BID", engine.warmup.bid], ["ASK", engine.warmup.ask]].map(([k, v]) => (
-          <div key={k}>
-            <div className="flex items-center justify-between text-[10.5px] mb-1">
-              <span className="text-muted font-semibold">G1 warm-up · {k}</span>
-              <span className="n text-ink2">{Number(v).toLocaleString("en-IN")} / 150,000</span>
-            </div>
-            <div className="h-[6px] rounded-full overflow-hidden" style={{ background: "var(--c-surface-3)" }}>
-              <motion.div initial={{ width: 0 }} animate={{ width: `${pct(v)}%` }} transition={{ duration: 0.8, ease: EASE }} className="h-full rounded-full"
-                style={{ background: pct(v) >= 100 ? "var(--c-gain)" : "linear-gradient(90deg, var(--oat-accent), var(--oat-accent-2))" }} />
-            </div>
-          </div>
-        ))}
-        <div className="flex items-center justify-between text-[11px] pt-1">
-          <span className="text-muted">Large-order classifier</span>
-          <span className="font-semibold" style={{ color: ready ? "var(--c-gain)" : "var(--c-warn)" }}>{ready ? "ACTIVE" : "WARMING UP"}</span>
-        </div>
-        <div className="flex items-center justify-between text-[11px]">
-          <span className="text-muted">Today's session</span>
-          <span className="font-semibold" style={{ color: engine.sessionQuality === "VALID" ? "var(--c-gain)" : "var(--c-loss)" }}>{engine.sessionQuality === "VALID" ? "VALID" : "INVALID FOR NEW SIGNAL"}</span>
-        </div>
-        {engine.sessionReason && <div className="text-[10.5px] text-faint">{engine.sessionReason}</div>}
-        <div className="text-[10.5px] text-faint">Shared with Nifty Alpha Ladder — one NIFTY-futures depth feed, one weekly decision.</div>
-      </div>
-    </Card>
-  );
-}
-
 function PositionCard({ position, payoff, live, onClose, closing }) {
   if (!position) {
     return (
@@ -289,9 +102,13 @@ function PositionCard({ position, payoff, live, onClose, closing }) {
         <Stat label="Max loss" value={inr(position.max_loss ?? 0)} tone="loss" />
         <Stat label="Break-even" value={pts(position.breakeven, 1)} />
       </div>
-      {payoff && <div className="rounded-[12px] p-2 mb-4" style={{ background: "var(--c-surface-2)" }}><PayoffChart curve={payoff} position={position} spot={open ? live?.spot : null} /></div>}
+      {payoff && <div className="rounded-[12px] p-2 mb-4" style={{ background: "var(--c-surface-2)" }}><PayoffChart curve={payoff} spot={open ? live?.spot : null} markers={[
+        { value: Number(position.atm), label: `ATM ${position.atm}`, color: "var(--c-text-2)" },
+        { value: Number(position.atm) + (position.direction < 0 ? 1 : -1) * Number(position.wing_points), label: `Wing ${Number(position.atm) + (position.direction < 0 ? 1 : -1) * Number(position.wing_points)}`, color: "var(--c-muted)" },
+        { value: Number(position.breakeven), label: `BE ${Number(position.breakeven).toFixed(0)}`, color: "var(--c-warn)", top: true },
+      ]} /></div>}
       <div className="overflow-x-auto">
-        <table className="w-full text-[11.5px] n">
+        <table className="w-full text-[11.5px] n whitespace-nowrap [&_th]:pr-3 [&_td]:pr-3 [&_th:last-child]:pr-0 [&_td:last-child]:pr-0">
           <thead><tr className="text-[10px] text-muted text-left">
             <th className="font-semibold py-1.5">#</th><th className="font-semibold">Leg</th><th className="font-semibold">Contract</th>
             <th className="font-semibold text-right">Entry</th><th className="font-semibold text-right">LTP</th><th className="font-semibold text-right">Exit</th>
@@ -358,7 +175,7 @@ function HistoryCard({ positions }) {
     <Card title="Weekly history" icon={Clock} delay={0.1}>
       {rows.length === 0 ? <div className="text-[11.5px] text-faint py-4">No weeks traded yet.</div> : (
         <div className="overflow-x-auto">
-          <table className="w-full text-[11.5px] n">
+          <table className="w-full text-[11.5px] n whitespace-nowrap [&_th]:pr-3 [&_td]:pr-3 [&_th:last-child]:pr-0 [&_td:last-child]:pr-0">
             <thead><tr className="text-[10px] text-muted text-left">
               <th className="font-semibold py-1.5">Week</th><th className="font-semibold">Mode</th><th className="font-semibold">Direction</th>
               <th className="font-semibold">Structure</th><th className="font-semibold text-right">Credit</th><th className="font-semibold pl-4">Outcome</th><th className="font-semibold text-right">P&L</th>
@@ -386,40 +203,14 @@ function HistoryCard({ positions }) {
   );
 }
 
-function ActivityCard({ events }) {
-  const tone = { error: "var(--c-loss)", warn: "var(--c-warn)", info: "var(--oat-accent)" };
-  return (
-    <Card title="Activity" icon={Pulse} delay={0.15}>
-      {events.length === 0 ? <div className="text-[11.5px] text-faint py-4">Nothing yet.</div> : (
-        <ol className="relative flex flex-col gap-3 max-h-[380px] overflow-y-auto pr-1">
-          {events.map((e) => (
-            <li key={e.id} className="flex gap-3">
-              <span className="mt-1.5 shrink-0 rounded-full" style={{ width: 7, height: 7, background: tone[e.level] ?? "var(--c-muted)" }} />
-              <div className="min-w-0">
-                <div className="flex items-center gap-2 text-[10px] text-faint n">
-                  <span>{new Date(e.created_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}</span>
-                  {e.mode && <span className="font-semibold">{e.mode}</span>}
-                  <span>{e.kind.replaceAll("_", " ")}</span>
-                </div>
-                <div className="text-[11.5px] text-ink2 leading-snug">{e.message}</div>
-              </div>
-            </li>
-          ))}
-        </ol>
-      )}
-    </Card>
-  );
-}
-
 // ------------------------------------------------------------------ settings
 
 function SettingsDrawer({ open, onClose, row, onSaved }) {
   const [draft, setDraft] = useState(row ?? {});
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
-  const [confirmAuto, setConfirmAuto] = useState(false);
   const [typed, setTyped] = useState("");
-  useEffect(() => { setDraft(row ?? {}); setError(null); setConfirmAuto(false); setTyped(""); }, [row, open]);
+  useEffect(() => { setDraft(row ?? {}); setError(null); setTyped(""); }, [row, open]);
 
   const save = (extra = {}) => {
     setSaving(true); setError(null);
@@ -622,7 +413,7 @@ export default function NiftyAlphaEdge() {
           </div>
           <div className="lg:col-span-5 flex flex-col gap-4">
             <SignalCard signal={data.signal} decision={data.edgeDecision} />
-            <EngineCard engine={data.engine} />
+            <EngineCard engine={data.engine} footer="Shared with Nifty Alpha Ladder — one NIFTY-futures depth feed, one weekly decision." />
             <Card title="How it trades" icon={CaretRight} delay={0.15}>
               <ul className="flex flex-col gap-2 text-[11.5px] text-ink2 leading-snug">
                 <li><b>Bearish week:</b> BUY CE ATM+200, then SELL CE ATM.</li>

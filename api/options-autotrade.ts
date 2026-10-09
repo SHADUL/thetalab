@@ -130,6 +130,15 @@ import { backfillSymbolToArchive } from '../src/vwap-scalper/archive/archiveBack
 import { supabaseCheckpointStore } from '../src/vwap-scalper/archive/checkpointStore.ts';
 import { createLiveKiteFetcher, checkKiteSessionValid } from '../src/vwap-scalper/archive/kiteLiveFetcher.ts';
 import { createSessionToken, buildSetCookieHeader, buildClearCookieHeader, readCookie, verifySessionToken, sessionCookieName } from '../src/lib/session.ts';
+import {
+  runEdgeTick, closePositionManually,
+  type EdgeDeps, type EdgeStore, type EdgeMarket, type EdgeBroker, type EdgeSettings, type EdgePosition, type EdgeLeg,
+} from '../src/nifty-alpha-edge/engine.ts';
+import { signalFromRow, decideDirection, type VixBar } from '../src/nifty-alpha-edge/decision.ts';
+import { payoffCurve } from '../src/nifty-alpha-edge/structure.ts';
+import { UNIT_BUDGET_RUPEES as ALPHA_EDGE_UNIT_BUDGET } from '../src/nifty-alpha-edge/parameters.ts';
+import { isTradingDay as nseIsTradingDay } from '../src/nifty-alpha-ladder/calendar/signalCalendar.ts';
+import { fetchNfoInstrumentsCsv, parseNfoFutures, resolveNearestFuture } from '../src/nifty-alpha-ladder/live/futuresResolver.ts';
 
 const KITE_BASE = 'https://api.kite.trade';
 
@@ -4572,6 +4581,10 @@ export default async function handler(req: any, res: any) {
   if (resource === 'alpha-ladder-positions') return handleAlphaLadderPositions(req, res, supabase);
   if (resource === 'alpha-ladder-activity') return handleAlphaLadderActivity(req, res, supabase);
   if (resource === 'alpha-ladder-health') return handleAlphaLadderHealth(req, res, supabase);
+  if (resource === 'alpha-edge-summary') return handleAlphaEdgeSummary(req, res, supabase);
+  if (resource === 'alpha-edge-settings') return handleAlphaEdgeSettings(req, res, supabase);
+  if (resource === 'alpha-edge-close') return handleAlphaEdgeClose(req, res, supabase);
+  if (resource === 'alpha-edge-kill') return handleAlphaEdgeKill(req, res, supabase);
 
   // Cron/server-triggered resources — shared-secret gate, since these do
   // real work (live Kite calls, writing a paper position) on a schedule
@@ -4587,6 +4600,7 @@ export default async function handler(req: any, res: any) {
   if (resource === 'margin') return handleMargin(req, res, supabase);
   if (resource === 'paper-scan') return handlePaperScan(req, res, supabase);
   if (resource === 'position-monitor') return handlePositionMonitor(req, res, supabase);
+  if (resource === 'alpha-edge-tick') return handleAlphaEdgeTick(req, res, supabase);
   if (resource === 'vwap-scalper-scan') return handleVwapScalperScan(req, res, supabase);
   if (resource === 'vwap-scalper-monitor') return handleVwapScalperMonitor(req, res, supabase);
   if (resource === 'shadow-health') return handleShadowHealth(req, res, supabase);
@@ -4857,4 +4871,360 @@ async function handleAlphaLadderHealth(req: any, res: any, supabase: SupabaseCli
       }
     : { sessionQuality: 'VALID', reason: null, detail: null };
   res.status(200).json({ health: health ?? [], gaps: gaps ?? [], sessionIntegrity });
+}
+
+
+// =====================================================================
+// Nifty Alpha Edge (hedged131) — adapters + endpoints. The strategy rules
+// live in src/nifty-alpha-edge (pure, tested); this section only wires
+// Supabase, live Kite market data and the existing Kite/Groww order
+// placers into that engine.
+// =====================================================================
+
+function edgeLegFromRow(r: any): EdgeLeg {
+  const n = (x: any) => (x === null || x === undefined ? null : Number(x));
+  return {
+    id: r.id, legIndex: r.leg_index, side: r.side, right: r.option_right, strike: Number(r.strike),
+    kiteSymbol: r.kite_symbol, brokerSymbol: r.broker_symbol, quantity: r.quantity,
+    entryLimit: n(r.entry_limit), entryFill: n(r.entry_fill), entryOrderId: r.entry_order_id ?? null,
+    exitLimit: n(r.exit_limit), exitFill: n(r.exit_fill), exitOrderId: r.exit_order_id ?? null, lastPrice: n(r.last_price),
+  };
+}
+
+function edgePositionFromRow(r: any): EdgePosition {
+  return {
+    id: r.id, mode: r.mode, weekKey: r.week_key, signalId: r.signal_id, direction: r.direction, structure: r.structure,
+    expiry: r.expiry, atm: Number(r.atm), quantity: r.quantity, creditPoints: r.credit_points === null ? null : Number(r.credit_points),
+    f0: Number(r.f0), futureSymbol: r.future_symbol, status: r.status, exitReason: r.exit_reason, exitAttempts: r.exit_attempts ?? 0,
+    broker: r.broker ?? null,
+    legs: ((r.alpha_edge_legs ?? []) as any[]).map(edgeLegFromRow).sort((a, b) => a.legIndex - b.legIndex),
+  };
+}
+
+const EDGE_LEG_COLUMNS: Record<string, string> = {
+  lastPrice: 'last_price', entryFill: 'entry_fill', entryLimit: 'entry_limit', entryOrderId: 'entry_order_id',
+  exitFill: 'exit_fill', exitLimit: 'exit_limit', exitOrderId: 'exit_order_id',
+};
+
+function readEdgeSettings(r: any): EdgeSettings {
+  return {
+    shadowEnabled: r?.shadow_enabled ?? true, autoEnabled: r?.auto_enabled ?? false, killSwitch: r?.kill_switch ?? false,
+    shadowCapital: Number(r?.shadow_capital ?? 500_000), autoCapital: Number(r?.auto_capital ?? 0),
+    activeBroker: r?.active_broker === 'GROWW' ? 'GROWW' : 'KITE', unitBudget: Number(r?.unit_budget ?? ALPHA_EDGE_UNIT_BUDGET),
+  };
+}
+
+function makeAlphaEdgeStore(supabase: SupabaseClient): EdgeStore {
+  const SELECT = '*, alpha_edge_legs(*)';
+  const getPosition = async (id: number) => {
+    const { data } = await supabase.from('alpha_edge_positions').select(SELECT).eq('id', id).maybeSingle();
+    return data ? edgePositionFromRow(data) : null;
+  };
+  return {
+    async getSettings() {
+      const { data } = await supabase.from('alpha_edge_settings').select('*').eq('id', 1).maybeSingle();
+      return readEdgeSettings(data);
+    },
+    async getSignalForDate(dateISO) {
+      const { data } = await supabase.from('alpha_ladder_signals').select('*').eq('signal_date', dateISO)
+        .order('created_at', { ascending: false }).limit(1).maybeSingle();
+      return data ? signalFromRow(data) : null;
+    },
+    async listOpenPositions() {
+      const { data } = await supabase.from('alpha_edge_positions').select(SELECT).in('status', ['ACTIVE', 'EXITING']);
+      return (data ?? []).map(edgePositionFromRow);
+    },
+    async getPositionForWeek(weekKey, mode) {
+      const { data } = await supabase.from('alpha_edge_positions').select(SELECT).eq('week_key', weekKey).eq('mode', mode).maybeSingle();
+      return data ? edgePositionFromRow(data) : null;
+    },
+    getPosition,
+    async createPosition(n) {
+      const { data, error } = await supabase.from('alpha_edge_positions').insert({
+        mode: n.mode, week_key: n.weekKey, signal_id: n.signalId, signal_date: n.signalDate,
+        direction: n.decision.direction, base_direction: n.decision.baseDirection, vix: n.decision.vix,
+        vix_available: n.decision.vixAvailable, variation_c_acted: n.decision.variationCActed,
+        structure: n.structure, expiry: n.expiry, atm: n.atm, strike_step: n.strikeStep, wing_points: n.wingPoints,
+        units: n.units, lot_size: n.lotSize, quantity: n.quantity, credit_points: n.creditPoints,
+        max_gain: n.maxGain, max_loss: n.maxLoss, breakeven: n.breakeven, future_symbol: n.futureSymbol, f0: n.f0,
+        status: n.status, exit_reason: n.exitReason, broker: n.broker, strategy_version: n.strategyVersion,
+      }).select('id').single();
+      if (error) {
+        if ((error as any).code === '23505') return { ok: false, reason: 'duplicate' };
+        throw new Error(error.message);
+      }
+      if (n.legs.length) {
+        const { error: legErr } = await supabase.from('alpha_edge_legs').insert(n.legs.map((l) => ({
+          position_id: data.id, leg_index: l.legIndex, side: l.side, option_right: l.right, strike: l.strike,
+          kite_symbol: l.kiteSymbol, broker_symbol: l.brokerSymbol, quantity: l.quantity,
+          entry_limit: l.entryLimit, entry_fill: l.entryFill, entry_order_id: l.entryOrderId, last_price: l.lastPrice,
+        })));
+        if (legErr) throw new Error(legErr.message);
+      }
+      return { ok: true, position: (await getPosition(data.id))! };
+    },
+    async updatePosition(id, patch, expectStatus) {
+      let q = supabase.from('alpha_edge_positions').update({ ...patch, updated_at: new Date().toISOString() }).eq('id', id);
+      if (expectStatus) q = q.eq('status', expectStatus);
+      const { data, error } = await q.select('id');
+      if (error) throw new Error(error.message);
+      return (data?.length ?? 0) > 0;
+    },
+    async updateLeg(id, patch) {
+      const row: Record<string, unknown> = { updated_at: new Date().toISOString() };
+      for (const [k, v] of Object.entries(patch)) if (EDGE_LEG_COLUMNS[k]) row[EDGE_LEG_COLUMNS[k]] = v;
+      await supabase.from('alpha_edge_legs').update(row).eq('id', id);
+    },
+    async logEvent(level, mode, positionId, kind, message, detail) {
+      await supabase.from('alpha_edge_events').insert({ level, mode, position_id: positionId, kind, message, detail: detail ?? null });
+    },
+  };
+}
+
+function makeAlphaEdgeMarket(supabase: SupabaseClient, token: string, apiKey: string): EdgeMarket {
+  const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  let instruments: any[] | null = null;
+  let vixToken: number | null = null;
+  const quote = (keys: string[]) => kiteFetch(`/quote?${keys.map((k) => `i=${encodeURIComponent(k)}`).join('&')}`, { token, apiKey });
+  const loadInstruments = async () => {
+    if (instruments) return instruments;
+    const maxISO = new Date(Date.parse(`${todayIST}T00:00:00Z`) + 45 * 86_400_000).toISOString().slice(0, 10);
+    const { data } = await fetchAllPages((from, to) => supabase.from('options_instruments')
+      .select('expiry, strike, option_right, tradingsymbol, lot_size').eq('symbol', 'NIFTY')
+      .gte('expiry', todayIST).lte('expiry', maxISO).order('expiry', { ascending: true }).order('tradingsymbol', { ascending: true }).range(from, to));
+    instruments = data;
+    return data;
+  };
+  const futureLtp = async (sym: string) => {
+    const q = await quote([`NFO:${sym}`]);
+    const v = Number(q?.[`NFO:${sym}`]?.last_price);
+    return v > 0 ? v : null;
+  };
+  return {
+    isTradingDay: (d) => nseIsTradingDay(new Date(`${d}T00:00:00Z`)),
+    async getVixBars(dateISO) {
+      try {
+        if (!vixToken) vixToken = Number((await quote(['NSE:INDIA VIX']))?.['NSE:INDIA VIX']?.instrument_token) || null;
+        if (!vixToken) return [];
+        const data = await kiteFetch(`/instruments/historical/${vixToken}/15minute?from=${dateISO}+09:00:00&to=${dateISO}+15:30:00`, { token, apiKey });
+        return ((data?.candles ?? []) as any[][])
+          .map((c) => ({ startMs: Date.parse(String(c[0]).replace(/([+-]\d{2})(\d{2})$/, '$1:$2')), close: Number(c[4]) }))
+          .filter((b: VixBar) => Number.isFinite(b.startMs));
+      } catch {
+        return []; // unreadable VIX => Variation C inert (spec §4.7), never a guessed value
+      }
+    },
+    async getSpot() {
+      const v = Number((await quote(['NSE:NIFTY 50']))?.['NSE:NIFTY 50']?.last_price);
+      return v > 0 ? v : null;
+    },
+    async getNearestFuture() {
+      const f = resolveNearestFuture(parseNfoFutures(await fetchNfoInstrumentsCsv(apiKey, token)), 'NIFTY', todayIST);
+      if (!f) return null;
+      const ltp = await futureLtp(f.tradingsymbol);
+      return ltp ? { tradingsymbol: f.tradingsymbol, ltp } : null;
+    },
+    getFutureLtp: futureLtp,
+    async listExpiries() { return [...new Set((await loadInstruments()).map((r: any) => r.expiry as string))].sort(); },
+    async listStrikes(expiry) {
+      return [...new Set((await loadInstruments()).filter((r: any) => r.expiry === expiry).map((r: any) => Number(r.strike)))].sort((a, b) => a - b);
+    },
+    async kiteSymbol(expiry, strike, right) {
+      return (await loadInstruments()).find((r: any) => r.expiry === expiry && Number(r.strike) === strike && r.option_right === right)?.tradingsymbol ?? null;
+    },
+    async lotSize(expiry) { return Number((await loadInstruments()).find((r: any) => r.expiry === expiry)?.lot_size) || null; },
+    async getQuotes(symbols) {
+      const out = new Map<string, { ltp: number; bid: number | null; ask: number | null }>();
+      if (!symbols.length) return out;
+      const data = await quote(symbols.map((s) => `NFO:${s}`));
+      for (const s of symbols) {
+        const d = data?.[`NFO:${s}`];
+        if (!d) continue;
+        const bid = Number(d.depth?.buy?.[0]?.price);
+        const ask = Number(d.depth?.sell?.[0]?.price);
+        out.set(s, { ltp: Number(d.last_price) || 0, bid: bid > 0 ? bid : null, ask: ask > 0 ? ask : null });
+      }
+      return out;
+    },
+  };
+}
+
+async function makeAlphaEdgeBroker(supabase: SupabaseClient, settings: EdgeSettings, token: string, apiKey: string): Promise<EdgeBroker | null> {
+  if (settings.activeBroker === 'GROWW') {
+    const { data: g } = await supabase.from('groww_session').select('access_token').eq('id', 1).maybeSingle();
+    const growwToken: string | null = g?.access_token ?? null;
+    if (!growwToken) return null;
+    return {
+      name: 'GROWW', exchange: GROWW_EXCHANGE_FOR_KITE_EXCHANGE.NFO, placer: makeGrowwOrderPlacer(growwToken),
+      async brokerSymbol(expiry, strike, right) {
+        const { data } = await supabase.from('groww_options_instruments').select('tradingsymbol')
+          .eq('symbol', 'NIFTY').eq('expiry', expiry).eq('strike', strike).eq('option_right', right).maybeSingle();
+        return data?.tradingsymbol ?? null;
+      },
+      async holdsAny(symbols) {
+        const pos = await fetchGrowwBrokerPositions(growwToken);
+        return pos === null ? null : pos.some((p) => symbols.includes(p.tradingsymbol) && p.quantity !== 0);
+      },
+      availableFunds: () => fetchGrowwAvailableFunds(growwToken),
+    };
+  }
+  return {
+    name: 'KITE', exchange: 'NFO', placer: makeLiveOrderPlacer(token, apiKey),
+    async brokerSymbol(_e, _s, _r, kiteSymbol) { return kiteSymbol; },
+    async holdsAny(symbols) {
+      const pos = await fetchBrokerPositions(token, apiKey);
+      return pos === null ? null : pos.some((p) => symbols.includes(p.tradingsymbol) && p.quantity !== 0);
+    },
+    availableFunds: () => fetchRealAvailableFunds(token, apiKey),
+  };
+}
+
+async function alphaEdgeDeps(supabase: SupabaseClient): Promise<EdgeDeps | { error: string }> {
+  const apiKey = process.env.KITE_API_KEY;
+  if (!apiKey) return { error: 'server_misconfigured' };
+  const { data: session } = await supabase.from('kite_session').select('access_token').eq('id', 1).maybeSingle();
+  const token = session?.access_token;
+  if (!token) return { error: 'no_kite_session' };
+  return {
+    store: makeAlphaEdgeStore(supabase),
+    market: makeAlphaEdgeMarket(supabase, token, apiKey),
+    broker: (settings) => makeAlphaEdgeBroker(supabase, settings, token, apiKey),
+  };
+}
+
+/** Cron (1 minute, shared secret): the whole hedged131 lifecycle — manage open positions, then this week's entries. */
+async function handleAlphaEdgeTick(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const deps = await alphaEdgeDeps(supabase);
+  if ('error' in deps) { res.status(200).json({ ok: true, skipped: deps.error }); return; }
+  try {
+    const report = await runEdgeTick(deps, Date.now());
+    res.status(200).json({ ok: true, ...report });
+  } catch (err: any) {
+    await supabase.from('alpha_edge_events').insert({ level: 'error', kind: 'TICK_ERROR', message: `Tick failed: ${err.message}` });
+    res.status(200).json({ ok: false, error: err.message });
+  }
+}
+
+/** Browser: everything the dashboard needs in one round trip. */
+async function handleAlphaEdgeSummary(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const sessionOpenIso = new Date(Date.parse(`${todayIST}T09:15:00+05:30`)).toISOString();
+  const [settingsQ, positionsQ, eventsQ, signalQ, healthQ, refQ, gapsQ] = await Promise.all([
+    supabase.from('alpha_edge_settings').select('*').eq('id', 1).maybeSingle(),
+    supabase.from('alpha_edge_positions').select('*, alpha_edge_legs(*)').order('created_at', { ascending: false }).limit(40),
+    supabase.from('alpha_edge_events').select('*').order('created_at', { ascending: false }).limit(60),
+    supabase.from('alpha_ladder_signals').select('*').order('signal_date', { ascending: false }).limit(1).maybeSingle(),
+    supabase.from('alpha_ladder_worker_health').select('status, updated_at, current_future_symbol, reconnect_count').order('id', { ascending: false }).limit(1).maybeSingle(),
+    supabase.from('alpha_ladder_large_order_reference').select('side, cumulative_count, running_threshold, source_tradingsymbol'),
+    supabase.from('alpha_ladder_feed_gaps').select('reason, gap_start').gte('gap_start', sessionOpenIso),
+  ]);
+  if (positionsQ.error && /does not exist/.test(positionsQ.error.message)) {
+    res.status(200).json({ needsMigration: true }); return;
+  }
+  const positions = (positionsQ.data ?? []).map((r: any) => ({
+    ...r, legs: (r.alpha_edge_legs ?? []).sort((a: any, b: any) => a.leg_index - b.leg_index), alpha_edge_legs: undefined,
+  }));
+  const active = positions.find((p: any) => p.status === 'ACTIVE' || p.status === 'EXITING' || p.status === 'ENTERING') ?? null;
+  const focus = active ?? positions.find((p: any) => p.status === 'CLOSED') ?? null;
+  const payoff = focus && focus.credit_points !== null && focus.atm && focus.wing_points
+    ? payoffCurve(focus.direction, Number(focus.atm), Number(focus.wing_points), Number(focus.credit_points), focus.quantity, 500, 10)
+    : null;
+
+  // This week's shared signal and the hedged131 direction it implies (Variation C re-applied with real VIX).
+  let signal: any = signalQ.data ?? null;
+  let edgeDecision: any = null;
+  const ageDays = signal ? (Date.parse(`${todayIST}T00:00:00Z`) - Date.parse(`${signal.signal_date}T00:00:00Z`)) / 86_400_000 : Infinity;
+  if (signal && ageDays > 7) signal = null;
+  let live: { spot: number | null; future: number | null } = { spot: null, future: null };
+  const deps = await alphaEdgeDeps(supabase);
+  if (!('error' in deps)) {
+    try {
+      if (signal) {
+        const sharedForPosition = positions.find((p: any) => p.signal_id === signal.id && p.status !== 'FAILED');
+        edgeDecision = sharedForPosition
+          ? { direction: sharedForPosition.direction, baseDirection: sharedForPosition.base_direction, vix: sharedForPosition.vix, vixAvailable: sharedForPosition.vix_available, variationCActed: sharedForPosition.variation_c_acted }
+          : decideDirection(signalFromRow(signal), await deps.market.getVixBars(signal.signal_date));
+      }
+      if (active) {
+        const [spot, future] = await Promise.all([deps.market.getSpot(), active.future_symbol ? deps.market.getFutureLtp(active.future_symbol) : Promise.resolve(null)]);
+        live = { spot, future };
+      }
+    } catch { /* the dashboard still renders from stored state */ }
+  }
+
+  const ref = refQ.data ?? [];
+  const invalid = (gapsQ.data ?? []).find((g: any) => /^(LATE_SESSION_START|UNRECOVERABLE_FEED_GAP)/.test(String(g.reason)));
+  res.status(200).json({
+    settings: readEdgeSettings(settingsQ.data),
+    settingsRow: settingsQ.data,
+    positions, active, focus, payoff, live,
+    events: eventsQ.data ?? [],
+    signal, edgeDecision,
+    engine: {
+      worker: healthQ.data ?? null,
+      warmup: { bid: Number(ref.find((r: any) => r.side === 'b')?.cumulative_count ?? 0), ask: Number(ref.find((r: any) => r.side === 'a')?.cumulative_count ?? 0), target: 150_000 },
+      sessionQuality: invalid ? 'INVALID_FOR_NEW_SIGNAL' : 'VALID',
+      sessionReason: invalid ? String(invalid.reason).slice(String(invalid.reason).indexOf(':') + 1).trim() : null,
+    },
+  });
+}
+
+async function handleAlphaEdgeSettings(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method === 'GET') {
+    const { data } = await supabase.from('alpha_edge_settings').select('*').eq('id', 1).maybeSingle();
+    res.status(200).json(data ?? {}); return;
+  }
+  if (req.method !== 'PUT' && req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const body = req.body ?? {};
+  const { data: current } = await supabase.from('alpha_edge_settings').select('*').eq('id', 1).maybeSingle();
+  const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  for (const k of ['shadow_enabled', 'auto_enabled', 'kill_switch'] as const) {
+    if (body[k] !== undefined) {
+      if (typeof body[k] !== 'boolean') { res.status(400).json({ error: 'bad_request', message: `${k} must be true/false.` }); return; }
+      update[k] = body[k];
+    }
+  }
+  for (const k of ['shadow_capital', 'auto_capital', 'unit_budget'] as const) {
+    if (body[k] !== undefined) {
+      const n = Number(body[k]);
+      if (!Number.isFinite(n) || n < 0 || (k === 'unit_budget' && n <= 0)) { res.status(400).json({ error: 'bad_request', message: `${k} must be a non-negative number.` }); return; }
+      update[k] = n;
+    }
+  }
+  if (body.active_broker !== undefined) {
+    if (!['KITE', 'GROWW'].includes(body.active_broker)) { res.status(400).json({ error: 'bad_request', message: 'active_broker must be KITE or GROWW.' }); return; }
+    update.active_broker = body.active_broker;
+  }
+  // Real orders: AUTO can only be switched on with an explicit typed confirmation and an allocation of at least one unit.
+  if (update.auto_enabled === true && !current?.auto_enabled) {
+    const capital = Number(update.auto_capital ?? current?.auto_capital ?? 0);
+    const unit = Number(update.unit_budget ?? current?.unit_budget ?? ALPHA_EDGE_UNIT_BUDGET);
+    if (body.confirm !== 'ENABLE AUTO') { res.status(400).json({ error: 'confirmation_required', message: 'Type ENABLE AUTO to allow real orders.' }); return; }
+    if (capital < unit) { res.status(400).json({ error: 'bad_request', message: `AUTO allocation must be at least one unit (₹${unit}).` }); return; }
+  }
+  const { data, error } = await supabase.from('alpha_edge_settings').upsert({ id: 1, ...update }).select('*').single();
+  if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
+  const changed = Object.keys(update).filter((k) => k !== 'updated_at');
+  if (changed.length) await supabase.from('alpha_edge_events').insert({ level: update.auto_enabled === true ? 'warn' : 'info', kind: 'SETTINGS_CHANGED', message: `Settings changed: ${changed.map((k) => `${k}=${JSON.stringify(update[k])}`).join(', ')}.` });
+  res.status(200).json(data);
+}
+
+async function handleAlphaEdgeClose(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const id = Number(req.body?.positionId);
+  if (!Number.isFinite(id)) { res.status(400).json({ error: 'bad_request', message: 'positionId required' }); return; }
+  const deps = await alphaEdgeDeps(supabase);
+  if ('error' in deps) { res.status(400).json({ error: deps.error, message: 'No live Kite session — cannot price or place the exit.' }); return; }
+  const r = await closePositionManually(deps, id, Date.now());
+  res.status(r.ok ? 200 : 400).json(r);
+}
+
+async function handleAlphaEdgeKill(req: any, res: any, supabase: SupabaseClient) {
+  if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const { error } = await supabase.from('alpha_edge_settings').upsert({ id: 1, kill_switch: true, auto_enabled: false, updated_at: new Date().toISOString() });
+  if (error) { res.status(502).json({ error: 'supabase_error', message: error.message }); return; }
+  await supabase.from('alpha_edge_events').insert({ level: 'warn', kind: 'KILL_SWITCH', message: 'Kill switch engaged from the dashboard: no new entries, AUTO disabled. Open positions keep being managed and exited normally.' });
+  res.status(200).json({ ok: true });
 }

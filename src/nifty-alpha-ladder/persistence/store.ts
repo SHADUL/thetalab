@@ -474,22 +474,34 @@ export function createSupabaseAlphaLadderStore(client: SupabaseClient): AlphaLad
   };
 }
 
-function rowToSignal(data: any): SignalRow {
+/** 09:15 IST of a "YYYY-MM-DD" session date, epoch ms — the origin SignalRecord's second offsets are measured from. */
+export function sessionOriginMsForDate(dateISO: string): number {
+  const [y, m, d] = dateISO.split('-').map(Number);
+  return Date.UTC(y, m - 1, d, 3, 45);
+}
+
+// SignalRecord carries τ* and the crossing time as SECONDS SINCE THE 09:15
+// SESSION ORIGIN (see types.ts); the table stores absolute timestamptz.
+// These two functions convert between the two — previously the offset was
+// written as if it were epoch seconds, storing a 1970 timestamp.
+export function rowToSignal(data: any): SignalRow {
+  const origin = sessionOriginMsForDate(data.signal_date);
   return {
-    id: data.id, weekKey: data.week_key, signalDate: data.signal_date, signalInstantSec: Date.parse(data.signal_instant) / 1000,
+    id: data.id, weekKey: data.week_key, signalDate: data.signal_date, signalInstantSec: (Date.parse(data.signal_instant) - origin) / 1000,
     path: data.path as SignalPath, d1: data.d1 as SignedDirection, d2: data.d2 as SignedDirection, alpha: data.alpha,
     baseDirection: data.base_direction, finalDirection: data.final_direction, area1: data.area1, area2: data.area2,
-    g1AtSignal: data.g1_at_signal, g2AtSignal: data.g2_at_signal, crossingTimeSec: data.crossing_time ? Date.parse(data.crossing_time) / 1000 : null,
+    g1AtSignal: data.g1_at_signal, g2AtSignal: data.g2_at_signal, crossingTimeSec: data.crossing_time ? (Date.parse(data.crossing_time) - origin) / 1000 : null,
     crossingG2Value: data.crossing_g2_value, vixValue: data.vix_value, vixAvailable: data.vix_available,
     variationCActed: data.variation_c_acted, sourceDataset: 'primary', createdAtMs: Date.parse(data.created_at),
   };
 }
-function signalToRow(row: SignalRecord) {
+export function signalToRow(row: SignalRecord) {
+  const origin = sessionOriginMsForDate(row.signalDate);
   return {
-    week_key: row.weekKey, signal_date: row.signalDate, signal_instant: new Date(row.signalInstantSec * 1000).toISOString(),
+    week_key: row.weekKey, signal_date: row.signalDate, signal_instant: new Date(origin + row.signalInstantSec * 1000).toISOString(),
     path: row.path, d1: row.d1, d2: row.d2, alpha: row.alpha, base_direction: row.baseDirection, final_direction: row.finalDirection,
     area1: row.area1, area2: row.area2, g1_at_signal: row.g1AtSignal, g2_at_signal: row.g2AtSignal,
-    crossing_time: row.crossingTimeSec !== null ? new Date(row.crossingTimeSec * 1000).toISOString() : null,
+    crossing_time: row.crossingTimeSec !== null ? new Date(origin + row.crossingTimeSec * 1000).toISOString() : null,
     crossing_g2_value: row.crossingG2Value, vix_value: row.vixValue, vix_available: row.vixAvailable, variation_c_acted: row.variationCActed,
     strategy_version: 'HEDGED133_V3_0',
   };

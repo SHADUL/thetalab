@@ -158,3 +158,18 @@ test('shadow P&L: any leg still open makes the WHOLE result null, never a partia
   assert.equal(result.perLegPnl[0].pnl !== null, true); // per-leg is still informative even when the total isn't final
   assert.equal(result.perLegPnl[1].pnl, null);
 });
+
+// ---- signal timestamp mapping (τ* is seconds since the 09:15 origin, the table stores absolute time) ----
+import { signalToRow, rowToSignal } from '../persistence/store.ts';
+
+test('signal persistence: τ* offset is written as the real IST instant and read back as the same offset', () => {
+  const rec = fixtureSignal('2026-10-14');
+  rec.signalInstantSec = 3420; // 10:12 IST
+  rec.crossingTimeSec = 3420;
+  const row = signalToRow(rec);
+  assert.equal(row.signal_instant, '2026-10-14T04:42:00.000Z'); // 10:12 IST
+  assert.equal(row.crossing_time, '2026-10-14T04:42:00.000Z');
+  const back = rowToSignal({ ...row, id: 1, created_at: '2026-10-14T04:43:00Z' });
+  assert.equal(back.signalInstantSec, 3420);
+  assert.equal(back.crossingTimeSec, 3420);
+});

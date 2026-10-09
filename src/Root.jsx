@@ -4,6 +4,7 @@ import SwingScanner from "./components/SwingScanner.jsx";
 import IntradayTrader from "./components/IntradayTrader.jsx";
 import OptionsAutoTrader from "./components/OptionsAutoTrader.jsx";
 import NiftyAlphaLadder from "./components/NiftyAlphaLadder.jsx";
+import NiftyAlphaEdge from "./components/NiftyAlphaEdge.jsx";
 import VwapScalper from "./components/VwapScalper.jsx";
 import Login from "./components/Login.jsx";
 
@@ -27,6 +28,7 @@ const ALL_SECTIONS = [
   { value: "intraday", label: "Intraday Trader" },
   { value: "options-auto", label: "Options Auto-Trader" },
   { value: "nifty-alpha-ladder", label: "Nifty Alpha Ladder" },
+  { value: "nifty-alpha-edge", label: "Nifty Alpha Edge" },
   { value: "vwap-scalper", label: "VWAP Scalper" },
 ];
 
@@ -36,7 +38,7 @@ const ALL_SECTIONS = [
 // while this flag is on, since it's a new, actively-worked-on strategy —
 // not one of the "other sections" the original request meant to hide.
 const ONLY_OPTIONS_AUTO = true;
-const VISIBLE_WHILE_ONLY_OPTIONS_AUTO = new Set(["options-auto", "nifty-alpha-ladder"]);
+const VISIBLE_WHILE_ONLY_OPTIONS_AUTO = new Set(["options-auto", "nifty-alpha-ladder", "nifty-alpha-edge"]);
 const SECTIONS = ONLY_OPTIONS_AUTO ? ALL_SECTIONS.filter((s) => VISIBLE_WHILE_ONLY_OPTIONS_AUTO.has(s.value)) : ALL_SECTIONS;
 
 export default function Root() {
@@ -110,6 +112,7 @@ export default function Root() {
           : section === "intraday" ? <IntradayTrader />
           : section === "options-auto" ? <OptionsAutoTrader />
           : section === "nifty-alpha-ladder" ? <NiftyAlphaLadder />
+          : section === "nifty-alpha-edge" ? <NiftyAlphaEdge />
           : <VwapScalper />}
       </div>
     </div>

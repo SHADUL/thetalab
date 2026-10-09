@@ -1,0 +1,20 @@
+name: Nifty Alpha Edge Tick
+
+# The real recurring trigger is an external cron-job.org job hitting
+# resource=alpha-edge-tick every 1 minute during market hours (09:15-15:30
+# IST, Mon-Fri) with the same Bearer secret as the other Options cron
+# jobs — GitHub's own `schedule:` is too unreliable for minute-level exits
+# (see options-position-monitor.yml). This workflow is manual-dispatch only,
+# for on-demand runs and diagnosis.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call alpha-edge-tick endpoint
+        run: |
+          curl -sf -X POST "https://thetalab-beta.vercel.app/api/options-autotrade?resource=alpha-edge-tick" \
+            -H "Authorization: Bearer ${{ secrets.OPTIONS_AUTOTRADE_CRON_SECRET }}" \
+            -w "\nHTTP %{http_code}\n"

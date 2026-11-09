@@ -84,6 +84,12 @@ export interface WorkerHealthRow {
   reconnectCount: number;
   currentInstrumentToken?: number | null;
   currentFutureSymbol?: string | null;
+  /** Feed telemetry (observability only — never read by the signal path). */
+  lastSocketMessageAt?: string | null;
+  lastDepthSnapshotAt?: string | null;
+  lastValidDepthAt?: string | null;
+  lastG1EventAt?: string | null;
+  lastG2SnapshotAt?: string | null;
 }
 
 export interface AlphaLadderStore {
@@ -394,6 +400,9 @@ export function createSupabaseAlphaLadderStore(client: SupabaseClient): AlphaLad
           worker_instance: row.workerInstance, connection_generation: row.connectionGeneration, status: row.status,
           worker_started_at: row.workerStartedAt, reconnect_count: row.reconnectCount,
           current_instrument_token: row.currentInstrumentToken ?? null, current_future_symbol: row.currentFutureSymbol ?? null,
+          last_socket_message_at: row.lastSocketMessageAt ?? null, last_depth_snapshot_at: row.lastDepthSnapshotAt ?? null,
+          last_valid_depth_at: row.lastValidDepthAt ?? null, last_g1_event_at: row.lastG1EventAt ?? null,
+          last_g2_snapshot_at: row.lastG2SnapshotAt ?? null,
         })
         .select('*')
         .single();

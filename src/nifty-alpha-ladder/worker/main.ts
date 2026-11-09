@@ -121,6 +121,10 @@ async function main() {
   }
 
   let lastSocketMessageAtMs: number | null = null;
+  let lastValidDepthAtMs: number | null = null;
+  // Fixed for the process lifetime — heartbeats previously re-stamped this
+  // with "now", so it looked like the worker restarted every minute.
+  const workerStartedAtIso = new Date().toISOString();
 
   depthSource.onDepthSnapshot((ticks: NormalizedDepthTick[]) => {
     lastSocketMessageAtMs = Date.now();
@@ -135,6 +139,7 @@ async function main() {
         store.logActivity('error', 'Depth tick capability mismatch — order count unavailable, skipping level.', { message: err.message });
       }
     }
+    if (observations.length > 0) lastValidDepthAtMs = Date.now();
     ingest(accumulator, observations, Date.now());
   });
 
@@ -242,9 +247,21 @@ async function main() {
     }
   }
 
+  // Read-only telemetry for the health row. G1 = last completed large-order
+  // reference window fold; G2 = last completed aggregate-imbalance interval.
+  // Session-origin defaults mean "nothing completed yet" and stay null.
+  const iso = (ms: number | null | undefined) => (ms ? new Date(ms).toISOString() : null);
+  const feedTelemetry = () => ({
+    lastSocketMessageAt: iso(lastSocketMessageAtMs),
+    lastDepthSnapshotAt: iso(lastSocketMessageAtMs),
+    lastValidDepthAt: iso(lastValidDepthAtMs),
+    lastG1EventAt: accumulator && accumulator.lastWindowFoldedAtMs > accumulator.sessionOriginMs ? iso(accumulator.lastWindowFoldedAtMs) : null,
+    lastG2SnapshotAt: accumulator && accumulator.aggregateSnapshots.length > 0 ? iso(accumulator.lastIntervalEndMs) : null,
+  });
+
   await store.insertWorkerHealth({
     workerInstance: WORKER_INSTANCE, connectionGeneration: depthSource.getHealth().connectionGeneration,
-    status: 'STARTING', workerStartedAt: new Date().toISOString(), reconnectCount: 0,
+    status: 'STARTING', workerStartedAt: workerStartedAtIso, reconnectCount: 0,
     currentInstrumentToken: resolvedFuture.instrumentToken, currentFutureSymbol: resolvedFuture.tradingsymbol,
   });
 
@@ -282,8 +299,9 @@ async function main() {
 
     await store.insertWorkerHealth({
       workerInstance: WORKER_INSTANCE, connectionGeneration: depthSource.getHealth().connectionGeneration,
-      status: health, workerStartedAt: new Date().toISOString(), reconnectCount: depthSource.getHealth().reconnectCount,
+      status: health, workerStartedAt: workerStartedAtIso, reconnectCount: depthSource.getHealth().reconnectCount,
       currentInstrumentToken: resolvedFuture.instrumentToken, currentFutureSymbol: resolvedFuture.tradingsymbol,
+      ...feedTelemetry(),
     });
 
     // Read-only feature publication for observe-only external consumers

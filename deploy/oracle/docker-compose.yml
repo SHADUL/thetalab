@@ -1,0 +1,31 @@
+# thetalab on the Oracle VM, alongside the existing /opt/apex stack.
+# Joins apex's Docker network so apex's Caddy can reverse-proxy to `web`
+# by `thetalab-web` — no host port is opened and the VM firewall is untouched.
+name: thetalab
+services:
+  # Unique service/container names: apex's own service is called `web` on the
+  # same network, and a second `web` alias would hijack apex's proxy target.
+  thetalab-web:
+    container_name: thetalab-web
+    build: ./app
+    image: thetalab:latest
+    restart: unless-stopped
+    env_file: .env
+    networks: [apex]
+
+  # The Alpha Ladder worker. Behind a profile so it never starts by accident
+  # while the Railway worker is still running (two workers would both write
+  # the same health/checkpoint rows). Start with: --profile worker up -d
+  thetalab-worker:
+    container_name: thetalab-worker
+    image: thetalab:latest
+    restart: unless-stopped
+    env_file: .env
+    command: ["node", "--experimental-strip-types", "--no-warnings", "src/nifty-alpha-ladder/worker/main.ts"]
+    profiles: [worker]
+    networks: [apex]
+
+networks:
+  apex:
+    external: true
+    name: apex_default

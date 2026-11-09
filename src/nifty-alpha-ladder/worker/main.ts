@@ -10,10 +10,10 @@
  * live connectivity is not yet observed.
  *
  * Required environment variables:
- *   KITE_API_KEY, KITE_ACCESS_TOKEN — same Kite credentials Options
- *     Auto-Trader already uses. This worker is a separate process with no
- *     access to Vercel's own env, so the access token must be supplied to
- *     it independently.
+ *   KITE_API_KEY — same Kite app Options Auto-Trader uses. The daily
+ *     access token is read from Supabase (kite_session, written by the
+ *     website's Kite login); KITE_ACCESS_TOKEN in the env is only a
+ *     fallback. Until a valid token exists the worker waits.
  *   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY — the same Supabase project,
  *     writing only to alpha_ladder_* tables.
  * Optional:
@@ -40,6 +40,7 @@ import { nowIST, isWithinSignalWindow, isMarketOpen, MARKET_OPEN_MIN, SIGNAL_CUT
 import { fetchNfoInstrumentsCsv, parseNfoFutures, resolveNearestFuture } from '../live/futuresResolver.ts';
 import { handleFiredSignal } from './signalIntake.ts';
 import { computeOrderFlowFeatures } from '../live/orderFlowFeatures.ts';
+import { waitForValidToken, kiteTokenValidator } from '../live/kiteToken.ts';
 import { chooseStartingReferenceState, buildPersistedState, shouldPersistReference, type ReferenceSource } from '../live/referenceState.ts';
 import { THETA } from '../parameters.ts';
 import { assessSessionIntegrity, type SessionIntegrity, type SessionIntegrityReason } from '../live/sessionIntegrity.ts';
@@ -68,12 +69,28 @@ function sessionOriginMsFor(dateISO: string): number {
 
 async function main() {
   const apiKey = requiredEnv('KITE_API_KEY');
-  const accessToken = requiredEnv('KITE_ACCESS_TOKEN');
   const supabaseUrl = requiredEnv('SUPABASE_URL');
   const supabaseKey = requiredEnv('SUPABASE_SERVICE_ROLE_KEY');
 
   const supabase = createClient(supabaseUrl, supabaseKey);
   const store = createSupabaseAlphaLadderStore(supabase);
+
+  // Today's Kite token: the one the website login stored in Supabase, else
+  // KITE_ACCESS_TOKEN from the environment — whichever Kite accepts. Before
+  // the morning login neither is valid, so wait (checking every minute)
+  // instead of connecting with a dead token.
+  const accessToken = (await waitForValidToken(
+    [
+      async () => (await supabase.from('kite_session').select('access_token').eq('id', 1).maybeSingle()).data?.access_token ?? null,
+      async () => process.env.KITE_ACCESS_TOKEN ?? null,
+    ],
+    kiteTokenValidator(apiKey),
+    {
+      pollMs: 60_000,
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      onWaiting: () => store.logActivity('info', 'Waiting for today\'s Kite login — no valid Kite token yet; checking again every minute.'),
+    },
+  ))!;
 
   // 'ws' is a worker-only dependency (never bundled into the Vite
   // frontend) — dynamically imported so this file can still be

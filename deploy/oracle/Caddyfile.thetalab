@@ -1,0 +1,11 @@
+# Appended to /opt/apex/deploy/Caddyfile (apex's own block is untouched).
+thetalab.130-210-19-135.sslip.io {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=63072000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+	reverse_proxy thetalab-web:3100
+}

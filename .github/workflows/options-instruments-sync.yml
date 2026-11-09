@@ -16,6 +16,6 @@ jobs:
     steps:
       - name: Call options instrument sync endpoint
         run: |
-          curl -sf -X POST "https://thetalab-beta.vercel.app/api/options-autotrade?resource=instruments-sync" \
+          curl -sf -X POST "https://thetalab.130-210-19-135.sslip.io/api/options-autotrade?resource=instruments-sync" \
             -H "Authorization: Bearer ${{ secrets.OPTIONS_AUTOTRADE_CRON_SECRET }}" \
             -w "\nHTTP %{http_code}\n"

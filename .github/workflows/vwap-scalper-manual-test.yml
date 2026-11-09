@@ -16,15 +16,15 @@ jobs:
     steps:
       - name: Clear today's daily risk lock
         run: |
-          curl -sf -X POST "https://thetalab-beta.vercel.app/api/options-autotrade?resource=vwap-scalper-clear-daily-lock" \
+          curl -sf -X POST "https://thetalab.130-210-19-135.sslip.io/api/options-autotrade?resource=vwap-scalper-clear-daily-lock" \
             -w "\nHTTP %{http_code}\n"
       - name: Call vwap-scalper-scan
         run: |
-          curl -sf -X POST "https://thetalab-beta.vercel.app/api/options-autotrade?resource=vwap-scalper-scan" \
+          curl -sf -X POST "https://thetalab.130-210-19-135.sslip.io/api/options-autotrade?resource=vwap-scalper-scan" \
             -H "Authorization: Bearer ${{ secrets.OPTIONS_AUTOTRADE_CRON_SECRET }}" \
             -w "\nHTTP %{http_code}\n"
       - name: Call vwap-scalper-monitor
         run: |
-          curl -sf -X POST "https://thetalab-beta.vercel.app/api/options-autotrade?resource=vwap-scalper-monitor" \
+          curl -sf -X POST "https://thetalab.130-210-19-135.sslip.io/api/options-autotrade?resource=vwap-scalper-monitor" \
             -H "Authorization: Bearer ${{ secrets.OPTIONS_AUTOTRADE_CRON_SECRET }}" \
             -w "\nHTTP %{http_code}\n"

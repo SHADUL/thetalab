@@ -21,6 +21,6 @@ jobs:
     steps:
       - name: Call paper-scan endpoint
         run: |
-          curl -sf -X POST "https://thetalab-beta.vercel.app/api/options-autotrade?resource=paper-scan&symbol=${{ inputs.symbol || 'NIFTY' }}" \
+          curl -sf -X POST "https://thetalab.130-210-19-135.sslip.io/api/options-autotrade?resource=paper-scan&symbol=${{ inputs.symbol || 'NIFTY' }}" \
             -H "Authorization: Bearer ${{ secrets.OPTIONS_AUTOTRADE_CRON_SECRET }}" \
             -w "\nHTTP %{http_code}\n"

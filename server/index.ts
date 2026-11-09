@@ -36,6 +36,17 @@ async function handlerFor(name: string) {
 
 const app = express();
 app.set('trust proxy', true);
+
+// Access log for API calls only: method, path + resource, status, duration.
+// Never logs headers, bodies or other query params (tokens live there).
+app.use('/api', (req, res, next) => {
+  const t0 = Date.now();
+  res.on('finish', () => {
+    const r = typeof req.query.resource === 'string' ? `?resource=${req.query.resource}` : '';
+    console.log(`${new Date().toISOString()} ${req.method} ${req.baseUrl}${req.path}${r} ${res.statusCode} ${Date.now() - t0}ms`);
+  });
+  next();
+});
 app.disable('x-powered-by');
 
 // Access gate — middleware.ts, unchanged: returns a Response to block, undefined to allow.

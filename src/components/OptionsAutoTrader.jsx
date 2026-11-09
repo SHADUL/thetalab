@@ -602,6 +602,11 @@ function RiskCommandBar({ positions, settings, hideAmounts, setHideAmounts, real
           <div className="text-[9.5px] font-semibold text-muted tracking-wide mb-0.5">LIVE CAPITAL</div>
           <div className="font-display text-[17px] font-bold n leading-tight text-ink">{fmt(brokerCapital)}</div>
           <span className="text-[9px] font-bold" style={{ color: "var(--oat-accent)" }}>{isGrowwBroker ? "GROWW" : "KITE"}</span>
+          {!isGrowwBroker && activeRealFunds?.cash != null && (
+            <span className="text-[9px] font-semibold ml-1.5" style={{ color: activeRealFunds.cash < 0 ? "var(--c-loss, #e5484d)" : "var(--c-muted, #8b8d98)" }}>
+              · cash {fmt(activeRealFunds.cash)}
+            </span>
+          )}
         </div>
       )}
     </>

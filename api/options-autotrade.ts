@@ -671,10 +671,21 @@ async function fetchGrowwBrokerOrdersToday(token: string, todayIST: string): Pro
  * pull of the actual broker balance. AUTO mode must never fire a real
  * order sized against a number the account doesn't actually have.
  */
+/**
+ * Usable F&O margin on Kite = `net` (cash + pledged collateral − debits),
+ * i.e. what Kite itself lets the account trade with. Deliberately NOT the
+ * cash-only `live_balance`: the owner chose (2026-11-09) to size AUTO from
+ * full margin, accepting that collateral-funded positions can leave a cash
+ * shortfall (50:50 rule / option-buy premium) that the broker charges for.
+ */
+function kiteUsableMargin(data: any): number {
+  return Number(data?.net ?? data?.available?.live_balance);
+}
+
 async function fetchRealAvailableFunds(token: string, apiKey: string): Promise<number | null> {
   try {
     const data = await kiteFetch('/user/margins/equity', { token, apiKey });
-    const available = Number(data?.available?.live_balance ?? data?.net);
+    const available = kiteUsableMargin(data);
     return available > 0 ? available : 0;
   } catch {
     return null;
@@ -4230,11 +4241,13 @@ async function handleRealFunds(req: any, res: any, supabase: SupabaseClient) {
 
   try {
     const data = await kiteFetch('/user/margins/equity', { token, apiKey });
-    const availableFunds = Number(data?.available?.live_balance ?? data?.net);
+    const availableFunds = kiteUsableMargin(data);
     const utilised = Number(data?.utilised?.debits);
+    const cash = Number(data?.available?.live_balance);
     res.status(200).json({
       ok: true,
       availableFunds: availableFunds > 0 ? availableFunds : 0,
+      cash: Number.isFinite(cash) ? cash : null,
       utilised: Number.isFinite(utilised) ? utilised : null,
     });
   } catch (err: any) {

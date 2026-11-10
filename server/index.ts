@@ -27,6 +27,7 @@ const API_MODULES: Record<string, string> = {
   'swing-seed-universe': 'api/swing-seed-universe.js',
   'swing-settings': 'api/swing-settings.js',
   'swing-watchlist': 'api/swing-watchlist.js',
+  'swing-india': 'api/swing-india.ts',
 };
 const loaded = new Map<string, (req: any, res: any) => unknown>();
 async function handlerFor(name: string) {

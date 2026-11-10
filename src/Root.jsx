@@ -6,6 +6,7 @@ import OptionsAutoTrader from "./components/OptionsAutoTrader.jsx";
 import NiftyAlphaLadder from "./components/NiftyAlphaLadder.jsx";
 import NiftyAlphaEdge from "./components/NiftyAlphaEdge.jsx";
 import VwapScalper from "./components/VwapScalper.jsx";
+import SwingTrading from "./components/SwingTrading.jsx";
 import Login from "./components/Login.jsx";
 
 /**
@@ -30,6 +31,7 @@ const ALL_SECTIONS = [
   { value: "nifty-alpha-ladder", label: "Nifty Alpha Ladder" },
   { value: "nifty-alpha-edge", label: "Nifty Alpha Edge" },
   { value: "vwap-scalper", label: "VWAP Scalper" },
+  { value: "swing-trading", label: "Swing Trading" },
 ];
 
 // TEMPORARY, per explicit request — every other section stays fully intact
@@ -38,11 +40,15 @@ const ALL_SECTIONS = [
 // while this flag is on, since it's a new, actively-worked-on strategy —
 // not one of the "other sections" the original request meant to hide.
 const ONLY_OPTIONS_AUTO = true;
-const VISIBLE_WHILE_ONLY_OPTIONS_AUTO = new Set(["options-auto", "nifty-alpha-ladder", "nifty-alpha-edge"]);
+const VISIBLE_WHILE_ONLY_OPTIONS_AUTO = new Set(["options-auto", "nifty-alpha-ladder", "nifty-alpha-edge", "swing-trading"]);
 const SECTIONS = ONLY_OPTIONS_AUTO ? ALL_SECTIONS.filter((s) => VISIBLE_WHILE_ONLY_OPTIONS_AUTO.has(s.value)) : ALL_SECTIONS;
 
 export default function Root() {
-  const [section, setSectionState] = useState(() => (ONLY_OPTIONS_AUTO ? "options-auto" : localStorage.getItem(SECTION_KEY) ?? "options"));
+  const [section, setSectionState] = useState(() => {
+    const saved = localStorage.getItem(SECTION_KEY);
+    if (ONLY_OPTIONS_AUTO) return VISIBLE_WHILE_ONLY_OPTIONS_AUTO.has(saved) ? saved : "options-auto";
+    return saved ?? "options";
+  });
   const setSection = (s) => {
     setSectionState(s);
     try { localStorage.setItem(SECTION_KEY, s); } catch { /* private browsing, etc. — just won't persist */ }
@@ -113,6 +119,7 @@ export default function Root() {
           : section === "options-auto" ? <OptionsAutoTrader />
           : section === "nifty-alpha-ladder" ? <NiftyAlphaLadder />
           : section === "nifty-alpha-edge" ? <NiftyAlphaEdge />
+          : section === "swing-trading" ? <SwingTrading />
           : <VwapScalper />}
       </div>
     </div>

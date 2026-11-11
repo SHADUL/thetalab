@@ -21,7 +21,7 @@ export type ConfirmationDecision = 'CONFIRMED' | 'IC_CANDIDATE' | 'NO_TRADE';
 export type ConfirmationAlignment = 'ALIGNED' | 'CONFLICT' | 'STRONG_CONFLICT' | 'NEUTRAL_RR' | 'UNEVALUATED';
 export type ConfirmationReasonCode =
   | 'RR_TREND_ALIGNED' | 'RR_TREND_CONFLICT' | 'RR_TREND_STRONG_CONFLICT'
-  | 'RR_NEUTRAL_TREND_STRONG' | 'RR_TREND_UNKNOWN' | 'RR_TREND_STALE' | 'IC_NOT_SUITABLE';
+  | 'RR_NEUTRAL_TREND_STRONG' | 'RR_NEUTRAL_TREND_STRONG_BULL' | 'RR_TREND_UNKNOWN' | 'RR_TREND_STALE' | 'IC_NOT_SUITABLE';
 
 export type DirectionConfirmationMode = 'RR_ONLY' | 'RR_TREND_OBSERVE' | 'RR_TREND_ENFORCED';
 export const DEFAULT_DIRECTION_CONFIRMATION_MODE: DirectionConfirmationMode = 'RR_TREND_OBSERVE';
@@ -106,6 +106,13 @@ export function selectDirectionConfirmed(input: ConfirmationInput): Confirmation
 
   if (rrBias === 'neutral') {
     if (side === 'neutral') return icCandidate(input, 'RR_TREND_ALIGNED', 'NEUTRAL_RR', 'Neutral skew and neutral trend — range-style structure.');
+    // Owner decision (2026-11-11): in a STRONG uptrend with skew showing no
+    // opposing signal, sell puts in the trend's direction. Deliberately
+    // one-sided — a strong DOWNtrend with neutral skew still stays out.
+    if (trend === 'STRONG_BULLISH') {
+      return { decision: 'CONFIRMED', structure: 'Bull Put Spread', reasonCode: 'RR_NEUTRAL_TREND_STRONG_BULL', alignment: 'NEUTRAL_RR',
+        reason: 'Neutral skew with a STRONG_BULLISH trend — selling put credit in the trend direction.' };
+    }
     if (strong) {
       return strongTrendVeto
         ? noTrade('RR_NEUTRAL_TREND_STRONG', 'NEUTRAL_RR', `Neutral skew but ${trend} — no directional or range structure is justified.`)

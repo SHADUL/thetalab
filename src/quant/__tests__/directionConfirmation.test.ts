@@ -32,7 +32,7 @@ const MATRIX: Array<[Bias, DirectionTrend, string, string | null, string]> = [
   ['bearish', 'BULLISH', 'IC_CANDIDATE', 'Iron Condor', 'RR_TREND_CONFLICT'],
   ['bearish', 'STRONG_BULLISH', 'NO_TRADE', null, 'RR_TREND_STRONG_CONFLICT'],
   ['neutral', 'NEUTRAL', 'IC_CANDIDATE', 'Iron Condor', 'RR_TREND_ALIGNED'],
-  ['neutral', 'STRONG_BULLISH', 'NO_TRADE', null, 'RR_NEUTRAL_TREND_STRONG'],
+  ['neutral', 'STRONG_BULLISH', 'CONFIRMED', 'Bull Put Spread', 'RR_NEUTRAL_TREND_STRONG_BULL'],
   ['neutral', 'STRONG_BEARISH', 'NO_TRADE', null, 'RR_NEUTRAL_TREND_STRONG'],
   ['neutral', 'BULLISH', 'IC_CANDIDATE', 'Iron Condor', 'RR_TREND_CONFLICT'], // gap in the stated matrix: mild trend, no strong veto applies
   ['neutral', 'BEARISH', 'IC_CANDIDATE', 'Iron Condor', 'RR_TREND_CONFLICT'],
@@ -75,7 +75,9 @@ test('no bearish workaround: when both signals are bearish the structure is bear
 
 test('Version B (no strong-trend veto): strong conflicts become Iron Condor candidates instead of NO_TRADE', () => {
   assert.equal(sel('bullish', 'STRONG_BEARISH', { veto: false }).decision, 'IC_CANDIDATE');
-  assert.equal(sel('neutral', 'STRONG_BULLISH', { veto: false }).decision, 'IC_CANDIDATE');
+  assert.equal(sel('neutral', 'STRONG_BEARISH', { veto: false }).decision, 'IC_CANDIDATE');
+  // the strong-uptrend bull-put rule applies with or without the veto
+  assert.equal(sel('neutral', 'STRONG_BULLISH', { veto: false }).structure, 'Bull Put Spread');
   // missing data still blocks in B
   assert.equal(sel('bullish', 'UNKNOWN', { veto: false }).decision, 'NO_TRADE');
 });
@@ -197,4 +199,15 @@ test('expiries excluded by the DTE band produce no telemetry row (no candidate w
   const { chain } = normalise(skewedChain(1, 0.13, 0.18));
   const r = evaluateExpiriesWithConfirmation(enrichChain(chain), BASE_PARAMS, ctx('RR_TREND_OBSERVE', 'BULLISH'));
   assert.equal(r.telemetry.length, 0);
+});
+
+test('ENFORCED: neutral skew + STRONG_BULLISH builds a Bull Put Spread (put side) instead of declining', () => {
+  const { chain } = normalise(skewedChain(10, 0.14, 0.14));
+  const enforced = evaluateExpiriesWithConfirmation(enrichChain(chain), BASE_PARAMS, ctx('RR_TREND_ENFORCED', 'STRONG_BULLISH'));
+  const e = enforced.evaluations[0];
+  assert.equal(enforced.telemetry[0].rrDirection, 'neutral');
+  assert.equal(e.strategyLabel, 'Bull Put Spread');
+  assert.equal(enforced.telemetry[0].reasonCode, 'RR_NEUTRAL_TREND_STRONG_BULL');
+  assert.ok(e.best, 'a put spread should price on this chain');
+  for (const leg of e.best!.result.legs) assert.equal(leg.right, 'PE');
 });

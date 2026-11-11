@@ -9,6 +9,10 @@ import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import gate from '../middleware.ts';
+import { installKiteThrottle } from './kiteThrottle.ts';
+
+// Before any handler loads: every Kite GET in this process shares one pacing queue.
+installKiteThrottle();
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const dist = path.join(root, 'dist');

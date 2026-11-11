@@ -702,7 +702,7 @@ async function fetchRealAvailableFunds(token: string, apiKey: string): Promise<n
  */
 async function fetchBrokerPositions(token: string, apiKey: string): Promise<BrokerPosition[] | null> {
   try {
-    const data = await kiteFetch('/positions', { token, apiKey });
+    const data = await kiteFetch('/portfolio/positions', { token, apiKey });
     const net: any[] = data?.net ?? [];
     return net
       .filter((p) => (p.exchange === 'NFO' || p.exchange === 'BFO') && Number(p.quantity) !== 0)

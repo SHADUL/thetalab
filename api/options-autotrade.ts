@@ -209,6 +209,18 @@ async function kiteFetch(path: string, opts: { method?: string; token: string; a
  * ends of the same position on the same pricing convention removes that
  * artifact.
  */
+/**
+ * The price a leg would actually CLOSE at right now: a short (SELL) leg is
+ * bought back at the ask, a long (BUY) leg is sold at the bid. Falls back to
+ * mid/last when that side of the book is empty. Used for real (AUTO)
+ * positions, whose P&L and exits should reflect a real exit, not the mid.
+ */
+function closeNowPrice(quote: any, side: 'BUY' | 'SELL'): number | null {
+  const level = side === 'SELL' ? quote?.depth?.sell?.[0]?.price : quote?.depth?.buy?.[0]?.price;
+  const px = Number(level);
+  return px > 0 ? px : midOrLastPrice(quote);
+}
+
 function midOrLastPrice(quote: any): number | null {
   const bid = Number(quote?.depth?.buy?.[0]?.price);
   const ask = Number(quote?.depth?.sell?.[0]?.price);
@@ -2315,7 +2327,7 @@ async function resolveStreamTokens(supabase: SupabaseClient, keys: string[]): Pr
 /** Price-driven exits waiting for their confirming pass (positionId -> reason). */
 const pendingOptionExits = new Map<number, string>();
 /** Latest unrealized P&L per ACTIVE position, recomputed every monitor pass (≈1 s live) — served to the dashboard by `live-marks` without a DB read. */
-const liveOptionMarks = new Map<number, { pnl: number; at: number }>();
+const liveOptionMarks = new Map<number, { pnl: number; pnlLtp: number; at: number }>();
 /** Last time each position's mark (unrealized P&L + per-leg prices) was written. */
 const optionMarkPersistedAt = new Map<number, number>();
 let positionMonitorBusySince = 0;
@@ -2505,7 +2517,14 @@ async function runPositionMonitor(req: any, res: any, supabase: SupabaseClient) 
       if (recovered) { closed.push(recovered); continue; }
     }
 
+    // AUTO (real money) is valued at what it would actually close for right
+    // now — buy shorts back at the ask, sell longs at the bid — and its
+    // profit target / stop-loss / P&L all use that (owner decision
+    // 2026-11-12). PAPER/SHADOW keep the mid. ltpCostToClose mirrors Kite's
+    // own P&L (last traded price) for display only.
+    const valueAtCloseNow = p.execution_mode === 'AUTO';
     let currentCostToClose = 0;
+    let ltpCostToClose = 0;
     let missingQuote = false;
     const legQuoteUpdates: Array<{ id: number; price: number }> = [];
     for (const l of legs) {
@@ -2517,12 +2536,16 @@ async function runPositionMonitor(req: any, res: any, supabase: SupabaseClient) 
       // closing order against a leg that no longer exists at the broker.
       if (l.exit_fill_price != null) {
         currentCostToClose += (l.side === 'SELL' ? 1 : -1) * Number(l.exit_fill_price) * l.quantity;
+        ltpCostToClose += (l.side === 'SELL' ? 1 : -1) * Number(l.exit_fill_price) * l.quantity;
         continue;
       }
       const kiteSymbol = kitePriceSymbolFor(p, l);
-      const price = kiteSymbol ? midOrLastPrice(quoteMap.get(`${exchange}:${kiteSymbol}`)) : null;
+      const legQuote = kiteSymbol ? quoteMap.get(`${exchange}:${kiteSymbol}`) : undefined;
+      const price = legQuote ? (valueAtCloseNow ? closeNowPrice(legQuote, l.side) : midOrLastPrice(legQuote)) : null;
       if (price == null) { missingQuote = true; continue; }
       currentCostToClose += (l.side === 'SELL' ? 1 : -1) * price * l.quantity;
+      const ltp = Number(legQuote?.last_price) > 0 ? Number(legQuote.last_price) : price;
+      ltpCostToClose += (l.side === 'SELL' ? 1 : -1) * ltp * l.quantity;
       legQuoteUpdates.push({ id: l.id, price });
     }
     if (missingQuote) { await log('error', `Position #${p.id}: could not re-quote every leg — skipped this cycle.`, undefined, p.execution_mode); continue; }
@@ -2573,7 +2596,7 @@ async function runPositionMonitor(req: any, res: any, supabase: SupabaseClient) 
       ? actualFillCreditFromLegs(legs)
       : (Number(p.max_profit) || 0);
     const unrealizedPnl = entryCreditBaseline - currentCostToClose;
-    liveOptionMarks.set(p.id, { pnl: unrealizedPnl, at: Date.now() });
+    liveOptionMarks.set(p.id, { pnl: unrealizedPnl, pnlLtp: entryCreditBaseline - ltpCostToClose, at: Date.now() });
     if (persistMark) {
       const { error: markErr } = await supabase.from('options_autotrade_positions').update({
         unrealized_pnl: unrealizedPnl, unrealized_pnl_updated_at: new Date().toISOString(),
@@ -3836,10 +3859,10 @@ async function handleManualClose(req: any, res: any, supabase: SupabaseClient) {
 function handleLiveMarks(req: any, res: any) {
   if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
   const now = Date.now();
-  const marks: Record<string, { pnl: number; at: string }> = {};
+  const marks: Record<string, { pnl: number; pnlLtp: number; at: string }> = {};
   for (const [id, m] of liveOptionMarks) {
     if (now - m.at > 120_000) { liveOptionMarks.delete(id); continue; }
-    marks[id] = { pnl: Math.round(m.pnl * 100) / 100, at: new Date(m.at).toISOString() };
+    marks[id] = { pnl: Math.round(m.pnl * 100) / 100, pnlLtp: Math.round(m.pnlLtp * 100) / 100, at: new Date(m.at).toISOString() };
   }
   res.status(200).json({ marks, stream: marketStream.isHealthy(), serverTime: new Date(now).toISOString() });
 }

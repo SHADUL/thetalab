@@ -1098,6 +1098,11 @@ function PositionRow({ p, onClosed }) {
           {p.status === "ACTIVE" && p.unrealized_pnl != null && (
             <div className="text-[9.5px] text-faint font-normal n"><SinceTimer iso={p.unrealized_pnl_updated_at} /></div>
           )}
+          {p.status === "ACTIVE" && p.execution_mode === "AUTO" && (
+            <div className="text-[9.5px] text-faint font-normal n leading-tight mt-0.5" title="Main figure: what the position would close for right now (shorts bought back at the ask, longs sold at the bid) — stop-loss and target use this. Kite LTP: Kite's own P&L, from last traded prices.">
+              close-now · {p.pnl_ltp != null ? <>Kite LTP <span className={p.pnl_ltp >= 0 ? "text-gain" : "text-loss"}>{`${p.pnl_ltp >= 0 ? "+" : ""}${inr(p.pnl_ltp)}`}</span></> : "Kite LTP —"}
+            </div>
+          )}
         </td>
       </tr>
       {expanded && (
@@ -1318,7 +1323,7 @@ export default function OptionsAutoTrader() {
         active: prev.active.map((p) => {
           const m = marks[p.id];
           if (!m || (p.unrealized_pnl_updated_at && new Date(m.at) <= new Date(p.unrealized_pnl_updated_at))) return p;
-          return { ...p, unrealized_pnl: m.pnl, unrealized_pnl_updated_at: m.at };
+          return { ...p, unrealized_pnl: m.pnl, pnl_ltp: m.pnlLtp, unrealized_pnl_updated_at: m.at };
         }),
       }));
     }).catch(() => {});

@@ -6,9 +6,9 @@ name: Swing Auto-Trade Tick
 # only needs to be a superset, not exact. Using GitHub Actions rather than
 # Vercel's own cron so this isn't gated by Vercel plan-specific interval
 # limits.
+# Schedule removed 2026-11-12: the old Swing Scanner / swing auto-trade
+# section is retired (hidden, data deleted). Manual dispatch kept only.
 on:
-  schedule:
-    - cron: '*/5 3-10 * * 1-5'
   workflow_dispatch: {}
 
 jobs:

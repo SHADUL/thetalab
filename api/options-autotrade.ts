@@ -3938,6 +3938,7 @@ function vwapScalperParamsFromSettings(settings: any): VwapScalperParams {
  * rather than silently no-op'd, so it's never mistaken for "no signals
  * fired" when the real reason is "sizing has nothing to size against".
  */
+// oxlint-disable-next-line no-unused-vars -- retired 2026-11-12, kept for revival
 async function handleVwapScalperScan(req: any, res: any, supabase: SupabaseClient) {
   if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
 
@@ -4093,6 +4094,7 @@ async function handleVwapScalperScan(req: any, res: any, supabase: SupabaseClien
  * Persists unrealized_pnl every cycle regardless of whether an exit also
  * triggers, mirroring that same fix.
  */
+// oxlint-disable-next-line no-unused-vars -- retired 2026-11-12, kept for revival
 async function handleVwapScalperMonitor(req: any, res: any, supabase: SupabaseClient) {
   if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
 
@@ -4623,8 +4625,14 @@ export default async function handler(req: any, res: any) {
   if (resource === 'paper-scan') return handlePaperScan(req, res, supabase);
   if (resource === 'position-monitor') return handlePositionMonitor(req, res, supabase);
   if (resource === 'alpha-edge-tick') return handleAlphaEdgeTick(req, res, supabase);
-  if (resource === 'vwap-scalper-scan') return handleVwapScalperScan(req, res, supabase);
-  if (resource === 'vwap-scalper-monitor') return handleVwapScalperMonitor(req, res, supabase);
+  // VWAP Scalper is retired (owner decision 2026-11-12: section hidden, its
+  // data deleted to fit the Supabase free tier). The external cron still
+  // calls these every minute, so they answer a cheap no-op instead of
+  // pulling Kite data and writing logs. Handlers stay in place for revival.
+  if (resource === 'vwap-scalper-scan' || resource === 'vwap-scalper-monitor') {
+    res.status(200).json({ ok: true, skipped: 'retired' });
+    return;
+  }
   if (resource === 'shadow-health') return handleShadowHealth(req, res, supabase);
   if (resource === 'vwap-r2-verify') return handleVwapR2Verify(req, res, supabase);
   if (resource === 'groww-probe') return handleGrowwProbe(req, res, supabase);

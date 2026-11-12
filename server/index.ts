@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import gate from '../middleware.ts';
 import { installKiteThrottle } from './kiteThrottle.ts';
 import { startNakedSellScheduler } from './nakedSellScheduler.ts';
+import { startLogRetention } from './logRetention.ts';
 
 // Before any handler loads: every Kite GET in this process shares one pacing queue.
 installKiteThrottle();
@@ -97,4 +98,5 @@ app.use((err: any, _req: any, res: any, _next: any) => {
 app.listen(PORT, () => {
   console.log(`thetalab listening on :${PORT}`);
   startNakedSellScheduler();
+  startLogRetention();
 });

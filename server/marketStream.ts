@@ -70,6 +70,8 @@ const SUPERVISE_MS = 3_000;
 const INTEREST_TTL_MS = 120_000;
 const SILENCE_LIMIT_MS = 10_000; // Kite heartbeats every ~1 s
 const OPEN_MIN = 9 * 60, CLOSE_MIN = 15 * 60 + 45;
+/** Kite allows 3,000 instruments per connection; keep headroom. Tokens past the cap are simply not streamed (callers fall back to REST). */
+export const MAX_STREAM_TOKENS = 2_900;
 
 class MarketStream {
   private quotes = new Map<number, LiveQuote>();
@@ -91,7 +93,10 @@ class MarketStream {
     const fresh: number[] = [];
     for (const t of tokens) {
       if (!(t > 0)) continue;
-      if (!this.interest.has(t)) fresh.push(t);
+      if (!this.interest.has(t)) {
+        if (this.interest.size >= MAX_STREAM_TOKENS) continue;
+        fresh.push(t);
+      }
       this.interest.set(t, exp);
     }
     if (fresh.length && this.isHealthy()) this.subscribe(fresh);

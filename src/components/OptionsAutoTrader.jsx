@@ -362,7 +362,19 @@ const DEFAULT_DRAFT = {
   max_consecutive_losses: 3, min_max_profit_rupees: 2000, entry_window_start_minutes_ist: 585,
 };
 
-/** How stale a mark-to-market figure is — position-monitor only refreshes it every 5 minutes, so this is never presented as live-live. */
+const LIVE_MARKS_MS = 2_000; // per-second P&L from the monitor's in-memory marks (no DB read)
+
+/** Ticking age of a mark-to-market figure: "4s ago", "1m 12s ago". Re-renders itself every second. */
+function SinceTimer({ iso }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1_000); return () => clearInterval(t); }, []);
+  if (!iso) return null;
+  const secs = Math.max(0, Math.floor((now - new Date(iso).getTime()) / 1_000));
+  const label = secs < 60 ? `${secs}s ago` : secs < 3600 ? `${Math.floor(secs / 60)}m ${secs % 60}s ago` : `${Math.floor(secs / 3600)}h ago`;
+  return <span style={{ color: secs > 30 ? "var(--c-warn)" : undefined }}>{secs <= 3 ? "● live · " : ""}{label}</span>;
+}
+
+/** Coarse age for non-price timestamps (e.g. broker sync). */
 function agoLabel(iso) {
   if (!iso) return null;
   const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60_000);
@@ -1084,7 +1096,7 @@ function PositionRow({ p, onClosed }) {
         <td className={`py-2.5 pr-4 text-right n text-[12px] font-semibold ${pnl == null ? "text-faint" : pnl >= 0 ? "text-gain" : "text-loss"}`}>
           {pnl != null ? `${pnl >= 0 ? "+" : ""}${inr(pnl)}` : "—"}
           {p.status === "ACTIVE" && p.unrealized_pnl != null && (
-            <div className="text-[9.5px] text-faint font-normal">{agoLabel(p.unrealized_pnl_updated_at)}</div>
+            <div className="text-[9.5px] text-faint font-normal n"><SinceTimer iso={p.unrealized_pnl_updated_at} /></div>
           )}
         </td>
       </tr>
@@ -1292,6 +1304,28 @@ export default function OptionsAutoTrader() {
     timerRef.current = setInterval(load, POLL_MS);
     return () => clearInterval(timerRef.current);
   }, [load]);
+
+  // Per-second P&L for open positions: the monitor's in-memory marks, merged
+  // over the (60 s) positions poll. Only runs while something is open.
+  const hasActive = positions.active.length > 0;
+  useEffect(() => {
+    if (!hasActive) return undefined;
+    const pull = () => fetch("/api/options-autotrade?resource=live-marks").then((r) => r.json()).then((b) => {
+      const marks = b?.marks;
+      if (!marks || !Object.keys(marks).length) return;
+      setPositions((prev) => ({
+        ...prev,
+        active: prev.active.map((p) => {
+          const m = marks[p.id];
+          if (!m || (p.unrealized_pnl_updated_at && new Date(m.at) <= new Date(p.unrealized_pnl_updated_at))) return p;
+          return { ...p, unrealized_pnl: m.pnl, unrealized_pnl_updated_at: m.at };
+        }),
+      }));
+    }).catch(() => {});
+    pull();
+    const t = setInterval(pull, LIVE_MARKS_MS);
+    return () => clearInterval(t);
+  }, [hasActive]);
 
   const setField = (key, value) => setDraft((d) => ({ ...d, [key]: value }));
 

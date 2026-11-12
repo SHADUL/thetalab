@@ -807,6 +807,8 @@ async function fetchDbReconciliationInputs(supabase: SupabaseClient, broker: 'KI
  * on any failure — the caller treats an empty/short series as "exclude
  * premiumEdge from the score", never as a fabricated/neutral edge.
  */
+const historicalClosesCache = new Map<string, { day: string; closes: HistoricalClose[] }>();
+
 async function fetchHistoricalCloses(
   instrumentToken: number,
   opts: { token: string; apiKey: string },
@@ -1364,7 +1366,13 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   let historicalCloses: HistoricalClose[] = [];
   if (instrumentToken) {
     try {
-      historicalCloses = await fetchHistoricalCloses(instrumentToken, { token, apiKey });
+      // Daily closes only change once a day: cached per symbol per IST date.
+      const cachedCloses = historicalClosesCache.get(symbol);
+      if (cachedCloses?.day === todayIST) historicalCloses = cachedCloses.closes;
+      else {
+        historicalCloses = await fetchHistoricalCloses(instrumentToken, { token, apiKey });
+        if (historicalCloses.length) historicalClosesCache.set(symbol, { day: todayIST, closes: historicalCloses });
+      }
     } catch (err: any) {
       await sharedLog('error', `Historical closes fetch failed for ${symbol} — premiumEdge will be excluded, not fabricated`, { message: err.message });
     }
@@ -1406,7 +1414,24 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     }
   }
 
-  for (const batch of chunk(allKeys, MAX_QUOTE_INSTRUMENTS)) {
+  // Live WebSocket prices first (server/marketStream.ts): every chain
+  // contract is kept subscribed while scans keep asking for it, so from the
+  // second scan on the chain is read from memory — exact bid/ask depth, no
+  // Kite /quote call. Kite REST only for contracts the stream can't vouch
+  // for yet (first scan after a restart, a just-listed strike, or past the
+  // stream's token cap).
+  const tokenByKey = new Map<string, number>(instrumentRows.map((r: any) => [`${exchange}:${r.tradingsymbol}`, Number(r.instrument_token)]));
+  marketStream.want(allKeys.map((k) => tokenByKey.get(k)).filter((t): t is number => t !== undefined), 180_000);
+  const restKeys: string[] = [];
+  for (const key of allKeys) {
+    const meta = metaByKey.get(key);
+    const streamToken = tokenByKey.get(key);
+    const lq = streamToken !== undefined ? marketStream.get(streamToken) : null;
+    if (meta && lq) rows.push(kiteQuoteToOptionRow({ strike: meta.strike, right: meta.right, expiryEpochMs: meta.expiryEpochMs, asOfEpochMs: now, quote: toRestQuote(lq) }));
+    else restKeys.push(key);
+  }
+
+  for (const batch of chunk(restKeys, MAX_QUOTE_INSTRUMENTS)) {
     let quoteData: any;
     try {
       quoteData = await kiteFetch(`/quote?${batch.map((k: string) => `i=${encodeURIComponent(k)}`).join('&')}`, { token, apiKey });
@@ -2248,6 +2273,8 @@ async function resolveStreamTokens(supabase: SupabaseClient, keys: string[]): Pr
 
 /** Price-driven exits waiting for their confirming pass (positionId -> reason). */
 const pendingOptionExits = new Map<number, string>();
+/** Latest unrealized P&L per ACTIVE position, recomputed every monitor pass (≈1 s live) — served to the dashboard by `live-marks` without a DB read. */
+const liveOptionMarks = new Map<number, { pnl: number; at: number }>();
 /** Last time each position's mark (unrealized P&L + per-leg prices) was written. */
 const optionMarkPersistedAt = new Map<number, number>();
 let positionMonitorBusySince = 0;
@@ -2505,6 +2532,7 @@ async function runPositionMonitor(req: any, res: any, supabase: SupabaseClient) 
       ? actualFillCreditFromLegs(legs)
       : (Number(p.max_profit) || 0);
     const unrealizedPnl = entryCreditBaseline - currentCostToClose;
+    liveOptionMarks.set(p.id, { pnl: unrealizedPnl, at: Date.now() });
     if (persistMark) {
       const { error: markErr } = await supabase.from('options_autotrade_positions').update({
         unrealized_pnl: unrealizedPnl, unrealized_pnl_updated_at: new Date().toISOString(),
@@ -3757,6 +3785,24 @@ async function handleManualClose(req: any, res: any, supabase: SupabaseClient) {
 }
 
 /** Browser-facing: list positions with their legs, active and closed separately. No shared-secret gate — same reasoning as handleSettings. */
+/**
+ * Browser-facing, tiny and DB-free: the monitor's in-memory unrealized P&L
+ * per open position (refreshed every pass, ≈1 s on live prices), for the
+ * dashboard's per-second P&L. Marks older than 2 minutes are dropped
+ * (position closed, or monitor not running) — the client then keeps the
+ * DB value from `positions`.
+ */
+function handleLiveMarks(req: any, res: any) {
+  if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  const now = Date.now();
+  const marks: Record<string, { pnl: number; at: string }> = {};
+  for (const [id, m] of liveOptionMarks) {
+    if (now - m.at > 120_000) { liveOptionMarks.delete(id); continue; }
+    marks[id] = { pnl: Math.round(m.pnl * 100) / 100, at: new Date(m.at).toISOString() };
+  }
+  res.status(200).json({ marks, stream: marketStream.isHealthy(), serverTime: new Date(now).toISOString() });
+}
+
 async function handlePositions(req: any, res: any, supabase: SupabaseClient) {
   if (req.method !== 'GET') { res.status(405).json({ error: 'method_not_allowed' }); return; }
   const { data, error } = await supabase
@@ -4690,6 +4736,7 @@ export default async function handler(req: any, res: any) {
   if (resource === 'indices') return handleIndices(req, res, supabase);
   if (resource === 'log') return handleLog(req, res, supabase);
   if (resource === 'kill-switch') return handleKillSwitch(req, res, supabase);
+  if (resource === 'live-marks') return handleLiveMarks(req, res);
   if (resource === 'daily-stats') return handleDailyStats(req, res, supabase);
   if (resource === 'clear-daily-lock') return handleClearDailyLock(req, res, supabase);
   if (resource === 'vwap-scalper-settings') return handleVwapScalperSettings(req, res, supabase);

@@ -23,7 +23,11 @@ function frame(packets: Buffer[]): Buffer {
 
 test('decodePacket reads full F&O packets with best bid/ask', () => {
   const q = decodePacket(fullPacket(12345678, 94.4, 94.3, 94.55), 1)!;
-  assert.deepEqual(q, { token: 12345678, ltp: 94.4, bid: 94.3, ask: 94.55, volume: 12345, oi: 500, receivedAt: 1 });
+  const { depth, ...rest } = q;
+  assert.deepEqual(rest, { token: 12345678, ltp: 94.4, bid: 94.3, ask: 94.55, volume: 12345, oi: 500, receivedAt: 1 });
+  assert.equal(depth!.buy.length, 5);
+  assert.deepEqual(depth!.buy[0], { quantity: 75, price: 94.3, orders: 0 });
+  assert.equal(depth!.sell[0].price, 94.55);
 });
 
 test('decodePacket reads index packets (last price only)', () => {
@@ -47,4 +51,14 @@ test('decodeFrame splits multi-packet frames and ignores heartbeats', () => {
   assert.equal(qs.length, 2);
   assert.equal(qs[1].ltp, 81807.44);
   assert.equal(decodeFrame(Buffer.alloc(1), 5).length, 0);
+});
+
+test('toRestQuote mirrors Kite REST quote shape', async () => {
+  const { toRestQuote } = await import('../marketStream.ts');
+  const r = toRestQuote(decodePacket(fullPacket(1, 10, 9.9, 10.1), 1)!);
+  assert.equal(r.last_price, 10);
+  assert.equal(r.depth!.buy[0].price, 9.9);
+  assert.equal(r.depth!.sell[0].price, 10.1);
+  const idx = Buffer.alloc(8); idx.writeUInt32BE(265, 0); idx.writeInt32BE(100, 4);
+  assert.deepEqual(toRestQuote(decodePacket(idx, 1)!), { last_price: 1 });
 });

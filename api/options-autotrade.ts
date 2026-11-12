@@ -139,6 +139,7 @@ import { payoffCurve } from '../src/nifty-alpha-edge/structure.ts';
 import { UNIT_BUDGET_RUPEES as ALPHA_EDGE_UNIT_BUDGET } from '../src/nifty-alpha-edge/parameters.ts';
 import { isTradingDay as nseIsTradingDay } from '../src/nifty-alpha-ladder/calendar/signalCalendar.ts';
 import { fetchNfoInstrumentsCsv, parseNfoFutures, resolveNearestFuture } from '../src/nifty-alpha-ladder/live/futuresResolver.ts';
+import { marketStream, toRestQuote } from '../server/marketStream.ts';
 
 const KITE_BASE = 'https://api.kite.trade';
 
@@ -2224,14 +2225,57 @@ function sleep(ms: number): Promise<void> {
  * The external trigger (cron-job.org) only fires once a minute — cron
  * services floor at 1-minute granularity, there's no faster external
  * schedule to ask for. Rather than one re-quote per minute, this re-runs
- * its own fetch-quote-evaluate pass internally every SUB_INTERVAL_MS,
+ * its own fetch-quote-evaluate pass internally (every 1 s on live WebSocket
+ * prices, every 8 s on the REST fallback — see runPositionMonitor),
  * budgeted to fit inside this function's own maxDuration (60s, see
  * vercel.json) with headroom for the final response — turning one
  * 1-minute-resolution check into several ~8-second-resolution ones per
  * invocation, without a second always-on process to operate.
  */
+// Live-price plumbing for the position monitor (server/marketStream.ts).
+// Kite index tokens are fixed; option tokens are resolved once from
+// options_instruments and cached for the life of the process.
+const INDEX_STREAM_TOKEN: Record<string, number> = { 'NSE:NIFTY 50': 256265, 'NSE:NIFTY BANK': 260105, 'BSE:SENSEX': 265 };
+const streamTokenByKey = new Map<string, number>(Object.entries(INDEX_STREAM_TOKEN));
+
+async function resolveStreamTokens(supabase: SupabaseClient, keys: string[]): Promise<void> {
+  const missing = keys.filter((k) => !streamTokenByKey.has(k));
+  if (!missing.length) return;
+  const { data } = await supabase.from('options_instruments').select('exchange,tradingsymbol,instrument_token')
+    .in('tradingsymbol', missing.map((k) => k.slice(k.indexOf(':') + 1)));
+  for (const r of data ?? []) streamTokenByKey.set(`${r.exchange}:${r.tradingsymbol}`, Number(r.instrument_token));
+}
+
+/** Price-driven exits waiting for their confirming pass (positionId -> reason). */
+const pendingOptionExits = new Map<number, string>();
+/** Last time each position's mark (unrealized P&L + per-leg prices) was written. */
+const optionMarkPersistedAt = new Map<number, number>();
+let positionMonitorBusySince = 0;
+
+/**
+ * Single-runner guard: cron-job.org and the GitHub workflow can both fire;
+ * only one monitor loop may run at a time so an exit can never be acted on
+ * twice in parallel. A loop older than 90 s is assumed dead and replaced.
+ */
 async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClient) {
   if (req.method !== 'POST') { res.status(405).json({ error: 'method_not_allowed' }); return; }
+  if (positionMonitorBusySince && Date.now() - positionMonitorBusySince < 90_000) {
+    res.status(200).json({ ok: true, skipped: 'already_running' });
+    return;
+  }
+  const mine = Date.now();
+  positionMonitorBusySince = mine;
+  try {
+    await runPositionMonitor(req, res, supabase);
+  } catch (err: any) {
+    console.error(`[position-monitor] loop failed: ${err?.message ?? err}`);
+    if (!res.headersSent) res.status(500).json({ ok: false, error: 'monitor_failed', message: err?.message });
+  } finally {
+    if (positionMonitorBusySince === mine) positionMonitorBusySince = 0;
+  }
+}
+
+async function runPositionMonitor(req: any, res: any, supabase: SupabaseClient) {
 
   const apiKey = process.env.KITE_API_KEY;
   if (!apiKey) { res.status(500).json({ error: 'server_misconfigured' }); return; }
@@ -2262,26 +2306,47 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
   // pass this invocation makes, not reset per pass, so the response
   // reports the whole invocation's work, not just its last 8 seconds.
   const startedAt = Date.now();
-  const SUB_INTERVAL_MS = 8_000;
-  // Must finish inside the external cron's 30 s request timeout (cron-job.org's
-  // maximum) — a longer loop made every run report "Failed (timeout)" and
-  // risked the scheduler auto-disabling the job that drives all exits.
-  const MAX_LOOP_MS = 25_000;
+  // With live WebSocket prices the loop re-checks every second (no Kite REST
+  // call, positions re-read from the DB only every 10 s); without them it
+  // falls back to the original 8 s REST cadence.
+  const subIntervalMs = () => (marketStream.isHealthy() ? 1_000 : 8_000);
+  const POSITIONS_REFRESH_MS = 10_000;
+  const MARK_PERSIST_MS = 10_000;
+  // The cron fires once a minute. The request is answered immediately (202)
+  // and the loop keeps running for up to 55 s in the background, so exits
+  // are checked continuously instead of only in the first ~25 s of each
+  // minute (the old limit came from Vercel / cron-job.org's 30 s request
+  // timeout). handlePositionMonitor's guard stops loops from overlapping.
+  const MAX_LOOP_MS = 55_000;
   let iterations = 0;
   let lastCheckedCount = 0;
   const closed: Array<{ positionId: number; symbol: string; reason: string | null; realizedPnl: number }> = [];
   // undefined = not yet fetched this invocation; null = fetched, no session exists. Fetched at most once per INVOCATION (cached across passes), only if a GROWW-broker position actually needs to place a real closing order.
   let growwTokenForClosing: string | null | undefined;
 
+  res.status(202).json({ ok: true, accepted: true, loopMs: MAX_LOOP_MS });
+
+  let cachedPositions: any[] | null = null;
+  let positionsFetchedAt = 0;
+  let closedCountAtFetch = 0;
   while (true) {
     iterations++;
     const passStartedAt = Date.now();
-    const { data: positions, error: posErr } = await supabase
-      .from('options_autotrade_positions').select('*, options_autotrade_legs(*)').eq('status', 'ACTIVE');
-    if (posErr) {
-      if (iterations === 1) { res.status(502).json({ ok: false, error: 'supabase_error', message: posErr.message }); return; }
-      await supabase.from('options_autotrade_log').insert({ level: 'error', message: `Position-monitor: pass #${iterations} failed to fetch open positions — stopping this invocation's sub-minute loop early.`, detail: { message: posErr.message } });
-      break;
+    const liveCadence = marketStream.isHealthy();
+    let positions: any[] | null = cachedPositions;
+    let freshFetch = false;
+    if (!positions || !liveCadence || Date.now() - positionsFetchedAt >= POSITIONS_REFRESH_MS || closed.length !== closedCountAtFetch) {
+      const { data, error: posErr } = await supabase
+        .from('options_autotrade_positions').select('*, options_autotrade_legs(*)').eq('status', 'ACTIVE');
+      if (posErr) {
+        await supabase.from('options_autotrade_log').insert({ level: 'error', message: `Position-monitor: pass #${iterations} failed to fetch open positions — stopping this invocation's sub-minute loop early.`, detail: { message: posErr.message } });
+        break;
+      }
+      positions = data ?? [];
+      freshFetch = true;
+      cachedPositions = positions;
+      positionsFetchedAt = Date.now();
+      closedCountAtFetch = closed.length;
     }
     lastCheckedCount = positions?.length ?? 0;
     if (!positions?.length) break;
@@ -2331,8 +2396,17 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
   }
   for (const s of symbolsNeeded) { const key = indexKeys[s]; if (key) legKeys.add(key); }
 
+  // Live WebSocket prices first (exact bid/ask depth, updated every tick);
+  // Kite REST /quote only for whatever the stream can't vouch for right now.
   const quoteMap = new Map<string, any>();
-  for (const batch of chunk([...legKeys], MAX_QUOTE_INSTRUMENTS)) {
+  await resolveStreamTokens(supabase, [...legKeys]);
+  marketStream.want([...legKeys].map((k) => streamTokenByKey.get(k)).filter((t): t is number => t !== undefined));
+  for (const key of legKeys) {
+    const streamToken = streamTokenByKey.get(key);
+    const lq = streamToken !== undefined ? marketStream.get(streamToken) : null;
+    if (lq) quoteMap.set(key, toRestQuote(lq));
+  }
+  for (const batch of chunk([...legKeys].filter((k) => !quoteMap.has(k)), MAX_QUOTE_INSTRUMENTS)) {
     let data: any;
     try {
       data = await kiteFetch(`/quote?${batch.map((k: string) => `i=${encodeURIComponent(k)}`).join('&')}`, { token, apiKey });
@@ -2356,7 +2430,9 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
     // exit decision this cycle could easily be HOLD, and this position
     // would never reach the exit-handling code below again. A completed
     // ledger is authoritative regardless of what today's quotes say.
-    if (p.execution_mode === 'SHADOW' && p.forward_ledger_id) {
+    // (Crash-recovery only, so it runs on passes that re-read positions from
+    // the DB — every pass at the 8 s REST cadence, every ~10 s when live.)
+    if (freshFetch && p.execution_mode === 'SHADOW' && p.forward_ledger_id) {
       const recovered = await recoverShadowPositionIfLedgerCompleted(supabase, p, log);
       if (recovered) { closed.push(recovered); continue; }
     }
@@ -2387,8 +2463,14 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
     // the position-level aggregate, so the dashboard can show each leg's
     // OWN P&L (fill_price vs this) in the position-detail dropdown.
     const nowIso = new Date().toISOString();
-    await Promise.all(legQuoteUpdates.map((u) =>
-      supabase.from('options_autotrade_legs').update({ last_quoted_price: u.price, last_quoted_at: nowIso }).eq('id', u.id)));
+    // At the 1-second live cadence, marks are written every 10 s per position
+    // (exit checks still run every pass on the live price).
+    const persistMark = !liveCadence || Date.now() - (optionMarkPersistedAt.get(p.id) ?? 0) >= MARK_PERSIST_MS;
+    if (persistMark) {
+      optionMarkPersistedAt.set(p.id, Date.now());
+      await Promise.all(legQuoteUpdates.map((u) =>
+        supabase.from('options_autotrade_legs').update({ last_quoted_price: u.price, last_quoted_at: nowIso }).eq('id', u.id)));
+    }
 
     // Sanity bound: for ANY defined-risk structure, maxProfit + maxLoss IS
     // the strike-width-implied theoretical ceiling on cost-to-close (it's
@@ -2423,10 +2505,12 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
       ? actualFillCreditFromLegs(legs)
       : (Number(p.max_profit) || 0);
     const unrealizedPnl = entryCreditBaseline - currentCostToClose;
-    const { error: markErr } = await supabase.from('options_autotrade_positions').update({
-      unrealized_pnl: unrealizedPnl, unrealized_pnl_updated_at: new Date().toISOString(),
-    }).eq('id', p.id);
-    if (markErr) await log('error', `Position #${p.id}: failed to persist unrealized_pnl`, { message: markErr.message }, p.execution_mode);
+    if (persistMark) {
+      const { error: markErr } = await supabase.from('options_autotrade_positions').update({
+        unrealized_pnl: unrealizedPnl, unrealized_pnl_updated_at: new Date().toISOString(),
+      }).eq('id', p.id);
+      if (markErr) await log('error', `Position #${p.id}: failed to persist unrealized_pnl`, { message: markErr.message }, p.execution_mode);
+    }
 
     const underlyingPrice = quoteMap.get(indexKeys[p.symbol])?.last_price;
     if (!(underlyingPrice > 0)) { await log('error', `Position #${p.id}: no live spot price for ${p.symbol} — skipped this cycle.`, undefined, p.execution_mode); continue; }
@@ -2463,7 +2547,22 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
       profitTargetPct: settings.profit_target_pct, stopLossCreditMultiple: settings.stop_loss_credit_multiple,
       timeExitDte: settings.time_exit_dte, strikeBreachBufferPct: settings.strike_breach_buffer_pct,
     });
-    if (decision.action !== 'CLOSE') continue;
+    if (decision.action !== 'CLOSE') { pendingOptionExits.delete(p.id); continue; }
+
+    // At the 1-second live cadence a price-driven exit must repeat on the
+    // next pass (~1 s later) so one bad tick can't close a position; the
+    // time-based exit fires at once. (Same posture as Naked Sell.)
+    if (liveCadence && decision.reason !== 'TIME_EXIT' && pendingOptionExits.get(p.id) !== decision.reason) {
+      pendingOptionExits.set(p.id, decision.reason);
+      continue;
+    }
+    pendingOptionExits.delete(p.id);
+
+    // Positions are cached between DB reads; re-confirm this one is still
+    // ACTIVE (not closed manually or by another path) before acting —
+    // above all before any real AUTO closing order.
+    const { data: freshRow } = await supabase.from('options_autotrade_positions').select('status').eq('id', p.id).maybeSingle();
+    if (freshRow?.status !== 'ACTIVE') { cachedPositions = null; continue; }
 
     let realizedPnl = (Number(p.max_profit) || 0) - currentCostToClose;
 
@@ -2785,11 +2884,12 @@ async function handlePositionMonitor(req: any, res: any, supabase: SupabaseClien
     // Budget for the wait PLUS another pass as long as this one took.
     const elapsedMs = Date.now() - startedAt;
     const lastPassMs = Date.now() - passStartedAt;
-    if (elapsedMs + SUB_INTERVAL_MS + lastPassMs > MAX_LOOP_MS) break;
-    await sleep(SUB_INTERVAL_MS);
+    const waitMs = subIntervalMs();
+    if (elapsedMs + waitMs + lastPassMs > MAX_LOOP_MS) break;
+    await sleep(waitMs);
   }
 
-  res.status(200).json({ ok: true, iterations, checked: lastCheckedCount, closed });
+  if (closed.length) console.log(`[position-monitor] ${iterations} passes, ${lastCheckedCount} checked, closed ${JSON.stringify(closed)}`);
 }
 
 /**

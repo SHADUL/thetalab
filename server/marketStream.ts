@@ -28,7 +28,19 @@ export interface LiveQuote {
   ask: number | null;
   volume: number | null;
   oi: number | null;
+  /** 5-level market depth (full-mode F&O packets only), same shape as Kite REST quote depth. */
+  depth: { buy: Array<{ price: number; quantity: number; orders: number }>; sell: Array<{ price: number; quantity: number; orders: number }> } | null;
   receivedAt: number;
+}
+
+/** Kite REST /quote-shaped object from a live tick, so REST-based code can consume stream prices unchanged. */
+export function toRestQuote(q: LiveQuote): { last_price: number; volume?: number; oi?: number; depth?: LiveQuote['depth'] } {
+  return {
+    last_price: q.ltp,
+    ...(q.volume != null ? { volume: q.volume } : {}),
+    ...(q.oi != null ? { oi: q.oi } : {}),
+    ...(q.depth ? { depth: q.depth } : {}),
+  };
 }
 
 /** Decodes one packet of any length Kite sends (LTP 8, index quote 28, index full 32, F&O quote 44, F&O full 184). */
@@ -40,11 +52,11 @@ export function decodePacket(p: Buffer, receivedAt: number): LiveQuote | null {
     const t = parseFullModePacket(p);
     const bid = t.bidDepth.find((d) => d.price > 0 && d.quantity > 0)?.price ?? null;
     const ask = t.askDepth.find((d) => d.price > 0 && d.quantity > 0)?.price ?? null;
-    return { token, ltp: t.lastPrice, bid, ask, volume: t.volume, oi: t.oi, receivedAt };
+    return { token, ltp: t.lastPrice, bid, ask, volume: t.volume, oi: t.oi, depth: { buy: t.bidDepth, sell: t.askDepth }, receivedAt };
   }
-  if (p.length === 44) return { token, ltp, bid: null, ask: null, volume: p.readInt32BE(16), oi: null, receivedAt };
+  if (p.length === 44) return { token, ltp, bid: null, ask: null, volume: p.readInt32BE(16), oi: null, depth: null, receivedAt };
   // 8 (LTP) / 28, 32 (index): last price only.
-  return { token, ltp, bid: null, ask: null, volume: null, oi: null, receivedAt };
+  return { token, ltp, bid: null, ask: null, volume: null, oi: null, depth: null, receivedAt };
 }
 
 export function decodeFrame(frame: Buffer, receivedAt: number): LiveQuote[] {

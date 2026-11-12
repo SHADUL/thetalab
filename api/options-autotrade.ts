@@ -683,6 +683,35 @@ function kiteUsableMargin(data: any): number {
   return Number(data?.net ?? data?.available?.live_balance);
 }
 
+/**
+ * One Kite account snapshot (usable funds, NFO/BFO positions, today's
+ * orders) shared by scans running within the same 5 s — the NIFTY and
+ * SENSEX scans fire together every minute and previously fetched all three
+ * twice. Dropped as soon as AUTO submits a real order, and never kept when
+ * a fetch failed, so a stale or failed read is never reused.
+ */
+let kiteAccountCache: {
+  at: number;
+  funds: Promise<number | null>;
+  positions: Promise<BrokerPosition[] | null>;
+  orders: Promise<BrokerOrder[] | null>;
+} | null = null;
+
+function kiteAccountSnapshot(token: string, apiKey: string) {
+  if (kiteAccountCache && Date.now() - kiteAccountCache.at < 5_000) return kiteAccountCache;
+  const snap = {
+    at: Date.now(),
+    funds: fetchRealAvailableFunds(token, apiKey),
+    positions: fetchBrokerPositions(token, apiKey),
+    orders: fetchBrokerOrdersToday(token, apiKey),
+  };
+  kiteAccountCache = snap;
+  Promise.all([snap.funds, snap.positions, snap.orders]).then((r) => {
+    if (r.some((x) => x === null) && kiteAccountCache === snap) kiteAccountCache = null;
+  });
+  return snap;
+}
+
 async function fetchRealAvailableFunds(token: string, apiKey: string): Promise<number | null> {
   try {
     const data = await kiteFetch('/user/margins/equity', { token, apiKey });
@@ -1608,6 +1637,12 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
   // enabled profile (e.g. SHADOW) from still recording its own outcome.
   const perModeResults: Record<string, unknown> = {};
 
+  // Identical across the three modes, so fetched once per scan: the last
+  // 7 days' realized P&L rows (filtered per mode below) and the candidate's
+  // 1-lot Kite basket margin (same legs, same product, every mode).
+  const { data: weekRowsAll } = await supabase.from('options_autotrade_daily_stats').select('execution_mode, realized_pnl').gte('trade_date', sevenDaysAgo);
+  let kiteMarginPerLotShared: Promise<number> | null = null;
+
   for (const modeLabel of runnableModes) {
     const isLive = modeLabel === 'AUTO';
     const isShadow = modeLabel === 'SHADOW';
@@ -1615,6 +1650,27 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
       supabase.from('options_autotrade_log').insert({ level, message, detail: detail ?? null, execution_mode: modeLabel });
     const event = (name: string, detail?: Record<string, unknown>) =>
       log('info', `[${name}] ${symbol}`, { event: name, scanId, symbol, ...detail });
+
+    // Checked FIRST (it needs nothing computed below), so a candidate
+    // SHADOW/AUTO would reject anyway costs no margin, funds or broker-
+    // reconciliation calls.
+    // Real-money liquidity gate. The engine's own hard gate only rejects
+    // UNTRADABLE; a POOR leg (spread above the 5% acceptable threshold, or
+    // OI/volume under the minimums) still passes it, and PAPER/SHADOW fill
+    // at the quote so they never feel the cost. AUTO does: the two worst
+    // real trades (#37 at a 17.7% avg spread, #39 at 5.8%) were both POOR
+    // far-month BANKNIFTY spreads that filled far off their planned credit.
+    // SHADOW applies the same gate (owner decision 2026-11-12) so it is a
+    // faithful preview of what AUTO would actually do — a mid-price fill on
+    // a 20-40% wide spread overstated SHADOW credit/R:R. PAPER is left alone
+    // so it keeps generating ungated comparison data.
+    if ((isLive || isShadow) && (best.liquidity.tier === 'POOR' || best.liquidity.tier === 'UNTRADABLE')) {
+      const why = best.liquidity.legs.flatMap((l: any) => l.reasons).slice(0, 3).join('; ');
+      await event('ENTRY_SKIPPED', { reason: 'liquidity_too_poor', tier: best.liquidity.tier });
+      await log('info', `${modeLabel}: ${symbol} candidate liquidity is ${best.liquidity.tier} (${why}) — real orders would fill far off the quoted credit, skipping.`);
+      perModeResults[modeLabel] = { ok: true, opened: false, skipped: 'liquidity_too_poor' };
+      continue;
+    }
 
     // 5. Portfolio state from currently ACTIVE positions IN THIS SAME MODE
     // only. AUTO/PAPER/SHADOW are independent simulated books everywhere
@@ -1646,7 +1702,7 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     const duplicateExists = (openRows ?? []).some((p: any) => p.symbol === symbol && p.expiry === expiryDateStr && p.strategy_label === decision.expiryEvaluation!.strategyLabel);
 
     const dailyRow = dailyRowByMode.get(modeLabel);
-    const { data: weekRows } = await supabase.from('options_autotrade_daily_stats').select('realized_pnl').eq('execution_mode', modeLabel).gte('trade_date', sevenDaysAgo);
+    const weekRows = (weekRowsAll ?? []).filter((r: any) => r.execution_mode === modeLabel);
     const realizedPnlToday = Number(dailyRow?.realized_pnl) || 0;
     const realizedPnlThisWeek = (weekRows ?? []).reduce((s: number, r: any) => s + (Number(r.realized_pnl) || 0), 0);
 
@@ -1696,10 +1752,12 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
           marginRequiredPerLot = total;
           marginDetail = `Live Groww basket margin for 1 lot: ₹${marginRequiredPerLot.toFixed(0)}.`;
         } else {
-          const basketReq = buildBasketMarginRequest(legs.map((l) => ({ side: l.side, tradingsymbol: l.tradingsymbol, quantity: l.quantity })), { exchange, product: 'NRML' });
-          const marginData = await kiteFetch(`/margins/basket?consider_positions=false`, { method: 'POST', token, apiKey, jsonBody: basketReq.orders });
-          const margin = parseBasketMarginResponse(marginData);
-          marginRequiredPerLot = margin?.totalRequired ?? 0;
+          kiteMarginPerLotShared ??= (async () => {
+            const basketReq = buildBasketMarginRequest(legs.map((l) => ({ side: l.side, tradingsymbol: l.tradingsymbol, quantity: l.quantity })), { exchange, product: 'NRML' });
+            const marginData = await kiteFetch(`/margins/basket?consider_positions=false`, { method: 'POST', token, apiKey, jsonBody: basketReq.orders });
+            return parseBasketMarginResponse(marginData)?.totalRequired ?? 0;
+          })();
+          marginRequiredPerLot = await kiteMarginPerLotShared;
           marginDetail = `Live basket margin for 1 lot: ₹${marginRequiredPerLot.toFixed(0)}.`;
         }
       } catch (err: any) {
@@ -1721,7 +1779,7 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     // cost of no longer reflecting "what AUTO would actually have sized."
     const usesRealFunds = isLive;
     const realAvailableFunds = usesRealFunds
-      ? (routesRealOrdersThroughGroww ? (growwToken ? await fetchGrowwAvailableFunds(growwToken) : null) : await fetchRealAvailableFunds(token, apiKey))
+      ? (routesRealOrdersThroughGroww ? (growwToken ? await fetchGrowwAvailableFunds(growwToken) : null) : await kiteAccountSnapshot(token, apiKey).funds)
       : null;
     if (usesRealFunds && realAvailableFunds === null) {
       await log('error', `${modeLabel}: could not verify real account funds for ${symbol} — refusing to size or record any intent this cycle.`);
@@ -1775,10 +1833,8 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
         await event('BROKER_RECONCILED', { reconciliationStatus: reconciliation.status });
       }
     } else if (isLive) {
-      const [brokerPositions, brokerOrders] = await Promise.all([
-        fetchBrokerPositions(token, apiKey),
-        fetchBrokerOrdersToday(token, apiKey),
-      ]);
+      const snapshot = kiteAccountSnapshot(token, apiKey);
+      const [brokerPositions, brokerOrders] = await Promise.all([snapshot.positions, snapshot.orders]);
       if (brokerPositions === null || brokerOrders === null) {
         await event('BROKER_STATE_AMBIGUOUS', { reason: 'fetch_failed' });
         await log('error', `AUTO: could not verify broker positions/orders for reconciliation — refusing all new AUTO entries this cycle.`);
@@ -1801,24 +1857,6 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
       }
     }
     if (reconciliationBlocked) continue;
-
-    // Real-money liquidity gate. The engine's own hard gate only rejects
-    // UNTRADABLE; a POOR leg (spread above the 5% acceptable threshold, or
-    // OI/volume under the minimums) still passes it, and PAPER/SHADOW fill
-    // at the quote so they never feel the cost. AUTO does: the two worst
-    // real trades (#37 at a 17.7% avg spread, #39 at 5.8%) were both POOR
-    // far-month BANKNIFTY spreads that filled far off their planned credit.
-    // SHADOW applies the same gate (owner decision 2026-11-12) so it is a
-    // faithful preview of what AUTO would actually do — a mid-price fill on
-    // a 20-40% wide spread overstated SHADOW credit/R:R. PAPER is left alone
-    // so it keeps generating ungated comparison data.
-    if ((isLive || isShadow) && (best.liquidity.tier === 'POOR' || best.liquidity.tier === 'UNTRADABLE')) {
-      const why = best.liquidity.legs.flatMap((l: any) => l.reasons).slice(0, 3).join('; ');
-      await event('ENTRY_SKIPPED', { reason: 'liquidity_too_poor', tier: best.liquidity.tier });
-      await log('info', `${modeLabel}: ${symbol} candidate liquidity is ${best.liquidity.tier} (${why}) — real orders would fill far off the quoted credit, skipping.`);
-      perModeResults[modeLabel] = { ok: true, opened: false, skipped: 'liquidity_too_poor' };
-      continue;
-    }
 
     const sizing = computePositionSize(
       {
@@ -1934,7 +1972,10 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     // legs first, confirmed FILLED, before any SELL (short) leg, exactly the
     // sequencing real margin treatment requires (see liveFill.ts's own
     // header). PAPER keeps simulating every leg filling instantly.
-    if (isLive) await event('HEDGE_SUBMITTED', { intentId: claim.intentId });
+    if (isLive) {
+      kiteAccountCache = null; // real orders about to change funds/positions/orders
+      await event('HEDGE_SUBMITTED', { intentId: claim.intentId });
+    }
     const shadowExecResult = isShadow && winningSlice
       ? runShadowExecutionForLegs(scaledLegs, validation, winningSlice.quotes)
       : null;

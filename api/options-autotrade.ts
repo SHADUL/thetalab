@@ -92,7 +92,7 @@ import { decideTrade, type DecisionThresholds } from '../src/quant/strategies/de
 import { computePositionSize, type PortfolioState, type OpenPositionSummary } from '../src/quant/strategies/positionSizing.ts';
 import { runPreTradeValidation } from '../src/quant/execution/preTradeValidation.ts';
 import { runPaperExecution, type PlannedLeg } from '../src/quant/execution/paperFill.ts';
-import { runLiveExecution, type LiveOrderPlacer } from '../src/quant/execution/liveFill.ts';
+import { runLiveExecution, marketableLimitPrice, type LiveOrderPlacer } from '../src/quant/execution/liveFill.ts';
 import { evaluateExit, type ShortStrike } from '../src/quant/execution/exitEngine.ts';
 import { checkDailyRiskLock } from '../src/quant/execution/dailyRiskLock.ts';
 import { claimOrderIntent, supabaseOrderIntentStore } from '../src/quant/execution/orderIntent.ts';
@@ -302,18 +302,27 @@ function makeLiveOrderPlacer(token: string, apiKey: string): LiveOrderPlacer {
     },
 
     async closeLeg(leg, exchange) {
-      // Best-effort unwind: MARKET, opposite side of how the leg was
-      // meant to be held — a BUY leg that filled gets sold back, a SELL
-      // leg that filled gets bought back. Speed of execution matters far
-      // more than price here, hence MARKET rather than LIMIT.
+      // Flatten a filled leg: opposite side of how it was held (a BUY leg
+      // is sold back, a SELL leg bought back). Kite rejects plain MARKET
+      // orders over the API ("Market orders without market protection are
+      // not allowed via API" — this is what left AUTO #123 CLOSE_FAILED on
+      // 2026-11-12), so this sends a MARKETABLE LIMIT priced off a fresh
+      // quote: buy at ask + 5%, sell at bid − 5% (marketableLimitPrice).
+      // It fills at the best available price; the buffer only protects
+      // against the book moving while the order is in flight.
+      const transactionType = leg.side === 'BUY' ? 'SELL' : 'BUY';
+      const quote = await this.getQuote(leg.tradingsymbol, exchange);
+      if (!quote) throw new Error(`no fresh quote for ${leg.tradingsymbol} to price the closing limit order`);
+      const price = marketableLimitPrice(transactionType, quote);
       const data = await kiteFetchForm('/orders/regular', {
         token, apiKey,
         form: {
           tradingsymbol: leg.tradingsymbol, exchange,
-          transaction_type: leg.side === 'BUY' ? 'SELL' : 'BUY',
+          transaction_type: transactionType,
           quantity: leg.quantity,
           product: 'NRML',
-          order_type: 'MARKET',
+          order_type: 'LIMIT',
+          price: price.toFixed(2),
           validity: 'DAY',
         },
       });

@@ -292,3 +292,29 @@ export async function runLiveExecution(
     return { state: 'FAILED', legFills, protection: 'NONE' as ProtectionState, log, attempts };
   }
 }
+
+/**
+ * Limit price for a closing order that should fill immediately: Kite no
+ * longer accepts plain MARKET orders over the API ("Market orders without
+ * market protection are not allowed via API"), so a close is sent as a
+ * LIMIT that crosses the spread with a protective buffer — a buy-back at
+ * the ask + pct, a sale at the bid − pct, rounded outward to the tick.
+ * A marketable limit still fills at the best price available; the buffer
+ * only matters if the book moves while the order is in flight.
+ */
+export const CLOSE_PROTECTION_PCT = 5;
+
+export function marketableLimitPrice(
+  transactionType: 'BUY' | 'SELL',
+  quote: { bid: number; ask: number; lastPrice: number },
+  protectionPct = CLOSE_PROTECTION_PCT,
+  tick = 0.05,
+): number {
+  const ref = transactionType === 'BUY'
+    ? (quote.ask > 0 ? quote.ask : quote.lastPrice)
+    : (quote.bid > 0 ? quote.bid : quote.lastPrice);
+  if (!(ref > 0)) throw new Error('marketableLimitPrice: no usable price');
+  const raw = transactionType === 'BUY' ? ref * (1 + protectionPct / 100) : ref * (1 - protectionPct / 100);
+  const ticks = transactionType === 'BUY' ? Math.ceil(raw / tick - 1e-9) : Math.floor(raw / tick + 1e-9);
+  return Math.max(tick, Math.round(ticks * tick * 100) / 100);
+}

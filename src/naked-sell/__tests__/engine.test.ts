@@ -115,3 +115,21 @@ test('entryBlocker covers window, expiry day, caps, loss limit and cooldown', ()
 test('istMinuteOf converts UTC to IST minutes', () => {
   assert.equal(istMinuteOf(Date.parse('2026-11-12T04:15:00Z')), 585);
 });
+
+test('confirmExit: SL/TP need two consecutive checks; flip and square-off are immediate', async () => {
+  const { confirmExit } = await import('../engine.ts');
+  const sl = { exit: true, reason: 'SL' as const, detail: '' };
+  const a = confirmExit(undefined, sl);
+  assert.equal(a.fire, false);
+  assert.deepEqual(a.pending, { reason: 'SL', count: 1 });
+  assert.equal(confirmExit(a.pending, sl).fire, true);
+  // a recovered tick resets the count
+  const none = { exit: false, reason: null, detail: '' };
+  const r = confirmExit(a.pending, none);
+  assert.equal(r.fire, false);
+  assert.equal(r.pending, undefined);
+  // reason change restarts the count
+  assert.equal(confirmExit(a.pending, { exit: true, reason: 'TP', detail: '' }).fire, false);
+  assert.equal(confirmExit(undefined, { exit: true, reason: 'TREND_FLIP', detail: '' }).fire, true);
+  assert.equal(confirmExit(undefined, { exit: true, reason: 'SQUARE_OFF', detail: '' }).fire, true);
+});

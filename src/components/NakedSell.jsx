@@ -13,6 +13,7 @@ import { Card, Pill, Stat, Toggle } from "./alphaUi.jsx";
 
 const API = "/api/naked-sell";
 const POLL_MS = 10_000;
+const POLL_OPEN_MS = 3_000; // faster refresh while positions are open (server checks SL/TP every second)
 const REASON = { TP: "Target", SL: "Stop-loss", TREND_FLIP: "Trend flip", SQUARE_OFF: "3:15 square-off", MANUAL: "Manual" };
 const REASON_TONE = { TP: "gain", SL: "loss", TREND_FLIP: "warn", SQUARE_OFF: "neutral", MANUAL: "neutral" };
 const TREND_TONE = { BULLISH: "gain", BEARISH: "loss", NEUTRAL: "neutral" };
@@ -106,6 +107,7 @@ function OpenCard({ positions, onClose, busyId }) {
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2 min-w-0">
                   <Pill tone={p.mode === "SHADOW" ? "accent" : "neutral"}>{p.mode}</Pill>
+                  {p.live ? <Pill tone="gain">LIVE</Pill> : <Pill tone="warn">DELAYED</Pill>}
                   <span className="font-semibold text-[13px] truncate">SELL {p.lots} × {p.tradingsymbol}</span>
                 </div>
                 <div className="flex items-center gap-2">
@@ -122,7 +124,7 @@ function OpenCard({ positions, onClose, busyId }) {
                 <KV k="NOW" v={rs(p.last_price)} t={Number(p.last_price) <= Number(p.entry_price) ? "gain" : "loss"} />
                 <KV k="QTY" v={p.qty} />
                 <KV k="DELTA" v={p.entry_delta ?? "—"} />
-                <KV k="OPENED" v={hhmm(p.opened_at)} />
+                <KV k="PRICED" v={p.last_quoted_at ? new Date(p.last_quoted_at).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "Asia/Kolkata" }) : "—"} />
                 <KV k="MARGIN" v={p.margin_required ? rs(p.margin_required, 0) : "—"} />
               </div>
               <LevelBar p={p} />
@@ -167,8 +169,8 @@ function RulesCard({ s }) {
   const rows = [
     ["Trend", "5-min candles: close vs session average + EMA9/EMA21 + close vs EMA9. All three must agree."],
     ["Entry", `Bullish → sell PE, bearish → sell CE · ~${s.target_delta} delta · nearest weekly (rolls to next on expiry day) · ${minToClock(s.entry_start_min)}–${minToClock(s.entry_end_min)}`],
-    ["Take profit", `premium falls ${s.tp_pct}% from entry`],
-    ["Stop-loss", `premium rises ${s.sl_pct}% from entry — checked every 20 s`],
+    ["Take profit", `premium falls ${s.tp_pct}% from entry — same 1-second live check`],
+    ["Stop-loss", `premium rises ${s.sl_pct}% from entry — checked every second on live Kite prices (must hold for 2 consecutive seconds)`],
     ["Trend flip", "exit immediately if the trend turns against the position"],
     ["Square-off", `${minToClock(s.square_off_min)} — never held overnight`],
     ["Limits", `${s.max_entries_per_day} entries/day per index · ${s.cooldown_min} min cooldown · stop for the day at −₹${Number(s.max_daily_loss).toLocaleString("en-IN")}`],
@@ -257,7 +259,8 @@ export default function NakedSell() {
       .catch((e) => setError(e.message));
     fetch(`${API}?resource=log`).then((r) => r.json()).then((b) => { if (b.entries) setEntries(b.entries); }).catch(() => {});
   }, []);
-  useEffect(() => { load(); const t = setInterval(load, POLL_MS); return () => clearInterval(t); }, [load]);
+  const hasOpen = (data?.active?.length ?? 0) > 0;
+  useEffect(() => { load(); const t = setInterval(load, hasOpen ? POLL_OPEN_MS : POLL_MS); return () => clearInterval(t); }, [load, hasOpen]);
 
   const close = (p) => {
     if (!window.confirm(`Close ${p.mode} ${p.tradingsymbol} at the current price?`)) return;
@@ -302,6 +305,9 @@ export default function NakedSell() {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {s && <Pill tone={s.enabled ? "gain" : "neutral"}>{s.enabled ? "ENGINE ON" : "ENGINE OFF"}</Pill>}
+            {data?.stream && (data.stream.connected
+              ? <Pill tone="gain">LIVE PRICES · {data.stream.subscribed} subscribed</Pill>
+              : <Pill tone="neutral">{data.stream.wanted ? "LIVE PRICES CONNECTING" : "LIVE PRICES IDLE"}</Pill>)}
             {s && <Pill tone="accent" icon={Target}>TP −{s.tp_pct}% · SL +{s.sl_pct}%</Pill>}
             <Pill tone="neutral">NO REAL ORDERS</Pill>
           </div>

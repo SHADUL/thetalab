@@ -186,9 +186,11 @@ export function pickStrike(quotes: OptionQuote[], right: Right, spot: number, ex
     const mid = midOf(q);
     if (mid == null) continue;
     const iv = impliedVol(mid, { forward, strike: q.strike, timeToExpiry: T, rate, right });
-    const vol = iv.vol;
-    if (vol == null) continue;
-    const delta = Math.abs(black76({ forward, strike: q.strike, timeToExpiry: T, vol, rate, right }).delta);
+    if (typeof iv.vol !== 'number') continue;
+    const vol: number = iv.vol;
+    const rawDelta = black76({ forward, strike: q.strike, timeToExpiry: T, vol, rate, right }).delta;
+    if (rawDelta == null) continue;
+    const delta = Math.abs(rawDelta);
     if (!best || Math.abs(delta - targetDelta) < Math.abs(best.delta - targetDelta)) {
       best = { quote: q, mid: r2(mid), iv: Math.round(vol * 10000) / 10000, delta: Math.round(delta * 1000) / 1000 };
     }
@@ -302,4 +304,25 @@ export function istMinuteOf(nowMs: number): number {
 
 export function istDateOf(nowMs: number): string {
   return new Date(nowMs + 330 * 60_000).toISOString().slice(0, 10);
+}
+
+/* ------------------------------------------------------------------ */
+/* Live (1-second) exit confirmation                                    */
+/* ------------------------------------------------------------------ */
+
+export interface PendingExit { reason: ExitReason; count: number }
+
+/**
+ * Price-driven exits (SL / TP) must hold on two consecutive 1-second checks
+ * so a single glitched tick or a momentary bid/ask blowout on a thin
+ * contract can't close the trade. Time / trend exits (SQUARE_OFF,
+ * TREND_FLIP) fire immediately.
+ */
+export const PRICE_EXIT_CONFIRMATIONS = 2;
+
+export function confirmExit(prev: PendingExit | undefined, check: ExitCheck): { fire: boolean; pending: PendingExit | undefined } {
+  if (!check.exit || !check.reason) return { fire: false, pending: undefined };
+  if (check.reason === 'SQUARE_OFF' || check.reason === 'TREND_FLIP' || check.reason === 'MANUAL') return { fire: true, pending: undefined };
+  const count = prev?.reason === check.reason ? prev.count + 1 : 1;
+  return count >= PRICE_EXIT_CONFIRMATIONS ? { fire: true, pending: undefined } : { fire: false, pending: { reason: check.reason, count } };
 }

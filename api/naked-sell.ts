@@ -8,18 +8,22 @@
  *   POST ?resource=tick        cron-secret only — one engine pass (normally driven in-process
  *                              by server/nakedSellScheduler.ts every 20 s during market hours)
  *
- * One tick = (once a minute) refresh the 5-min intraday trend per index and
- * try entries, then (every tick) re-quote every open position and apply
- * SL / square-off / TP / trend-flip. Kite is used read-only: quotes,
+ * One tick (20 s) = (once a minute) refresh the 5-min intraday trend per
+ * index and try entries, then reload open positions, subscribe their
+ * contracts on the live Kite WebSocket (server/marketStream.ts) and apply
+ * exits. Between ticks, `runFastExitCheck` re-checks SL / TP / trend-flip /
+ * square-off every second from live prices held in memory — no Kite REST
+ * call and no database read per second. Kite is used read-only: quotes,
  * 5-minute historical candles, and the basket-margin CALCULATOR for SHADOW
  * sizing realism.
  */
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import {
   DEFAULT_SETTINGS, intradayTrend, completedBars, sideForTrend, pickStrike, liquidityProblems, entryFill, exitFill,
-  midOf, levels, checkExit, roundTripCharges, shortPnl, entryBlocker, istMinuteOf, istDateOf,
-  type NakedSellSettings, type Candle, type OptionQuote, type Mode, type Right, type Trend, type ExitReason,
+  midOf, levels, checkExit, confirmExit, roundTripCharges, shortPnl, entryBlocker, istMinuteOf, istDateOf,
+  type NakedSellSettings, type Candle, type OptionQuote, type Mode, type Right, type Trend, type ExitReason, type PendingExit,
 } from '../src/naked-sell/engine.ts';
+import { marketStream, type LiveQuote } from '../server/marketStream.ts';
 
 type Req = { method?: string; query: Record<string, unknown>; body?: any; headers: Record<string, string | undefined> };
 type Res = { status(code: number): Res; json(b: unknown): void; setHeader(k: string, v: string): void };
@@ -164,6 +168,7 @@ async function scan(sb: SupabaseClient, s: NakedSellSettings, k: KiteCtx, nowMs:
 
       const { data: prev } = await sb.from('naked_sell_trend').select('state').eq('symbol', symbol).maybeSingle();
       await sb.from('naked_sell_trend').upsert({ symbol, state: trend.state, detail: trend, spot, updated_at: new Date(nowMs).toISOString() });
+      book.trend.set(symbol, { state: trend.state, at: nowMs });
       if (prev?.state !== trend.state) await log(sb, `${symbol} intraday trend → ${trend.state} (${trend.reason})`, { symbol, detail: trend });
 
       out[symbol] = await tryEntries(sb, s, k, symbol, spot, trend.state, trend, nowMs, minute);
@@ -273,35 +278,122 @@ async function tryEntries(sb: SupabaseClient, s: NakedSellSettings, k: KiteCtx, 
   return opened.length ? `opened ${opened.join('+')}` : 'skipped';
 }
 
+/* In-memory book for the 1-second loop: refreshed by every 20 s tick. */
+const book = {
+  positions: [] as any[],
+  tokenOf: new Map<number, number>(), // position id -> instrument_token
+  trend: new Map<string, { state: Trend; at: number }>(),
+  settings: DEFAULT_SETTINGS as NakedSellSettings,
+  pending: new Map<number, PendingExit>(),
+  persistedAt: new Map<number, number>(),
+};
+
+function liveToOptionQuote(lq: LiveQuote, p: any): OptionQuote {
+  return { strike: Number(p.strike), right: p.option_right, tradingsymbol: p.tradingsymbol, bid: lq.bid, ask: lq.ask, last: lq.ltp, volume: lq.volume, oi: lq.oi };
+}
+
+function freshTrend(symbol: string, nowMs: number): Trend | null {
+  const t = book.trend.get(symbol);
+  return t && nowMs - t.at < 3 * 60_000 ? t.state : null; // ignore a stale trend
+}
+
 async function monitor(sb: SupabaseClient, s: NakedSellSettings, k: KiteCtx, nowMs: number, minute: number) {
   const { data: open, error } = await sb.from('naked_sell_positions').select('*').eq('status', 'ACTIVE');
   if (error) throw error;
-  if (!open?.length) return { open: 0 };
-  const keyOf = (p: any) => `${p.exchange}:${p.tradingsymbol}`;
-  let q: Record<string, any> = {};
-  try { q = await quotes([...new Set(open.map(keyOf))], k); } catch (e: any) {
-    await log(sb, `Monitor: quote fetch failed (${e.message})`, { level: 'error' });
+  book.settings = s;
+  if (!book.trend.size) {
+    const { data: trends } = await sb.from('naked_sell_trend').select('symbol,state,updated_at');
+    for (const t of trends ?? []) book.trend.set(t.symbol, { state: t.state as Trend, at: Date.parse(t.updated_at) });
   }
-  const { data: trends } = await sb.from('naked_sell_trend').select('symbol,state,updated_at');
-  const trendOf = new Map<string, Trend>();
-  for (const t of trends ?? []) if (nowMs - Date.parse(t.updated_at) < 3 * 60_000) trendOf.set(t.symbol, t.state as Trend); // ignore stale trend
+  if (!open?.length) { book.positions = []; return { open: 0 }; }
+
+  // Resolve instrument tokens once per position and subscribe them on the live stream.
+  const missing = open.filter((p: any) => !book.tokenOf.has(p.id));
+  if (missing.length) {
+    const { data: inst } = await sb.from('options_instruments').select('exchange,tradingsymbol,instrument_token')
+      .in('tradingsymbol', [...new Set(missing.map((p: any) => p.tradingsymbol))]);
+    for (const p of missing) {
+      const row = (inst ?? []).find((r: any) => r.tradingsymbol === p.tradingsymbol && r.exchange === p.exchange);
+      if (row) book.tokenOf.set(p.id, Number(row.instrument_token));
+    }
+  }
+  marketStream.want(open.map((p: any) => book.tokenOf.get(p.id)).filter((t): t is number => !!t));
+  book.positions = open;
+
+  // Live price where the stream has one; Kite REST only for the rest.
+  const live = new Map<number, OptionQuote>();
+  for (const p of open) {
+    const lq = book.tokenOf.has(p.id) ? marketStream.get(book.tokenOf.get(p.id)!) : null;
+    if (lq) live.set(p.id, liveToOptionQuote(lq, p));
+  }
+  const keyOf = (p: any) => `${p.exchange}:${p.tradingsymbol}`;
+  const needRest = open.filter((p: any) => !live.has(p.id));
+  let q: Record<string, any> = {};
+  if (needRest.length) {
+    try { q = await quotes([...new Set(needRest.map(keyOf))], k); } catch (e: any) {
+      await log(sb, `Monitor: quote fetch failed (${e.message})`, { level: 'error' });
+    }
+  }
 
   let closed = 0;
   for (const p of open) {
-    const oq = q[keyOf(p)] ? toOptionQuote(q[keyOf(p)], { strike: Number(p.strike), right: p.option_right, tradingsymbol: p.tradingsymbol }) : null;
+    const oq = live.get(p.id) ?? (q[keyOf(p)] ? toOptionQuote(q[keyOf(p)], { strike: Number(p.strike), right: p.option_right, tradingsymbol: p.tradingsymbol }) : null);
     const price = oq ? exitFill(p.mode as Mode, oq) : null;
-    const check = checkExit({ right: p.option_right, tp_price: Number(p.tp_price), sl_price: Number(p.sl_price) }, price, trendOf.get(p.symbol) ?? null, minute, s.square_off_min);
-    if (check.exit) {
+    const check = checkExit({ right: p.option_right, tp_price: Number(p.tp_price), sl_price: Number(p.sl_price) }, price, freshTrend(p.symbol, nowMs), minute, s.square_off_min);
+    // The 1-second loop owns price exits while the stream is live; this tick only
+    // backs it up (stream down) and always enforces square-off / trend flip.
+    const priceExit = check.reason === 'SL' || check.reason === 'TP';
+    if (check.exit && (!priceExit || !live.has(p.id))) {
       // Square-off with no fresh quote: fall back to mid, then the last recorded price.
       const exitPx = price ?? (oq ? midOf(oq) : null) ?? Number(p.last_price ?? p.entry_price);
-      if (await closePosition(sb, p, exitPx, check.reason!, check.detail, nowMs)) closed++;
+      if (await closePosition(sb, p, exitPx, check.reason!, `${check.detail}${live.has(p.id) ? '' : ' (REST quote)'}`, nowMs)) closed++;
     } else if (price != null) {
-      await sb.from('naked_sell_positions').update({
-        last_price: price, last_quoted_at: new Date(nowMs).toISOString(), unrealized_pnl: shortPnl(Number(p.entry_price), price, p.qty),
-      }).eq('id', p.id).eq('status', 'ACTIVE');
+      await persistMark(sb, p, price, nowMs);
     }
   }
-  return { open: open.length, closed };
+  return { open: open.length, closed, live: live.size, stream: marketStream.status().connected };
+}
+
+async function persistMark(sb: SupabaseClient, p: any, price: number, nowMs: number) {
+  book.persistedAt.set(p.id, nowMs);
+  await sb.from('naked_sell_positions').update({
+    last_price: price, last_quoted_at: new Date(nowMs).toISOString(), unrealized_pnl: shortPnl(Number(p.entry_price), price, p.qty),
+  }).eq('id', p.id).eq('status', 'ACTIVE');
+}
+
+let fastBusy = false;
+/**
+ * Every second: SL / TP / trend-flip / square-off from live stream prices
+ * only. A position with no live price is left to the 20 s tick's REST
+ * fallback. SL and TP must hold on two consecutive checks (confirmExit).
+ */
+export async function runFastExitCheck(sb: SupabaseClient, nowMs = Date.now()) {
+  if (fastBusy || !book.positions.length || !marketStream.isHealthy()) return;
+  fastBusy = true;
+  try {
+    const minute = istMinuteOf(nowMs);
+    for (const p of [...book.positions]) {
+      const token = book.tokenOf.get(p.id);
+      const lq = token ? marketStream.get(token) : null;
+      if (!lq) continue;
+      const price = exitFill(p.mode as Mode, liveToOptionQuote(lq, p));
+      const check = checkExit({ right: p.option_right, tp_price: Number(p.tp_price), sl_price: Number(p.sl_price) }, price, freshTrend(p.symbol, nowMs), minute, book.settings.square_off_min);
+      const { fire, pending } = confirmExit(book.pending.get(p.id), check);
+      if (pending) book.pending.set(p.id, pending); else book.pending.delete(p.id);
+      if (fire) {
+        const exitPx = price ?? midOf(liveToOptionQuote(lq, p)) ?? Number(p.last_price ?? p.entry_price);
+        const ok = await closePosition(sb, p, exitPx, check.reason!, `${check.detail} (live tick)`, nowMs);
+        book.positions = book.positions.filter((x) => x.id !== p.id);
+        book.pending.delete(p.id);
+        if (!ok) continue;
+      } else if (price != null && nowMs - (book.persistedAt.get(p.id) ?? 0) >= 10_000) {
+        p.last_price = price;
+        await persistMark(sb, p, price, nowMs);
+      }
+    }
+  } finally {
+    fastBusy = false;
+  }
 }
 
 async function closePosition(sb: SupabaseClient, p: any, exitPx: number, reason: ExitReason, detail: string, nowMs: number): Promise<boolean> {
@@ -312,6 +404,8 @@ async function closePosition(sb: SupabaseClient, p: any, exitPx: number, reason:
     status: 'CLOSED', exit_price: exitPx, exit_reason: reason, exit_detail: detail, closed_at: new Date(nowMs).toISOString(),
     gross_pnl: gross, charges, net_pnl: net, last_price: exitPx, unrealized_pnl: null,
   }).eq('id', p.id).eq('status', 'ACTIVE').select('id');
+  book.positions = book.positions.filter((x) => x.id !== p.id);
+  book.pending.delete(p.id);
   if (error || !data?.length) return false;
   await log(sb, `${p.mode}: closed ${p.tradingsymbol} @ ₹${exitPx} — ${reason} (${detail}). Net ${net >= 0 ? '+' : ''}₹${net}.`,
     { mode: p.mode, symbol: p.symbol, level: net < 0 ? 'warn' : 'info', detail: { id: p.id, gross, charges, net } });
@@ -345,7 +439,14 @@ async function dashboard(sb: SupabaseClient) {
       byReason: Object.fromEntries(['TP', 'SL', 'TREND_FLIP', 'SQUARE_OFF', 'MANUAL'].map((r) => [r, rows.filter((p: any) => p.exit_reason === r).length])),
     };
   });
-  return { settings, trends: trends.data ?? [], active: active.data ?? [], recent: (recent.data ?? []).slice(0, 50), stats, serverTime: new Date(nowMs).toISOString() };
+  // Overlay the live price on open positions (the DB mark is persisted only every ~10 s).
+  const activeLive = (active.data ?? []).map((p: any) => {
+    const token = book.tokenOf.get(p.id);
+    const lq = token ? marketStream.get(token) : null;
+    const px = lq ? exitFill(p.mode as Mode, liveToOptionQuote(lq, p)) : null;
+    return px == null ? { ...p, live: false } : { ...p, live: true, last_price: px, last_quoted_at: new Date(lq!.receivedAt).toISOString(), unrealized_pnl: shortPnl(Number(p.entry_price), px, p.qty) };
+  });
+  return { settings, trends: trends.data ?? [], active: activeLive, recent: (recent.data ?? []).slice(0, 50), stats, stream: marketStream.status(), serverTime: new Date(nowMs).toISOString() };
 }
 
 const EDITABLE: Record<string, (v: any) => unknown> = {

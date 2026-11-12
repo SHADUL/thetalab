@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import gate from '../middleware.ts';
 import { installKiteThrottle } from './kiteThrottle.ts';
+import { startNakedSellScheduler } from './nakedSellScheduler.ts';
 
 // Before any handler loads: every Kite GET in this process shares one pacing queue.
 installKiteThrottle();
@@ -32,6 +33,7 @@ const API_MODULES: Record<string, string> = {
   'swing-settings': 'api/swing-settings.js',
   'swing-watchlist': 'api/swing-watchlist.js',
   'swing-india': 'api/swing-india.ts',
+  'naked-sell': 'api/naked-sell.ts',
 };
 const loaded = new Map<string, (req: any, res: any) => unknown>();
 async function handlerFor(name: string) {
@@ -92,4 +94,7 @@ app.use((err: any, _req: any, res: any, _next: any) => {
   if (!res.headersSent) res.status(500).json({ error: 'internal_error' });
 });
 
-app.listen(PORT, () => console.log(`thetalab listening on :${PORT}`));
+app.listen(PORT, () => {
+  console.log(`thetalab listening on :${PORT}`);
+  startNakedSellScheduler();
+});

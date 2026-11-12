@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useEffect, lazy, Suspense } from "react";
+import { Pulse } from "@phosphor-icons/react";
 import App from "./App.jsx";
 import SwingScanner from "./components/SwingScanner.jsx";
 import IntradayTrader from "./components/IntradayTrader.jsx";
@@ -9,6 +10,12 @@ import VwapScalper from "./components/VwapScalper.jsx";
 import SwingTrading from "./components/SwingTrading.jsx";
 import NakedSell from "./components/NakedSell.jsx";
 import Login from "./components/Login.jsx";
+
+// NIFTY PULSE is its own full-screen terminal, loaded only when opened so
+// no other section's bundle grows. Addressable at /nifty-pulse/<workspace>.
+const NiftyPulse = lazy(() => import("./components/nifty-pulse/NiftyPulse.jsx"));
+const PULSE_PATH = "/nifty-pulse";
+const isPulsePath = () => typeof window !== "undefined" && (window.location.pathname === PULSE_PATH || window.location.pathname.startsWith(`${PULSE_PATH}/`));
 
 /**
  * Options Desk and Swing Scanner are two genuinely separate products that
@@ -34,6 +41,7 @@ const ALL_SECTIONS = [
   { value: "vwap-scalper", label: "VWAP Scalper" },
   { value: "swing-trading", label: "Swing Trading" },
   { value: "naked-sell", label: "Naked Sell" },
+  { value: "nifty-pulse", label: "NIFTY PULSE" },
 ];
 
 // TEMPORARY, per explicit request — every other section stays fully intact
@@ -42,19 +50,36 @@ const ALL_SECTIONS = [
 // while this flag is on, since it's a new, actively-worked-on strategy —
 // not one of the "other sections" the original request meant to hide.
 const ONLY_OPTIONS_AUTO = true;
-const VISIBLE_WHILE_ONLY_OPTIONS_AUTO = new Set(["options-auto", "nifty-alpha-ladder", "nifty-alpha-edge", "swing-trading", "naked-sell"]);
+const VISIBLE_WHILE_ONLY_OPTIONS_AUTO = new Set(["options-auto", "nifty-alpha-ladder", "nifty-alpha-edge", "swing-trading", "naked-sell", "nifty-pulse"]);
 const SECTIONS = ONLY_OPTIONS_AUTO ? ALL_SECTIONS.filter((s) => VISIBLE_WHILE_ONLY_OPTIONS_AUTO.has(s.value)) : ALL_SECTIONS;
 
 export default function Root() {
   const [section, setSectionState] = useState(() => {
+    if (isPulsePath()) return "nifty-pulse";
     const saved = localStorage.getItem(SECTION_KEY);
     if (ONLY_OPTIONS_AUTO) return VISIBLE_WHILE_ONLY_OPTIONS_AUTO.has(saved) ? saved : "options-auto";
     return saved ?? "options";
   });
+  const [lastNonPulse, setLastNonPulse] = useState(() => {
+    const saved = localStorage.getItem(SECTION_KEY);
+    return saved && saved !== "nifty-pulse" && (!ONLY_OPTIONS_AUTO || VISIBLE_WHILE_ONLY_OPTIONS_AUTO.has(saved)) ? saved : ONLY_OPTIONS_AUTO ? "options-auto" : "options";
+  });
   const setSection = (s) => {
     setSectionState(s);
+    if (s !== "nifty-pulse") setLastNonPulse(s);
     try { localStorage.setItem(SECTION_KEY, s); } catch { /* private browsing, etc. — just won't persist */ }
+    // Only NIFTY PULSE owns a URL; leaving it returns the address bar to "/".
+    if (s === "nifty-pulse" && !isPulsePath()) window.history.pushState({}, "", PULSE_PATH);
+    else if (s !== "nifty-pulse" && isPulsePath()) window.history.pushState({}, "", "/");
   };
+  useEffect(() => {
+    const onPop = () => {
+      if (isPulsePath()) setSectionState("nifty-pulse");
+      else setSectionState((cur) => (cur === "nifty-pulse" ? lastNonPulse : cur));
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [lastNonPulse]);
 
   // middleware.ts redirects any unauthenticated request straight to
   // /login server-side, before the SPA even loads — this client-side
@@ -65,6 +90,14 @@ export default function Root() {
   // hook call so Root's hook order never depends on which path this is.
   if (typeof window !== "undefined" && window.location.pathname === "/login") {
     return <Login />;
+  }
+
+  if (section === "nifty-pulse") {
+    return (
+      <Suspense fallback={<div className="min-h-screen" style={{ background: "var(--c-bg)" }} />}>
+        <NiftyPulse onExit={() => setSection(lastNonPulse)} />
+      </Suspense>
+    );
   }
 
   return (
@@ -107,7 +140,9 @@ export default function Root() {
               <div className="seg-track" role="tablist" aria-label="Section">
                 {SECTIONS.map((s) => (
                   <button key={s.value} role="tab" aria-selected={section === s.value} data-on={section === s.value}
-                    onClick={() => setSection(s.value)} className="seg">{s.label}</button>
+                    onClick={() => setSection(s.value)} className="seg">
+                    {s.value === "nifty-pulse" && <Pulse size={13} weight="bold" />}{s.label}
+                  </button>
                 ))}
               </div>
             </div>

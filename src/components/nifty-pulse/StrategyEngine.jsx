@@ -29,7 +29,7 @@ function Pipeline({ s }) {
   return (
     <div className="np-pipe">
       <Stage n={1} title="Market data" state={s.sample?.valid ? "ok" : "block"}>
-        {s.sample ? `${s.sample.status} · ${s.sample.ticks} tick${s.sample.ticks === 1 ? "" : "s"}` : "waiting"}<br />age {secs(s.dataAgeMs)}<br /><span className="np-faint">source: simulation</span>
+        {s.sample ? `${s.sample.status} · ${s.sample.ticks} tick${s.sample.ticks === 1 ? "" : "s"}` : "waiting"}<br />age {secs(s.dataAgeMs)}<br /><span className="np-faint">source: {s.mode === "LIVE" ? "live Kite stream" : "simulation"}</span>
       </Stage>
       <Stage n={2} title="1-second sampler" state={ind?.ready ? "ok" : "block"}>
         {ind?.ready ? `${Math.min(ind.validRun, 99999)} valid s` : `${ind?.validRun ?? 0} / ${ind?.needed ?? 61} valid s`}<br />fresh limit {secs(s.config.tickFreshnessMs)}

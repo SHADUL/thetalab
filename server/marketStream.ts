@@ -16,7 +16,8 @@
  * connection.
  *
  * Kite allows 3 WebSocket connections per API key; the Alpha Ladder worker
- * uses one, this uses one.
+ * uses one, this uses one. Read-only observers (NIFTY PULSE) attach with
+ * `onQuote` and share this connection.
  */
 import WebSocket from 'ws';
 import { parseFullModePacket, splitPackets } from '../src/nifty-alpha-ladder/live/kiteTickerProtocol.ts';
@@ -59,6 +60,15 @@ export function decodePacket(p: Buffer, receivedAt: number): LiveQuote | null {
   return { token, ltp, bid: null, ask: null, volume: null, oi: null, depth: null, receivedAt };
 }
 
+/** Exchange timestamp (epoch ms) when the packet carries one: index full (32 B) and F&O full (184 B). Second resolution. */
+export function packetExchangeTs(p: Buffer): number | null {
+  const s = p.length === 32 ? p.readInt32BE(28) : p.length === 184 ? p.readInt32BE(60) : 0;
+  return s > 0 ? s * 1000 : null;
+}
+
+/** Receives every decoded quote as it arrives (read-only observers, e.g. NIFTY PULSE paper engine). */
+export type QuoteListener = (q: LiveQuote, exchTs: number | null) => void;
+
 export function decodeFrame(frame: Buffer, receivedAt: number): LiveQuote[] {
   if (frame.length < 2) return []; // 1-byte heartbeat
   return splitPackets(frame).map((p) => decodePacket(p, receivedAt)).filter((q): q is LiveQuote => q !== null && q.ltp > 0);
@@ -86,6 +96,13 @@ class MarketStream {
   private creds: Creds | null = null;
   private credsAt = 0;
   private started = false;
+  private listeners = new Set<QuoteListener>();
+
+  /** Observe every quote received on the shared connection. Adds no connection and no subscription by itself. */
+  onQuote(fn: QuoteListener): () => void {
+    this.listeners.add(fn);
+    return () => { this.listeners.delete(fn); };
+  }
 
   /** Register interest; new tokens are subscribed on the next supervisor pass (≤3 s) or immediately if open. */
   want(tokens: number[], ttlMs = INTEREST_TTL_MS): void {
@@ -177,7 +194,15 @@ class MarketStream {
         try { const m = JSON.parse(data.toString()); if (m?.type === 'error') this.lastError = String(m.data); } catch { /* ignore */ }
         return;
       }
-      for (const q of decodeFrame(data, at)) this.quotes.set(q.token, q);
+      if (!this.listeners.size) { for (const q of decodeFrame(data, at)) this.quotes.set(q.token, q); return; }
+      if (data.length < 2) return;
+      for (const p of splitPackets(data)) {
+        const q = decodePacket(p, at);
+        if (!q || !(q.ltp > 0)) continue;
+        this.quotes.set(q.token, q);
+        const exchTs = packetExchangeTs(p);
+        for (const fn of this.listeners) { try { fn(q, exchTs); } catch { /* an observer must never break the stream */ } }
+      }
     });
     ws.on('error', (e: Error) => { this.lastError = e.message; });
     ws.on('close', (code: number) => {

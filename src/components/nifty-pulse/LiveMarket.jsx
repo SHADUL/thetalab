@@ -58,6 +58,7 @@ function TickBars({ samples }) {
 
 function QuoteBoard({ s }) {
   const chain = pulse.chain();
+  if (!chain) return <div className="np-note" style={{ padding: 16 }}>{s.mode === "LIVE" ? "Waiting for the live option chain — strikes load from the instrument master once the first NIFTY price arrives (trading days, 09:10–15:30 IST)." : "No option chain."}</div>;
   const atm = Math.round(chain.spot / chain.strikeStep) * chain.strikeStep;
   const strikes = Array.from({ length: 13 }, (_, i) => atm + (6 - i) * chain.strikeStep);
   const legs = new Set(s.position ? [`${s.position.short.strike}${s.position.short.right}`, `${s.position.long.strike}${s.position.long.right}`] : []);
@@ -120,7 +121,7 @@ export default function LiveMarket() {
       <div className="np-ws-head">
         <div>
           <div className="np-ws-title">Live Market</div>
-          <div className="np-ws-desc">Index series, data quality, option quotes and the decision timeline · SIMULATION source</div>
+          <div className="np-ws-desc">Index series, data quality, option quotes and the decision timeline · {s.mode === "LIVE" ? "LIVE prices (paper only)" : "SIMULATION source"}</div>
         </div>
       </div>
       <div className="np-grid np-split-l" style={{ gridTemplateColumns: "minmax(0, 1.6fr) minmax(0, 1fr)", marginBottom: 12 }}>
@@ -171,7 +172,7 @@ export default function LiveMarket() {
       </div>
 
       <div className="np-grid np-split-l" style={{ gridTemplateColumns: "minmax(0, 1.25fr) minmax(0, 1fr)" }}>
-        <Card title="Option quotes · nearest weekly" sub={`Best bid/ask with top-of-book quantity · ATM ±6 · position legs highlighted · SIM spot ${num(s.price, 2)}`} bodyClass="">
+        <Card title="Option quotes · nearest weekly" sub={`Best bid/ask with top-of-book quantity · ATM ±6 · position legs highlighted · ${s.tag} spot ${num(s.price, 2)}`} bodyClass="">
           <QuoteBoard s={s} />
         </Card>
         <Card title="Signal timeline" sub={`${pulse.engine.timeline.length.toLocaleString("en-IN")} events this session`}
@@ -179,7 +180,9 @@ export default function LiveMarket() {
           <div style={{ maxHeight: 520, overflowY: "auto" }}><Timeline events={events} limit={80} showKind /></div>
         </Card>
       </div>
-      <div className="np-note" style={{ marginTop: 10 }}>All figures on this page come from the deterministic replay and are synthetic.</div>
+      <div className="np-note" style={{ marginTop: 10 }}>{s.mode === "LIVE"
+        ? "Index and option prices on this page are real Kite stream data. Quote age is the time since that contract's last packet; Kite only sends on change, so quiet contracts age honestly and are not tradeable once stale."
+        : "All figures on this page come from the deterministic replay and are synthetic."}</div>
     </>
   );
 }

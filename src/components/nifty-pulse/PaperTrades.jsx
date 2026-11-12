@@ -121,7 +121,7 @@ export default function PaperTrades() {
           <div className="np-ws-desc">Blotter of simulated executions · every trade stores the exact configuration version it ran under</div>
         </div>
       </div>
-      <Card title={`${rows.length} trade${rows.length === 1 ? "" : "s"}`} sub={`Session ${istDate(s.now)} (SIM) · closed net ${net >= 0 ? "+" : "−"}₹${Math.abs(Math.round(net)).toLocaleString("en-IN")} · ${s.config.name}`}
+      <Card title={`${rows.length} trade${rows.length === 1 ? "" : "s"}`} sub={`Session ${istDate(s.now)} (${s.tag}) · closed net ${net >= 0 ? "+" : "−"}₹${Math.abs(Math.round(net)).toLocaleString("en-IN")} · ${s.config.name}`}
         tools={<>
           <select className="np-chipbtn" value="SESSION" aria-label="Date" disabled><option value="SESSION">{istDate(s.now)}</option></select>
           <select className="np-chipbtn" value={fStrat} onChange={(e) => setFStrat(e.target.value)} aria-label="Strategy"><option value="ALL">All strategies</option>{strategies.map((k) => <option key={k} value={k}>{k}</option>)}</select>

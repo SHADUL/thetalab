@@ -12,6 +12,7 @@ import gate from '../middleware.ts';
 import { installKiteThrottle } from './kiteThrottle.ts';
 import { startNakedSellScheduler } from './nakedSellScheduler.ts';
 import { startLogRetention } from './logRetention.ts';
+import { startNiftyPulse } from './niftyPulse.ts';
 
 // Before any handler loads: every Kite GET in this process shares one pacing queue.
 installKiteThrottle();
@@ -35,6 +36,7 @@ const API_MODULES: Record<string, string> = {
   'swing-watchlist': 'api/swing-watchlist.js',
   'swing-india': 'api/swing-india.ts',
   'naked-sell': 'api/naked-sell.ts',
+  'nifty-pulse': 'api/nifty-pulse.ts',
 };
 const loaded = new Map<string, (req: any, res: any) => unknown>();
 async function handlerFor(name: string) {
@@ -50,6 +52,8 @@ app.set('trust proxy', true);
 app.use('/api', (req, res, next) => {
   const t0 = Date.now();
   res.on('finish', () => {
+    // NIFTY PULSE polls its snapshot every second; log only failures of that one call.
+    if (req.path === '/nifty-pulse' && req.query.resource === 'snapshot' && res.statusCode < 400) return;
     const r = typeof req.query.resource === 'string' ? `?resource=${req.query.resource}` : '';
     console.log(`${new Date().toISOString()} ${req.method} ${req.baseUrl}${req.path}${r} ${res.statusCode} ${Date.now() - t0}ms`);
   });
@@ -99,4 +103,5 @@ app.listen(PORT, () => {
   console.log(`thetalab listening on :${PORT}`);
   startNakedSellScheduler();
   startLogRetention();
+  startNiftyPulse().catch((e) => console.error(`[nifty-pulse] failed to start: ${e?.message ?? e}`));
 });

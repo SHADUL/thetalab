@@ -73,6 +73,23 @@ function LegRow({ leg, side, entry, qty }) {
 }
 
 export default function SpreadBuilder() {
+  const mode = usePulse((x) => x.mode);
+  usePulse((x) => x.v);
+  if (!pulse.chain()) {
+    return (
+      <>
+        <div className="np-ws-head"><div><div className="np-ws-title">Spread Builder</div><div className="np-ws-desc">Paper analysis of bull put and bear call spreads</div></div></div>
+        <div className="np-card" style={{ padding: 28, textAlign: "center" }}>
+          <div style={{ fontWeight: 650, marginBottom: 6 }}>Waiting for the {mode === "LIVE" ? "live" : ""} option chain</div>
+          <div className="np-note">Strikes and quotes appear once NIFTY is trading and the instrument master is loaded (trading days, 09:10–15:30 IST). Switch to Simulation to explore with replay data.</div>
+        </div>
+      </>
+    );
+  }
+  return <SpreadBuilderInner />;
+}
+
+function SpreadBuilderInner() {
   const s = usePulse((x) => x);
   const [dir, setDir] = useState(() => (s.signal?.agreement?.side === "BEARISH" ? "BEARISH" : "BULLISH"));
   const [sel, setSel] = useState(null); // { short, width }
@@ -115,7 +132,7 @@ export default function SpreadBuilder() {
       </div>
 
       <div className="np-banner" data-tone="accent" style={{ marginBottom: 12 }}>
-        <b>Paper analysis.</b> Prices are SIMULATION quotes. Credit uses the short leg's bid and the long leg's ask, less slippage; closing uses the opposite sides. Margin is a paper estimate, not broker-confirmed.
+        <b>Paper analysis.</b> Prices are {s.mode === "LIVE" ? "real live quotes" : "SIMULATION quotes"}. Credit uses the short leg's bid and the long leg's ask, less slippage; closing uses the opposite sides. Margin is a paper estimate, not broker-confirmed.
       </div>
 
       <div className="np-grid np-split-l" style={{ marginBottom: 12 }}>

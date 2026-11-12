@@ -32,30 +32,42 @@ export default function Analytics() {
   const [progress, setProgress] = useState(null);
   const [multi, setMulti] = useState(pulse.analyticsMulti);
   const session = useMemo(() => computeAnalytics(s.trades, s.stats), [s.tradesCount, s.stats.episodes, s.config]); // eslint-disable-line react-hooks/exhaustive-deps
+  const isLive = s.mode === "LIVE";
   const cfgKey = `${s.config.id}@v${s.config.version}`;
-  const multiValid = multi && multi.configKey === cfgKey;
+  const [histErr, setHistErr] = useState(null);
+  const multiValid = multi && (isLive ? multi.live : !multi.live && multi.configKey === cfgKey);
   const a = src === "multi" && multiValid ? multi.analytics : session;
   const runMulti = async () => {
     setSrc("multi");
+    setHistErr(null);
+    if (isLive) {
+      try {
+        const h = await pulse.liveHistory();
+        if (h.store && h.store.migrationApplied === false) setHistErr("Stored history needs the NIFTY PULSE migration (src/nifty-pulse/migrations/001_nifty_pulse.sql).");
+        setMulti({ live: true, count: new Set(h.trades.map((t) => t.sessionDay)).size, analytics: computeAnalytics(h.trades, null), trades: h.trades });
+      } catch (e) { setHistErr(String(e?.message ?? e)); }
+      return;
+    }
     setProgress(0);
     const r = await pulse.runMultiSession(20, setProgress);
     setMulti(r);
     setProgress(null);
   };
   const eq = a.equity.map((p, i) => ({ i: i + 1, equity: p.equity, label: `${p.tradeId} · ${istTime(p.t)}` }));
-  const label = src === "multi" && multiValid ? `${multi.count} synthetic sessions` : `this session (${s.tradesCount} closed)`;
+  const label = src === "multi" && multiValid ? `${multi.count} ${isLive ? "live paper" : "synthetic"} session${multi.count === 1 ? "" : "s"}` : `this session (${s.tradesCount} closed)`;
+  const dataNote = isLive ? "LIVE prices, PAPER fills — paper results exclude real-world fill quality and are not evidence of real profitability" : "SIMULATION data — not evidence of real-world profitability";
   const fmtPct = (x) => (x == null ? "—" : `${(x * 100).toFixed(1)}%`);
   return (
     <>
       <div className="np-ws-head">
         <div>
           <div className="np-ws-title">Analytics</div>
-          <div className="np-ws-desc">Computed only from recorded paper trades · {s.config.name} · SIMULATION data — not evidence of real-world profitability</div>
+          <div className="np-ws-desc">Computed only from recorded paper trades · {s.config.name} · {dataNote}</div>
         </div>
         <div className="flex items-center gap-2" style={{ marginLeft: "auto" }}>
           <div className="np-seg" role="group" aria-label="Data set">
             <button data-on={src === "session"} onClick={() => setSrc("session")}>This session</button>
-            <button data-on={src === "multi"} onClick={() => (multiValid ? setSrc("multi") : runMulti())}>20 synthetic sessions</button>
+            <button data-on={src === "multi"} onClick={() => (multiValid ? setSrc("multi") : runMulti())}>{isLive ? "All live sessions" : "20 synthetic sessions"}</button>
           </div>
           {src === "multi" && <button className="np-chipbtn" onClick={runMulti} disabled={progress != null}>Re-run</button>}
         </div>
@@ -66,10 +78,11 @@ export default function Analytics() {
           <div className="np-meter"><span style={{ width: `${progress * 100}%` }} /></div>
         </div>
       )}
+      {histErr && src === "multi" && <div className="np-banner" style={{ marginBottom: 12 }}><Warning size={16} weight="fill" className="np-warn" style={{ flexShrink: 0, marginTop: 1 }} /><span>{histErr}</span></div>}
       {a.sampleWarning && (
         <div className="np-banner" style={{ marginBottom: 12 }}>
           <Warning size={16} weight="fill" className="np-warn" style={{ flexShrink: 0, marginTop: 1 }} />
-          <span><b>Insufficient sample.</b> {a.sampleWarning} All figures here come from synthetic replay data.</span>
+          <span><b>Insufficient sample.</b> {a.sampleWarning} {isLive ? "These are paper trades on live prices." : "All figures here come from synthetic replay data."}</span>
         </div>
       )}
       <div className="np-grid np-kpis" style={{ marginBottom: 12 }}>
@@ -107,7 +120,7 @@ export default function Analytics() {
             )}
           </div>
         </Card>
-        <Card title="Daily P&L" sub="Net, per synthetic session">
+        <Card title="Daily P&L" sub={`Net, per ${isLive ? "trading" : "synthetic"} session`}>
           <div style={{ height: 260 }}>
             {!a.daily.length ? <div className="np-chart-empty" style={{ position: "relative", height: "100%" }}>No closed trades</div> : (
               <ResponsiveContainer width="100%" height="100%">

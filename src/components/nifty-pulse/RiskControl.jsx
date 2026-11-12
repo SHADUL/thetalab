@@ -69,7 +69,7 @@ export default function RiskControl() {
               ["Paper trading", "Enabled · paper only"],
               ["Live trading", "Disabled — no order code path"],
               ["Broker orders", "None · fills are simulated"],
-              ["Data mode", "SIMULATION (Phase 2)"],
+              ["Data mode", s.mode === "LIVE" ? "LIVE prices · paper fills" : "SIMULATION replay"],
               ["Credentials in browser", "None"],
             ].map(([k, v]) => (
               <div key={k} className="np-rule" style={{ gridTemplateColumns: "18px minmax(0,1fr) auto" }}>

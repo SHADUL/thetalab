@@ -130,6 +130,26 @@
 }
 .np-simctl { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: wrap; }
 .np-simctl .np-chipbtn { height: 26px; }
+.np-simctl .np-seg button { height: 26px; }
+
+/* Live paper band: solid, calm accent (no stripes) so it never reads as simulation. */
+.np-liveband {
+  background: color-mix(in srgb, var(--c-accent) 7%, var(--c-surface));
+  border-bottom-color: color-mix(in srgb, var(--c-accent) 30%, var(--c-line));
+}
+.np-liveband[data-down="true"] {
+  background: color-mix(in srgb, var(--c-loss) 7%, var(--c-surface));
+  border-bottom-color: color-mix(in srgb, var(--c-loss) 30%, var(--c-line));
+}
+.np-livetag { background: var(--c-accent); position: relative; padding-left: 18px; }
+.np-livetag::before {
+  content: ""; position: absolute; left: 7px; top: 50%; width: 6px; height: 6px; margin-top: -3px;
+  border-radius: 50%; background: var(--c-surface); animation: np-blink 1.6s ease-in-out infinite;
+}
+.np-liveband[data-down="true"] .np-livetag { background: var(--c-loss); }
+.np-liveband[data-down="true"] .np-livetag::before { animation: none; opacity: .6; }
+@keyframes np-blink { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .np-livetag::before { animation: none; } }
 
 /* ── Shell: rail + main ─────────────────────────────────────────────── */
 .np-shell { flex: 1; display: grid; grid-template-columns: var(--np-rail-w) minmax(0, 1fr); min-height: 0; }

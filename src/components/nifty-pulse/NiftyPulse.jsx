@@ -1,14 +1,15 @@
 /**
  * NIFTY PULSE — 1-Second Options Intelligence.
  *
- * A self-contained trading-terminal workspace inside ThetaLab. Phase 2 runs
- * entirely on the deterministic replay (SIMULATION): no Kite connection, no
- * API calls, no orders. Address: /nifty-pulse/<workspace>.
+ * A self-contained trading-terminal workspace inside ThetaLab. Two sources:
+ * LIVE PAPER (the server's paper engine on real NIFTY prices from the shared
+ * Kite stream) and SIMULATION (deterministic replay in the browser). Paper
+ * only in both: there is no order path. Address: /nifty-pulse/<workspace>.
  */
 import { useEffect, useLayoutEffect, useRef, useState, lazy, Suspense } from "react";
 import {
   ArrowLeft, Gauge, Broadcast, Cpu, Stack, Receipt, ChartBar, ShieldCheck, SlidersHorizontal,
-  Play, Pause, ArrowCounterClockwise, Sun, Moon, Lock,
+  Play, Pause, ArrowCounterClockwise, Sun, Moon, Lock, Warning,
 } from "@phosphor-icons/react";
 import "./nifty-pulse.css";
 import { pulse, usePulse } from "./store.js";
@@ -52,12 +53,25 @@ function useTheme() {
   return [theme, setTheme];
 }
 
+function feedPill(s) {
+  if (s.mode !== "LIVE") return { tone: "warn", text: "NOT USED", title: "Simulation mode uses deterministic replay data; the Kite stream is not used." };
+  const L = s.live;
+  if (L.enabled === false || L.error) return { tone: "loss", text: "UNAVAILABLE", title: L.error ?? L.reason ?? "Live service not running" };
+  if (L.enabled == null) return { tone: "warn", text: "CHECKING", title: "Contacting the live paper service" };
+  const f = L.feed;
+  if (!f) return { tone: "warn", text: "WAITING" };
+  if (f.connected && f.indexQuote) return { tone: "gain", text: "CONNECTED", live: true, title: `Shared Kite stream · ${f.subscribed} instruments · ${f.reconnects} connects` };
+  if (f.connected) return { tone: "warn", text: "NO NIFTY TICK", title: "Stream connected; waiting for the first NIFTY index price" };
+  return { tone: s.marketOpen ? "loss" : undefined, text: s.marketOpen ? "DISCONNECTED" : "IDLE", title: f.lastError ? `Last error: ${f.lastError}` : "The shared stream connects 09:00–15:45 IST on trading days" };
+}
+
 function Header({ onExit, theme, setTheme }) {
   const s = usePulse((x) => x);
   const age = s.dataAgeMs;
   const feedTone = !s.sample ? "warn" : s.sample.status === "STALE" || s.sample.status === "NO_DATA" ? "loss" : "gain";
   const feedLabel = !s.sample ? "WAITING" : s.sample.status === "STALE" ? "STALE" : s.sample.status === "NO_DATA" ? "WAITING" : "FRESH";
   const riskTone = s.riskStatus === "OK" ? "gain" : s.riskStatus === "KILL" || s.riskStatus === "LIMIT" ? "loss" : "warn";
+  const kite = feedPill(s);
   return (
     <header className="np-header">
       <button className="np-back" onClick={onExit} title="Return to ThetaLab">
@@ -74,8 +88,8 @@ function Header({ onExit, theme, setTheme }) {
         <PulseWave />
       </div>
       <div className="np-pills" role="status" aria-live="off">
-        <Pill k="Market" tone={s.marketOpen ? "gain" : undefined} live={s.marketOpen}>{s.marketOpen ? "OPEN" : "CLOSED"} · SIM</Pill>
-        <Pill k="Kite feed" tone="warn" title="Phase 2 uses deterministic replay data only; the live Kite stream is wired in Phase 3.">NOT CONNECTED</Pill>
+        <Pill k="Market" tone={s.marketOpen ? "gain" : undefined} live={s.marketOpen}>{s.marketOpen ? "OPEN" : "CLOSED"} · {s.tag}</Pill>
+        <Pill k="Kite feed" tone={kite.tone} live={kite.live} title={kite.title}>{kite.text}</Pill>
         <Pill k="Data" tone={feedTone} live={feedTone === "gain"}>{feedLabel}{age != null ? ` · ${secs(age)}` : ""}</Pill>
         <Pill k="Engine" tone={s.running ? "accent" : "warn"} live={s.running}>{s.killSwitch ? "KILLED" : s.running ? "RUNNING" : "STOPPED"}</Pill>
         <Pill k="Mode" tone="accent"><Lock size={10} weight="bold" style={{ marginRight: 3, verticalAlign: -1 }} />PAPER ONLY</Pill>
@@ -86,6 +100,49 @@ function Header({ onExit, theme, setTheme }) {
         {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
       </button>
     </header>
+  );
+}
+
+function SourceSwitch({ mode }) {
+  return (
+    <div className="np-seg" role="group" aria-label="Data source">
+      <button data-on={mode === "LIVE"} onClick={() => pulse.setSource("LIVE")} title="Server paper engine on real NIFTY prices">Live paper</button>
+      <button data-on={mode === "SIMULATION"} onClick={() => pulse.setSource("SIMULATION")} title="Deterministic replay in this browser">Simulation</button>
+    </div>
+  );
+}
+
+function LiveBand() {
+  const s = usePulse((x) => x);
+  const L = s.live;
+  const down = L.enabled === false || !!L.error;
+  const ins = L.instruments;
+  const rec = L.recorder;
+  const st = L.store;
+  return (
+    <div className="np-simband np-liveband" data-down={down} role="note">
+      <span className="np-simtag np-livetag">LIVE PAPER</span>
+      {down ? (
+        <span className="np-long"><Warning size={13} weight="fill" style={{ display: "inline-block", verticalAlign: -2, marginRight: 4 }} />
+          {L.error ?? L.reason ?? "The live paper service is not running."} <span className="np-muted">Switch to Simulation to explore with replay data.</span></span>
+      ) : (
+        <>
+          <span className="np-long">
+            Real NIFTY prices from the shared Kite stream · every fill is a <b>paper fill</b> — no order is ever sent
+            {ins?.expiry ? <> · expiry <b className="n">{ins.expiry}</b> · lot <b className="n">{ins.lotSize}</b></> : null}
+          </span>
+          <span className="np-short">Real prices · <b>paper fills only</b></span>
+        </>
+      )}
+      <span className="n np-muted">{s.now ? `${istTime(s.now)} IST` : ""}</span>
+      {L.notice && <span className="np-loss" style={{ fontSize: 12 }}>{L.notice}</span>}
+      <div className="np-simctl">
+        {!down && <span className="np-faint" style={{ fontSize: 11.5 }} title={rec?.paused ?? undefined}>
+          Recorder {rec?.enabled ? (rec.recording ? `on · ${rec.totalMb} MB` : "paused") : "off"} · Storage {st?.enabled ? (st.migrationApplied === false ? "migration not applied" : st.migrationApplied ? "on" : "…") : "off"}
+        </span>}
+        <SourceSwitch mode={s.mode} />
+      </div>
+    </div>
   );
 }
 
@@ -115,9 +172,15 @@ function SimBand() {
         </select>
         <button className="np-chipbtn" onClick={() => pulse.restart(s.seed)} title="Restart the session from 09:15"><ArrowCounterClockwise size={13} />Restart</button>
         <button className="np-chipbtn" onClick={() => pulse.restart(s.seed + 1)} title="New synthetic session with the next seed">Seed +1</button>
+        <SourceSwitch mode={s.mode} />
       </div>
     </div>
   );
+}
+
+function Band() {
+  const mode = usePulse((x) => x.mode);
+  return mode === "LIVE" ? <LiveBand /> : <SimBand />;
 }
 
 function Rail({ tab, go }) {
@@ -139,7 +202,7 @@ function Rail({ tab, go }) {
         <div className="lbl" style={{ marginBottom: 6 }}>Risk today</div>
         <div className="flex items-center justify-between text-[11.5px]"><span className="np-muted">Trades</span><b className="n">{s.tradesToday}/{s.config.maxTradesPerDay}</b></div>
         <div className="flex items-center justify-between text-[11.5px] mt-1"><span className="np-muted">Loss used</span><b className="n">₹{Math.round(s.lossUsed).toLocaleString("en-IN")}/{(s.config.maxDailyLoss / 1000).toFixed(0)}k</b></div>
-        <div className="flex items-center justify-between text-[11.5px] mt-1"><span className="np-muted">Position</span><b className="n">{s.position ? s.position.id.replace("NP-SIM-", "#") : "Flat"}</b></div>
+        <div className="flex items-center justify-between text-[11.5px] mt-1"><span className="np-muted">Position</span><b className="n">{s.position ? s.position.id.replace(/^NP-(SIM-)?/, "#") : "Flat"}</b></div>
       </div>
     </nav>
   );
@@ -190,7 +253,7 @@ export default function NiftyPulse({ onExit }) {
     <div className="np-root" ref={rootRef}>
       <div className="np-top" ref={topRef}>
         <Header onExit={onExit} theme={theme} setTheme={setTheme} />
-        <SimBand />
+        <Band />
       </div>
       <div className="np-shell">
         <Rail tab={tab} go={go} />

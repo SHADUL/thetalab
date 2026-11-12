@@ -8,3 +8,6 @@ dist
 # Historical bhavcopy fetches cached by the options backtest — large, and
 # trivially re-fetchable from NSE/BSE, so not worth committing.
 src/options-auto/backtest/.bhavcopy-cache/
+
+# NIFTY PULSE tick recordings (VM only)
+/data/nifty-pulse-ticks/

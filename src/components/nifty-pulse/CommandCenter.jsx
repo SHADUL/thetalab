@@ -12,10 +12,10 @@ function lastPrices(samples, n) {
 
 function StatusStrip({ s }) {
   const items = [
-    ["NIFTY 50 · SIM", s.price != null ? num(s.price, 2) : "WAITING", s.changePct != null ? (s.changePct >= 0 ? "gain" : "loss") : null],
+    [`NIFTY 50 · ${s.tag}`, s.price != null ? num(s.price, 2) : "WAITING", s.changePct != null ? (s.changePct >= 0 ? "gain" : "loss") : null],
     ["Day change", s.changePct != null ? `${s.changePct >= 0 ? "▲" : "▼"} ${pct(s.changePct, 2)}` : "—", s.changePct != null ? (s.changePct >= 0 ? "gain" : "loss") : null],
     ["Market", s.marketOpen ? "Open" : "Closed", null],
-    ["IST (sim clock)", istTime(s.now), null],
+    [s.mode === "LIVE" ? "IST" : "IST (sim clock)", istTime(s.now), null],
     ["Last tick", s.lastTickAt ? istTime(s.lastTickAt, true) : "—", null],
     ["Data age", s.dataAgeMs != null ? secs(s.dataAgeMs) : "—", s.sample && !s.sample.valid ? "loss" : null],
     ["Feed health", s.sample?.valid ? `${s.feed.fresh + s.feed.held}/60 valid` : s.sample ? "STALE" : "WAITING", s.sample && !s.sample.valid ? "loss" : null],
@@ -162,7 +162,7 @@ export default function CommandCenter({ go }) {
       </div>
       <StatusStrip s={s} />
       <div className="np-grid np-kpis" style={{ marginBottom: 12 }}>
-        <Kpi label="NIFTY · SIM" value={s.price != null ? num(s.price, 2) : "WAITING"} sub={s.changePct != null ? <span className={s.changePct >= 0 ? "np-gain" : "np-loss"}>{s.changePct >= 0 ? "▲" : "▼"} {pct(s.changePct, 2)} today</span> : "no data"}
+        <Kpi label={`NIFTY · ${s.tag}`} value={s.price != null ? num(s.price, 2) : "WAITING"} sub={s.changePct != null ? <span className={s.changePct >= 0 ? "np-gain" : "np-loss"}>{s.changePct >= 0 ? "▲" : "▼"} {pct(s.changePct, 2)} today</span> : "no data"}
           spark={<Spark values={spark} color="var(--c-accent)" />} />
         <Kpi label="Strategy signal" value={<DirBadge dir={sig?.direction ?? "NEUTRAL"} lg />} sub={s.episode && s.episode.direction !== "NEUTRAL" ? `since ${istTime(s.episode.startedAt)}` : "no active signal"} />
         <Kpi label="Rule agreement" value={s.indicators?.ready ? `${sig.agreement.count}/4` : "—"} sub={sig?.agreement?.side ? `${sig.agreement.side.toLowerCase()} rules · not a probability` : "waiting for data"}>
@@ -180,7 +180,7 @@ export default function CommandCenter({ go }) {
       </div>
 
       <div className="np-grid np-cc-main" style={{ marginBottom: 12 }}>
-        <Card title="NIFTY 50 · real-time" sub="Synthetic replay · 1-second samples · IST"
+        <Card title="NIFTY 50 · real-time" sub={`${s.mode === "LIVE" ? "Live Kite prices" : "Synthetic replay"} · 1-second samples · IST`}
           tools={<>
             <div className="np-seg" role="group" aria-label="Timeframe">
               {[["1s", "1s"], ["5s", "5s"], ["15s", "15s"], ["1m", "1m"]].map(([k, l]) => <button key={k} data-on={tf === k} onClick={() => setTf(k)}>{l}</button>)}

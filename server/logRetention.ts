@@ -11,7 +11,13 @@ import { createClient } from '@supabase/supabase-js';
 
 export const RETENTION: Array<{ table: string; days: number }> = [
   { table: 'options_autotrade_log', days: 30 },
+  // NIFTY PULSE decision events (paper). Skipped quietly until its migration is applied.
+  { table: 'nifty_pulse_events', days: 30 },
 ];
+
+function isMissingTable(err: any): boolean {
+  return !!err && (err.code === '42P01' || err.code === 'PGRST205' || /does not exist|schema cache/i.test(err.message ?? ''));
+}
 const RUN_AFTER_MIN = 15 * 60 + 45;
 const BATCH = 10_000;
 
@@ -22,6 +28,7 @@ export async function pruneOnce(sb: ReturnType<typeof createClient>, nowMs = Dat
     let deleted = 0;
     for (let guard = 0; guard < 500; guard++) {
       const { data: first, error: e1 } = await sb.from(table).select('id').lt('created_at', cutoff).order('id', { ascending: true }).limit(1);
+      if (e1 && isMissingTable(e1)) break;
       if (e1) throw new Error(`${table}: ${e1.message}`);
       if (!first?.length) break;
       const lo = Number((first[0] as { id: number }).id);

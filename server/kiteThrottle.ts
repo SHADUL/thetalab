@@ -58,14 +58,25 @@ export function createKiteThrottledFetch(base: typeof fetch, opts: ThrottleOptio
   const now = opts.now ?? Date.now;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const nextAt: Record<Lane, number> = { quote: 0, historical: 0, other: 0 };
+  const lastSent: Record<Lane, number> = { quote: -Infinity, historical: -Infinity, other: -Infinity };
 
   /** Reserve the next slot synchronously (so concurrent callers queue in call order), then wait for it. */
   const acquire = async (lane: Lane, minDelay = 0): Promise<number> => {
     const t = now();
     const at = Math.max(t + minDelay, nextAt[lane]);
     nextAt[lane] = at + spacing[lane];
-    const wait = at - t;
+    let wait = Math.max(0, at - t);
     if (wait > 0) await sleep(wait);
+    // Timers can fire late and together when the event loop is busy; enforce
+    // the gap against the ACTUAL previous send, not just the reserved slot.
+    for (;;) {
+      const gap = now() - lastSent[lane];
+      if (gap >= spacing[lane]) break;
+      const extra = spacing[lane] - gap;
+      wait += extra;
+      await sleep(extra);
+    }
+    lastSent[lane] = now();
     return wait;
   };
 

@@ -1782,8 +1782,11 @@ async function handlePaperScan(req: any, res: any, supabase: SupabaseClient) {
     // at the quote so they never feel the cost. AUTO does: the two worst
     // real trades (#37 at a 17.7% avg spread, #39 at 5.8%) were both POOR
     // far-month BANKNIFTY spreads that filled far off their planned credit.
-    // PAPER/SHADOW are left alone so they keep generating comparison data.
-    if (isLive && (best.liquidity.tier === 'POOR' || best.liquidity.tier === 'UNTRADABLE')) {
+    // SHADOW applies the same gate (owner decision 2026-11-12) so it is a
+    // faithful preview of what AUTO would actually do — a mid-price fill on
+    // a 20-40% wide spread overstated SHADOW credit/R:R. PAPER is left alone
+    // so it keeps generating ungated comparison data.
+    if ((isLive || isShadow) && (best.liquidity.tier === 'POOR' || best.liquidity.tier === 'UNTRADABLE')) {
       const why = best.liquidity.legs.flatMap((l: any) => l.reasons).slice(0, 3).join('; ');
       await event('ENTRY_SKIPPED', { reason: 'liquidity_too_poor', tier: best.liquidity.tier });
       await log('info', `${modeLabel}: ${symbol} candidate liquidity is ${best.liquidity.tier} (${why}) — real orders would fill far off the quoted credit, skipping.`);

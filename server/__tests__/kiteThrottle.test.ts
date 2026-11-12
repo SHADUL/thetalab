@@ -40,8 +40,9 @@ test('concurrent quote calls are spaced; other lanes are not held behind them', 
   ]);
   const q = seen.filter((s) => s.url.includes('/quote')).map((s) => s.at).sort((a, b) => a - b);
   for (let i = 1; i < q.length; i++) assert.ok(q[i] - q[i - 1] >= 35, `gap ${q[i] - q[i - 1]}`);
+  // The positions call must not queue behind the quote lane: it goes out before the 2nd quote.
   const other = seen.find((s) => s.url.includes('positions'))!;
-  assert.ok(other.at - t0 < 30);
+  assert.ok(other.at <= q[1], `positions at +${other.at - t0}ms, 2nd quote at +${q[1] - t0}ms`);
 });
 
 test('order POSTs pass through immediately and are never retried', async () => {

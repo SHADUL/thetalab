@@ -48,7 +48,7 @@ export interface NakedSellSettings {
 
 export const DEFAULT_SETTINGS: NakedSellSettings = {
   enabled: true, paper_enabled: true, shadow_enabled: true, symbols: ['NIFTY', 'SENSEX'], lots: 1,
-  target_delta: 0.3, tp_pct: 40, sl_pct: 30, entry_start_min: 585, entry_end_min: 870, square_off_min: 915,
+  target_delta: 0.3, tp_pct: 40, sl_pct: 40, entry_start_min: 660, entry_end_min: 870, square_off_min: 915,
   max_entries_per_day: 2, max_daily_loss: 5000, cooldown_min: 15, allow_expiry_day: false,
   max_spread_pct: 5, min_volume: 100,
 };
@@ -77,10 +77,19 @@ export interface TrendResult {
   emaGapPct: number | null;
 }
 
-/** Minimum completed 5-minute bars before any signal (6 bars = 09:45). */
-export const MIN_TREND_BARS = 6;
-/** EMA9/EMA21 separation (as % of price) below which the trend is treated as flat. */
-export const MIN_EMA_GAP_PCT = 0.03;
+/**
+ * Minimum completed 5-minute bars before any signal: 21 bars = 11:00 IST,
+ * the point where EMA21 has a full window. v1 used 6 (09:45), when EMA21
+ * was still mostly its seed value and early "trends" flipped on noise —
+ * see NAKED_SELL_STRATEGY.md (v2 review, 2026-11-13).
+ */
+export const MIN_TREND_BARS = 21;
+/**
+ * EMA9/EMA21 separation (as % of price) below which the trend is treated
+ * as flat. v1 used 0.03%; 0.06% filters out weak drifts that mostly ended
+ * at SL/square-off in the 60-day review.
+ */
+export const MIN_EMA_GAP_PCT = 0.06;
 
 /**
  * Intraday trend from COMPLETED 5-minute index candles of today's session.

@@ -12,22 +12,30 @@ function bars(closes: number[]): Candle[] {
 }
 
 test('intradayTrend: rising session is BULLISH, falling is BEARISH, chop is NEUTRAL', () => {
-  const up = intradayTrend(bars(Array.from({ length: 12 }, (_, i) => 24000 + i * 8)));
+  const up = intradayTrend(bars(Array.from({ length: 24 }, (_, i) => 24000 + i * 8)));
   assert.equal(up.state, 'BULLISH');
-  const down = intradayTrend(bars(Array.from({ length: 12 }, (_, i) => 24000 - i * 8)));
+  const down = intradayTrend(bars(Array.from({ length: 24 }, (_, i) => 24000 - i * 8)));
   assert.equal(down.state, 'BEARISH');
-  const chop = intradayTrend(bars([24000, 24004, 23998, 24003, 23999, 24002, 24000, 24001]));
+  const chop = intradayTrend(bars(Array.from({ length: 24 }, (_, i) => 24000 + [0, 4, -2, 3, -1, 2][i % 6])));
   assert.equal(chop.state, 'NEUTRAL');
 });
 
-test('intradayTrend: needs 6 completed bars', () => {
-  const r = intradayTrend(bars([1, 2, 3, 4, 5]));
+test('intradayTrend: needs 21 completed bars (EMA21 fully warmed, 11:00 IST)', () => {
+  const r = intradayTrend(bars(Array.from({ length: 20 }, (_, i) => 24000 + i * 8)));
   assert.equal(r.state, 'NEUTRAL');
-  assert.match(r.reason, /only 5/);
+  assert.match(r.reason, /only 20/);
+  assert.equal(intradayTrend(bars(Array.from({ length: 21 }, (_, i) => 24000 + i * 8))).state, 'BULLISH');
+});
+
+test('intradayTrend: a weak drift (EMA gap under 0.06%) is NEUTRAL', () => {
+  // +1 point per bar on 24,000 keeps EMA9-EMA21 well under 0.06% of price.
+  const r = intradayTrend(bars(Array.from({ length: 30 }, (_, i) => 24000 + i)));
+  assert.equal(r.state, 'NEUTRAL');
+  assert.match(r.reason, /too close/);
 });
 
 test('intradayTrend: pullback below EMA9 in an uptrend is NEUTRAL, not BULLISH', () => {
-  const closes = [...Array.from({ length: 12 }, (_, i) => 24000 + i * 10), 24050];
+  const closes = [...Array.from({ length: 24 }, (_, i) => 24000 + i * 10), 24170];
   assert.equal(intradayTrend(bars(closes)).state, 'NEUTRAL');
 });
 
@@ -101,9 +109,9 @@ test('charges and P&L for a short', () => {
 });
 
 test('entryBlocker covers window, expiry day, caps, loss limit and cooldown', () => {
-  const ok = { minuteIst: 600, isExpiryDay: false, hasOpenPosition: false, entriesToday: 0, realizedToday: 0, minutesSinceLastExit: null };
+  const ok = { minuteIst: 700, isExpiryDay: false, hasOpenPosition: false, entriesToday: 0, realizedToday: 0, minutesSinceLastExit: null };
   assert.equal(entryBlocker(DEFAULT_SETTINGS, ok), null);
-  assert.match(entryBlocker(DEFAULT_SETTINGS, { ...ok, minuteIst: 580 })!, /before/);
+  assert.match(entryBlocker(DEFAULT_SETTINGS, { ...ok, minuteIst: 650 })!, /before/);
   assert.match(entryBlocker(DEFAULT_SETTINGS, { ...ok, minuteIst: 880 })!, /after/);
   assert.match(entryBlocker(DEFAULT_SETTINGS, { ...ok, isExpiryDay: true })!, /expiry/);
   assert.match(entryBlocker(DEFAULT_SETTINGS, { ...ok, hasOpenPosition: true })!, /open/);

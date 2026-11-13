@@ -99,7 +99,7 @@ function OpenCard({ positions, onClose, busyId }) {
   return (
     <Card title={`Open positions (${positions.length})`} icon={Briefcase} delay={0.1}>
       {!positions.length ? (
-        <div className="text-[12px] text-ink2">No open positions. The engine sells when an index shows a clear intraday trend between 09:45 and 14:30.</div>
+        <div className="text-[12px] text-ink2">No open positions. The engine sells when an index shows a clear intraday trend between 11:00 and 14:30.</div>
       ) : (
         <div className="flex flex-col gap-3">
           {positions.map((p) => (
@@ -167,8 +167,8 @@ function HistoryCard({ recent }) {
 
 function RulesCard({ s }) {
   const rows = [
-    ["Trend", "5-min candles: close vs session average + EMA9/EMA21 + close vs EMA9. All three must agree."],
-    ["Entry", `Bullish → sell PE, bearish → sell CE · ~${s.target_delta} delta · nearest weekly (rolls to next on expiry day) · ${minToClock(s.entry_start_min)}–${minToClock(s.entry_end_min)}`],
+    ["Trend", "5-min candles: close vs session average + EMA9/EMA21 (at least 0.06% apart) + close vs EMA9. All three must agree. Needs 21 completed bars, so no signal before 11:00."],
+    ["Entry", `Bullish → sell PE, bearish → sell CE · ~${s.target_delta} delta · nearest weekly (rolls to next on expiry day) · ${minToClock(Math.max(s.entry_start_min, 660))}–${minToClock(s.entry_end_min)}`],
     ["Take profit", `premium falls ${s.tp_pct}% from entry — same 1-second live check`],
     ["Stop-loss", `premium rises ${s.sl_pct}% from entry — checked every second on live Kite prices (must hold for 2 consecutive seconds)`],
     ["Trend flip", "exit immediately if the trend turns against the position"],

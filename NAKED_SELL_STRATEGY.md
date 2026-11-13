@@ -135,6 +135,7 @@ None of the changes is profitable alone. Together they remove most of the low-qu
 | Take profit | 30% | **40%** | **Settings card**, you need to change it |
 | Stop-loss | 30% | **40%** | **Settings card**, you need to change it |
 | Entries per day per index | 8 | **2** | **Settings card**, you need to change it |
+| Square-off | 15:15 | **15:25** (added 13 Nov after review: 60-day backtest +₹67,826, PF 1.47, vs +₹56,998, PF 1.42 at 15:15) | `square_off_min` 925, set in the database |
 | Delta, lots, cooldown, daily loss, square-off, expiry-day rule, SHADOW liquidity gate | unchanged | unchanged | |
 
 **The v2 rules:**
@@ -145,7 +146,7 @@ None of the changes is profitable alone. Together they remove most of the low-qu
    - Premium −40% (target).
    - Premium +40% (stop, 2-second confirmation).
    - Trend turns against the position (also needs the 0.06% gap).
-   - 15:15 square-off.
+   - 15:25 square-off.
 5. At most 2 trades per index per day, with 15 minutes between them and a −₹5,000 daily stop.
 
 **Code changed:**

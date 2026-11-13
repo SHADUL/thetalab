@@ -11,7 +11,7 @@
  *   TP          option premium decays by tpPct (default 40%)
  *   SL          option premium rises by slPct (default 30%) — the hard stop
  *   TREND_FLIP  the intraday trend turns against the position
- *   SQUARE_OFF  15:15 IST — never carried overnight
+ *   SQUARE_OFF  15:25 IST — never carried overnight
  *
  * Launch scope (owner decision 2026-11-12): PAPER + SHADOW only — never a
  * real order. SHADOW applies the same liquidity realism as the main
@@ -37,7 +37,7 @@ export interface NakedSellSettings {
   sl_pct: number;            // 30
   entry_start_min: number;   // minutes after midnight IST, 585 = 09:45
   entry_end_min: number;     // 870 = 14:30
-  square_off_min: number;    // 915 = 15:15
+  square_off_min: number;    // 925 = 15:25
   max_entries_per_day: number;
   max_daily_loss: number;    // ₹, per mode
   cooldown_min: number;
@@ -48,7 +48,7 @@ export interface NakedSellSettings {
 
 export const DEFAULT_SETTINGS: NakedSellSettings = {
   enabled: true, paper_enabled: true, shadow_enabled: true, symbols: ['NIFTY', 'SENSEX'], lots: 1,
-  target_delta: 0.3, tp_pct: 40, sl_pct: 40, entry_start_min: 660, entry_end_min: 870, square_off_min: 915,
+  target_delta: 0.3, tp_pct: 40, sl_pct: 40, entry_start_min: 660, entry_end_min: 870, square_off_min: 925,
   max_entries_per_day: 2, max_daily_loss: 5000, cooldown_min: 15, allow_expiry_day: false,
   max_spread_pct: 5, min_volume: 100,
 };

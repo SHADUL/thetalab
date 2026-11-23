@@ -30,6 +30,8 @@ export const S = {
   execVersion: 1,
   overlays: { or: true, bands: true, prev: true, williams: true, markers: true, ...(prefs.overlays ?? {}) },
   runs: null,
+  /** Live server status (observe-only service). Read-only; null until the first poll. */
+  live: null,
 };
 
 let lastEmit = 0, pendingEmit = false;
@@ -111,6 +113,24 @@ export const ascent = {
 };
 
 load(prefs.fixtureId ? "09:14" : "11:45");
+
+/* Live server status — polled every 10 s while the section is open. Never used as replay data. */
+let livePoll = 0;
+async function pollLive() {
+  try {
+    const r = await fetch("/api/nifty-ascent?resource=status", { credentials: "same-origin" });
+    S.live = r.ok ? { ...(await r.json()), fetchedAt: Date.now() } : { enabled: false, livePaper: "NOT_ENABLED", reason: `status ${r.status}`, error: true, fetchedAt: Date.now() };
+  } catch (e) {
+    S.live = { enabled: false, livePaper: "NOT_ENABLED", reason: "status unavailable", error: true, fetchedAt: Date.now() };
+  }
+  emit(true);
+}
+export function startLivePolling() {
+  if (livePoll) return () => {};
+  pollLive();
+  livePoll = setInterval(pollLive, 10_000);
+  return () => { clearInterval(livePoll); livePoll = 0; };
+}
 
 export function useAscent() {
   useSyncExternalStore(ascent.subscribe, () => S.version, () => S.version);

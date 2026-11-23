@@ -91,3 +91,18 @@ test('archive and wiring never write or log credentials; compose mounts the arch
   const compose = readFileSync(path.join(root, 'deploy/oracle/docker-compose.yml'), 'utf8');
   assert.match(compose, /- \.\/data\/nifty-ascent:\/data\/nifty-ascent/);
 });
+
+test('api/nifty-ascent.ts: read-only status, no control/order code, no credentials; reports NOT_ENABLED when the service is off', async () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+  const src = readFileSync(path.join(root, 'api/nifty-ascent.ts'), 'utf8');
+  for (const re of [/\/orders\b/, /place_?order/i, /transaction_type/i, /access_token|accessToken|apiKey|KITE_API_KEY/, /\.control\(/, /method === 'POST'/]) assert.ok(!re.test(src), `matches ${re}`);
+  const { default: handler } = await import('../../api/nifty-ascent.ts');
+  let code = 0, body: any = null;
+  const res: any = { status(n: number) { code = n; return res; }, json(b: unknown) { body = b; }, setHeader() {} };
+  await handler({ method: 'GET', query: { resource: 'status' } }, res);
+  assert.equal(code, 200);
+  assert.equal(body.enabled, false);
+  assert.equal(body.livePaper, 'NOT_ENABLED');
+  await handler({ method: 'POST', query: { resource: 'status' } }, res);
+  assert.equal(code, 404, 'no write methods');
+});

@@ -10,7 +10,7 @@ import {
   Play, Pause, ArrowCounterClockwise, Sun, Moon, Lock, FastForward,
 } from "@phosphor-icons/react";
 import "./nifty-ascent.css";
-import { ascent, useAscent, SPEEDS } from "./store.js";
+import { ascent, useAscent, SPEEDS, startLivePolling } from "./store.js";
 import { Pill, AscentGlyph } from "./ui.jsx";
 import { istTime, istDate, hm, BOT_LABEL } from "./format.js";
 import { FIXTURES } from "../../nifty-ascent/sim/fixtures.ts";
@@ -56,6 +56,15 @@ function Header({ onExit, theme, setTheme }) {
   const e = S.replay.engine;
   const now = S.replay.t;
   const open = now >= barStart(e.date, 555) && now < barStart(e.date, 930);
+  const L = S.live;
+  const st = L?.stream;
+  const kite = !L ? { tone: undefined, text: "CHECKING", title: "Contacting the server" }
+    : !L.enabled ? { tone: "warn", text: "NOT OBSERVED", title: L.reason }
+    : st?.connected ? { tone: "gain", live: true, text: "CONNECTED", title: `Shared Kite stream · ${st.subscribed ?? 0} instruments · last message ${st.lastMessageAgoMs ?? "—"} ms ago` }
+    : { tone: undefined, text: "IDLE", title: "The shared Kite stream connects 09:00–15:45 IST on trading days" };
+  const liveEng = !L ? { tone: undefined, text: "—", title: "" }
+    : !L.enabled ? { tone: "warn", text: "OFF", title: L.reason }
+    : { tone: "warn", text: `PAUSED · OBSERVE${L.engine ? ` · ${L.engine.state.replaceAll("_", " ")}` : ""}`, title: "The live engine observes real NIFTY data and records signals; it cannot place paper or real orders." };
   const stTone = e.state === "DATA_ERROR" ? "loss" : e.state === "POSITION_OPEN" || e.state === "EXIT_PENDING" ? "gain" : e.state.includes("ARMED") ? "accent" : undefined;
   return (
     <header className="na-header">
@@ -72,11 +81,11 @@ function Header({ onExit, theme, setTheme }) {
         </div>
       </div>
       <div className="na-pills" role="status" aria-live="off">
-        <Pill k="Market" tone={open ? "gain" : undefined} live={open}>{open ? "OPEN" : now < barStart(e.date, 555) ? "PRE-OPEN" : "CLOSED"} · SIM</Pill>
-        <Pill k="Kite" tone="warn" title="Phase 2 uses deterministic replay data only; the shared Kite stream is not used.">NOT USED</Pill>
-        <Pill k="Data" tone="warn" title="Synthetic replay data">SIMULATION</Pill>
-        <Pill k="Engine" tone={e.engineStatus === "RUNNING" ? "accent" : e.engineStatus === "KILLED" ? "loss" : "warn"} live={e.engineStatus === "RUNNING"}>{e.engineStatus.replace("_", " ")}</Pill>
-        <Pill k="Mode" tone="accent"><Lock size={10} weight="bold" style={{ marginRight: 3, verticalAlign: -1 }} />PAPER · REPLAY</Pill>
+        <Pill k="Replay data" tone="warn" title="Every price on these screens comes from a synthetic replay fixture — not market data">SIMULATION</Pill>
+        <Pill k="Live paper" tone="warn" title="Live paper execution is not enabled. No paper or real orders are placed."><Lock size={10} weight="bold" style={{ marginRight: 3, verticalAlign: -1 }} />NOT ENABLED</Pill>
+        <Pill k="Kite feed" tone={kite.tone} live={kite.live} title={kite.title}>{kite.text}</Pill>
+        <Pill k="Live engine" tone={liveEng.tone} title={liveEng.title}>{liveEng.text}</Pill>
+        <Pill k="Replay" optional tone={open ? "gain" : undefined} live={open && S.playing}>{open ? "SESSION" : now < barStart(e.date, 555) ? "PRE-OPEN" : "CLOSED"} · engine {e.engineStatus.replace("_", " ").toLowerCase()}</Pill>
         <Pill k="State" tone={stTone}>{e.state.replaceAll("_", " ")}</Pill>
         <Pill k="Bot" optional tone={e.activeBot === "WILLIAMS" ? "accent" : undefined}>{e.activeBot ? BOT_LABEL[e.activeBot] : "—"}</Pill>
         <Pill k="Session" optional>{istDate(now)} · {istTime(now)} IST</Pill>
@@ -96,7 +105,7 @@ function SimBand() {
   return (
     <div className="na-simband" role="note">
       <span className="na-simtag">SIMULATION</span>
-      <span className="na-long">Deterministic replay fixture · synthetic NIFTY and option prices — <b>not market data</b> · paper fills only · results prove nothing.</span>
+      <span className="na-long">Deterministic replay fixture · synthetic NIFTY and option prices — <b>not market data</b> · results prove nothing · <b>LIVE PAPER — NOT ENABLED</b>.</span>
       <span className="na-short">Synthetic data — <b>not market data</b></span>
       <span className="n na-muted">SIM {istTime(S.replay.t)} IST</span>
       <div className="na-simctl">
@@ -169,7 +178,8 @@ export default function NiftyAscent({ onExit }) {
     window.addEventListener("keydown", onKey);
     const prevTitle = document.title;
     document.title = "NIFTY ASCENT · thetalab";
-    return () => { window.removeEventListener("popstate", onPop); window.removeEventListener("keydown", onKey); document.title = prevTitle; ascent.pause(); };
+    const stopLive = startLivePolling();
+    return () => { window.removeEventListener("popstate", onPop); window.removeEventListener("keydown", onKey); document.title = prevTitle; ascent.pause(); stopLive(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useLayoutEffect(() => {

@@ -31,14 +31,14 @@ export default function RiskSettings() {
     <>
       <WsHead title="Risk & Settings" desc="Research rules are locked; execution and risk settings are adjustable and versioned. Every limit is enforced by the engine, not the page." />
       <div className="na-grid na-risk" style={{ marginBottom: 12 }}>
-        <Card title="Engine controls" sub="Act on the current replay session (paper only)" glow>
+        <Card title="Replay engine controls · SIMULATION only" sub="These act on the replay session in this browser — not on the live server" glow>
           <div style={{ display: "grid", gap: 10 }}>
             <div className="flex items-center gap-2"><span className="na-muted" style={{ fontSize: 12 }}>Engine</span><Badge tone={e.engineStatus === "RUNNING" ? "accent" : e.engineStatus === "KILLED" ? "loss" : "warn"} lg>{e.engineStatus.replace("_", " ")}</Badge></div>
-            <button className="na-stop" data-kind="start" onClick={() => ascent.control("START")} disabled={e.killed}><Play size={18} weight="fill" />START PAPER ENGINE</button>
+            <button className="na-stop" data-kind="start" onClick={() => ascent.control("START")} disabled={e.killed}><Play size={18} weight="fill" />START REPLAY ENGINE</button>
             <button className="na-chipbtn" style={{ height: 40, justifyContent: "center" }} onClick={() => ascent.control("STOP_ENTRIES")}><Prohibit size={15} />STOP NEW ENTRIES — keep managing the open position</button>
-            <button className="na-stop" onClick={() => ascent.control("KILL")}><Skull size={18} weight="fill" />KILL / FLATTEN</button>
+            <button className="na-stop" onClick={() => ascent.control("KILL")}><Skull size={18} weight="fill" />KILL / FLATTEN REPLAY</button>
             <button className="na-chipbtn" style={{ height: 34, justifyContent: "center" }} onClick={() => ascent.control("RELEASE")} disabled={!e.killed}><LockOpen size={14} />Release kill switch</button>
-            <div className="na-note">KILL blocks entries, cancels a pending entry and closes an open paper position at the first fresh bid. In live paper (Phase 4) the engine starts PAUSED every day and only trades after START.</div>
+            <div className="na-note">KILL blocks entries, cancels a pending entry and closes an open paper position at the first fresh bid. Live paper is NOT ENABLED; when it is (after your approval) the live engine will have its own controls and start PAUSED every day.</div>
           </div>
         </Card>
         <Card title="Execution & risk settings" sub={`Version ${S.exec.version} · replay restarts from 09:10 and re-runs to the current time when saved`}
@@ -52,6 +52,7 @@ export default function RiskSettings() {
           ))}
         </Card>
       </div>
+      <LiveServiceCard L={S.live} />
       <div className="na-grid na-two">
         <Card title={<span className="flex items-center gap-2"><Lock size={14} weight="bold" />Research rules {R.version}</span>} sub="Fixed research specification (OptionsBuyer.in data + your Q1–Q15 decisions). Changing any of these requires a new strategy version.">
           <KV wide rows={[
@@ -85,5 +86,38 @@ export default function RiskSettings() {
         </Card>
       </div>
     </>
+  );
+}
+
+/** Read-only status of the real server service. Never mixed with replay data. */
+function LiveServiceCard({ L }) {
+  const e = L?.engine;
+  const fmt = (v, dp = 2) => (v == null ? "—" : Number(v).toLocaleString("en-IN", { maximumFractionDigits: dp, minimumFractionDigits: dp }));
+  return (
+    <Card title="Live server · real Kite data (observe only)" sub="Read-only. LIVE PAPER — NOT ENABLED: the live engine records signals but cannot place paper or real orders." style={{ marginBottom: 12 }}
+      tools={<Badge tone="warn">LIVE PAPER — NOT ENABLED</Badge>}>
+      {!L ? <div className="na-note">Checking the server…</div> : !L.enabled ? (
+        <Reason tone="warn" tag="NOT OBSERVING">{L.reason}</Reason>
+      ) : (
+        <div className="na-grid na-two" style={{ gap: 18 }}>
+          <KV rows={[
+            ["Session date", L.date ?? "—"],
+            ["Kite feed (shared stream)", L.stream?.connected ? `CONNECTED · ${L.stream.subscribed} instruments` : "IDLE (connects 09:00–15:45 on trading days)"],
+            ["Previous session", L.prep ? `${L.prep.prevDate ?? "—"} · ${L.prep.prevBars ?? 0} bars · 15:15 close ${fmt(L.prep.prevClose1515)}` : "not loaded yet (08:50)"],
+            ["Instrument master", L.prep ? `${L.prep.contracts ?? 0} contracts · ${(L.prep.expiries ?? []).join(", ")}` : "—"],
+            ["Live engine", e ? `${e.engineStatus} · ${e.state.replaceAll("_", " ")}` : "not created (non-trading day or before 08:50)"],
+            ["Pre-subscribed options", (L.presubscribed ?? []).length ? L.presubscribed.join(", ") : "none"],
+          ]} />
+          <KV rows={[
+            ["Today's reference", fmt(e?.reference)],
+            ["Gap", e?.gap ? `${e.gap.direction} ${fmt(e.gap.points)} pts · ${fmt(e.gap.pct, 4)}%` : "—"],
+            ["Opening range", e?.or ? `${fmt(e.or.low)}–${fmt(e.or.high)} · bands ${fmt(e.or.downsideBand)} / ${fmt(e.or.upsideBand)}` : e ? `${e.orCollected}/31 closes` : "—"],
+            ["Stand-down / handover", e?.standDown ? `${e.standDown.reason}${e.handover ? " → Williams" : ""}` : "—"],
+            ["Signal (recorded, not traded)", e?.signal ? `${e.signal.bot} ${e.signal.right} · close ${fmt(e.signal.close)}` : "—"],
+            ["Would select", e?.wouldSelect ? (e.wouldSelect.ok ? `${e.wouldSelect.tradingsymbol} (exp ${e.wouldSelect.expiry})` : e.wouldSelect.code) : "—"],
+          ]} />
+        </div>
+      )}
+    </Card>
   );
 }

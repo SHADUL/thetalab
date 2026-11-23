@@ -38,6 +38,7 @@ const API_MODULES: Record<string, string> = {
   'swing-india': 'api/swing-india.ts',
   'naked-sell': 'api/naked-sell.ts',
   'nifty-pulse': 'api/nifty-pulse.ts',
+  'nifty-ascent': 'api/nifty-ascent.ts',
 };
 const loaded = new Map<string, (req: any, res: any) => unknown>();
 async function handlerFor(name: string) {
@@ -55,6 +56,7 @@ app.use('/api', (req, res, next) => {
   res.on('finish', () => {
     // NIFTY PULSE polls its snapshot every second; log only failures of that one call.
     if (req.path === '/nifty-pulse' && req.query.resource === 'snapshot' && res.statusCode < 400) return;
+    if (req.path === '/nifty-ascent' && req.query.resource === 'status' && res.statusCode < 400) return;
     const r = typeof req.query.resource === 'string' ? `?resource=${req.query.resource}` : '';
     console.log(`${new Date().toISOString()} ${req.method} ${req.baseUrl}${req.path}${r} ${res.statusCode} ${Date.now() - t0}ms`);
   });

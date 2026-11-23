@@ -7,7 +7,7 @@ import { useSyncExternalStore } from "react";
 import { FIXTURES } from "../../nifty-ascent/sim/fixtures.ts";
 import { Replay } from "../../nifty-ascent/sim/market.ts";
 import { histReplay } from "../../nifty-ascent/sim/historical.ts";
-import { DEFAULT_EXECUTION, LIVE_PAPER_EXECUTION, LIVE_PAPER_VARIANT, NO_VARIANT, RESEARCH_RULES_V1, variantRules, barStart } from "../../nifty-ascent/core/rules.ts";
+import { DEFAULT_EXECUTION, LIVE_PAPER_EXECUTION, LIVE_PAPER_RULES, LIVE_PAPER_VARIANT, NO_VARIANT, RESEARCH_RULES_V1, variantRules, barStart } from "../../nifty-ascent/core/rules.ts";
 import { AscentEngine } from "../../nifty-ascent/core/engine.ts";
 
 export const SPEEDS = [1, 10, 60, 300];
@@ -94,6 +94,9 @@ function cleanVariant(v) {
   const n = (x, max) => (Number.isFinite(+x) && +x > 0 ? Math.min(max, Math.round(+x)) : 0);
   return { minOrWidth: n(v?.minOrWidth, 500), rollExpiryWithinDays: n(v?.rollExpiryWithinDays, 6) };
 }
+/** Live paper rules/variant for the next session (server settings; falls back to the built-in default). */
+export const liveNextRules = () => S.live?.settings?.next?.rules ?? LIVE_PAPER_RULES;
+export const liveNextVariant = () => S.live?.settings?.next?.variant ?? LIVE_PAPER_VARIANT;
 /** Research rules used by BACKTEST: locked V1, or V1 plus the backtest-only variant. Live paper never reads this. */
 export const btRules = () => variantRules(S.bt.variant);
 export const btVariantOn = () => btRules() !== RESEARCH_RULES_V1;
@@ -247,9 +250,11 @@ export const ascent = {
     emit(true);
   },
   btResetVariant() { ascent.btSetVariant({ ...NO_VARIANT }); },
-  btLiveVariant() { ascent.btSetVariant({ ...LIVE_PAPER_VARIANT }); },
+  btLiveVariant() { ascent.btSetVariant({ ...liveNextVariant() }); },
   liveControl: (action) => post("control", { action }),
   setAutoStart: (enabled) => post("auto-start", { enabled }),
+  /** Next-session live paper settings (server validates; the running session never changes). */
+  saveLiveSettings: (body) => post("settings", body),
   async loadLiveHistory() {
     try {
       const r = await fetch("/api/nifty-ascent?resource=history", { credentials: "same-origin" });
@@ -267,7 +272,7 @@ let livePoll = 0;
 function buildMirror(m, serverTime) {
   if (!m) { S.mirror = null; return; }
   try {
-    const e = AscentEngine.restore({ date: m.snapshot.date, prev: m.prev, instruments: m.instruments, exec: m.exec, startRunning: false }, m.snapshot, serverTime);
+    const e = AscentEngine.restore({ date: m.snapshot.date, prev: m.prev, instruments: m.instruments, exec: m.exec, rules: m.rules, startRunning: false }, m.snapshot, serverTime);
     e.events.splice(0, e.events.length, ...m.events);
     for (const q of m.quotes) e.lastQuote.set(q.token, q);
     S.mirror = e; S.mirrorError = null;

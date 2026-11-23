@@ -23,6 +23,15 @@ import { ObservationRecorder, type StreamStatus } from './observation.ts';
 import { planPresubscription } from './presubscribe.ts';
 import type { AscentStorePort, AscentControl } from './store.ts';
 
+export interface LiveConfig { exec: ExecutionSettings; rules: ResearchRules }
+export interface LiveConfigPort {
+  /** Settings for a session that has not started yet. */
+  current(): LiveConfig;
+  /** Settings pinned to `date` when its engine was created (null = not pinned yet). */
+  pinned(date: string): LiveConfig | null;
+  pin(date: string, cfg: LiveConfig): void;
+}
+
 export interface StreamPort {
   want(tokens: number[], ttlMs?: number): void;
   onQuote(fn: (q: StreamQuote, exchTs: number | null, meta?: TradeMeta | null) => void): () => void;
@@ -44,6 +53,11 @@ export interface LiveDeps {
   exec?: ExecutionSettings;
   /** Research rules for the live engine (default RESEARCH_RULES_V1). */
   rules?: ResearchRules;
+  /**
+   * Owner-editable live settings. A session's settings are pinned when its engine is created, so a
+   * mid-day restart restores with exactly the same settings; edits apply to the next session.
+   */
+  config?: LiveConfigPort;
   /** Receives the end-of-session observation report (e.g. writes it to disk). */
   saveReport?: (date: string, report: unknown) => void | Promise<void>;
   /** Optional raw evidence sink: one row per accepted index/option quote (compact arrays, no credentials). */
@@ -272,6 +286,8 @@ export class LiveAscentService {
       this.engine = new AscentEngine(opts);
       this.log(`engine for ${date} created PAUSED (live paper mode)${this.engine.state === 'DATA_ERROR' ? ` — ${this.engine.outcome?.detail}` : ''}`);
     }
+    this.pinSession(date, this.engine);
+    this.log(`session settings ${this.engine.configVersion}`);
     if (this.control_.killSwitch) this.engine.control('KILL', now);
     else if (this.control_.autoStart && this.engine.engineStatus === 'PAUSED' && !this.startBlocker()) { this.engine.control('START', now); this.log('auto-start: paper engine RUNNING'); }
     else if (this.control_.autoStart && this.startBlocker()) this.log(`auto-start deferred: ${this.startBlocker()}`);
@@ -387,13 +403,28 @@ export class LiveAscentService {
     this.log(p.errors.length ? `prepare ${date}: ${p.errors.join('; ')}` : `prepare ${date}: previous session ${p.prevReport!.date} (${p.prevReport!.bars} bars, 15:15 close ${p.prevReport!.close1515}), ${p.instruments.length} contracts`);
   }
 
+  /** The settings this session runs with: pinned for the day if its engine was already created. */
+  sessionConfig(date: string): LiveConfig {
+    const c = this.d.config;
+    if (c) { try { const p = c.pinned(date); if (p) return p; } catch (err) { this.log(`pinned settings unreadable: ${(err as Error).message}`); } return c.current(); }
+    return { exec: this.d.exec ?? DEFAULT_EXECUTION, rules: this.d.rules ?? RESEARCH_RULES_V1 };
+  }
+
+  private pinSession(date: string, e: AscentEngine) {
+    const c = this.d.config;
+    if (!c) return;
+    try { if (!c.pinned(date)) c.pin(date, { exec: e.exec, rules: e.rules }); } catch (err) { this.log(`could not pin settings for ${date}: ${(err as Error).message}`); }
+  }
+
   private engineOptions(date: string) {
+    const cfg = this.sessionConfig(date);
     const prev = this.prep?.prev && this.prep.prev.bars.length ? this.prep.prev : { date: this.prep?.prevReport?.date ?? 'unavailable', bars: [] };
-    return { date, prev, instruments: this.prep?.instruments ?? [], rules: this.d.rules ?? RESEARCH_RULES_V1, exec: this.d.exec ?? DEFAULT_EXECUTION, startRunning: false };
+    return { date, prev, instruments: this.prep?.instruments ?? [], rules: cfg.rules, exec: cfg.exec, startRunning: false };
   }
 
   private createEngine(date: string) {
     this.engine = new AscentEngine(this.engineOptions(date)); // OBSERVE: PAUSED and never started
+    this.pinSession(date, this.engine);
     this.log(`engine for ${date} created PAUSED (observe only)${this.engine.state === 'DATA_ERROR' ? ` — ${this.engine.outcome?.detail}` : ''}`);
   }
 

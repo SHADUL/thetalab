@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { useState as useStateR } from "react";
 import { Play, Prohibit, Skull, LockOpen, Lock, Power } from "@phosphor-icons/react";
-import { useAscent, ascent, defaultExec, btRules } from "./store.js";
+import { useAscent, ascent, defaultExec, btRules, liveNextRules } from "./store.js";
 import { Card, WsHead, Badge, KV, Reason } from "./ui.jsx";
 import { num } from "./format.js";
 import { RESEARCH_RULES_V1, LIVE_PAPER_RULES } from "../../nifty-ascent/core/rules.ts";
@@ -25,7 +25,7 @@ const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m %
 export default function RiskSettings() {
   const S = useAscent();
   // Rules of the source on screen: live paper (V1 + owner-approved filters), backtest (V1 or its variant), simulation (V1).
-  const R = S.source === "LIVE" ? LIVE_PAPER_RULES : S.source === "BACKTEST" ? btRules() : RESEARCH_RULES_V1;
+  const R = S.source === "LIVE" ? (S.live?.settings?.session?.rules ?? liveNextRules() ?? LIVE_PAPER_RULES) : S.source === "BACKTEST" ? btRules() : RESEARCH_RULES_V1;
   const e = S.replay.engine;
   const [form, setForm] = useState(() => ({ ...S.exec }));
   const changed = FIELDS.some(([k]) => Number(form[k]) !== S.exec[k]);
@@ -57,7 +57,7 @@ export default function RiskSettings() {
         </Card>
       </div>
       </>)}
-      {S.source === "LIVE" && S.mirror && <Card title="Server execution & risk settings (read-only)" sub={`Version ${S.mirror.exec.version} — the live engine uses these; they are not edited from the browser`} style={{ marginBottom: 12 }}><KV rows={FIELDS.map(([k, label]) => [label, String(S.mirror.exec[k])])} /></Card>}
+      {S.source === "LIVE" && <LiveSettingsCard L={S.live} />}
       {S.source === "LIVE" && <LivePaperControls L={S.live} />}
       <LiveServiceCard L={S.live} />
       <div className="na-grid na-two">
@@ -172,6 +172,73 @@ function LivePaperControls({ L }) {
           ]} />
         </div>
       )}
+    </Card>
+  );
+}
+
+/**
+ * Live paper execution & risk settings plus the two strategy filters, edited by the owner.
+ * Saved on the server for the NEXT session that has not started yet; the running session's
+ * settings are pinned for the day and never change mid-session. Paper only.
+ */
+function LiveSettingsCard({ L }) {
+  const st = L?.settings;
+  const next = st?.next;
+  const [form, setForm] = useStateR(null);
+  const [msg, setMsg] = useStateR(null);
+  const [busy, setBusy] = useStateR(false);
+  if (!L?.enabled) return null;
+  if (!next) return <Card title="Live paper settings" style={{ marginBottom: 12 }}><Reason tone="warn" tag="UNAVAILABLE">The server has not reported its live settings yet (older server version or service not running).</Reason></Card>;
+  const base = { ...Object.fromEntries(FIELDS.map(([k]) => [k, next.exec[k]])), minOrWidth: next.variant.minOrWidth, rollExpiryWithinDays: next.variant.rollExpiryWithinDays };
+  const f = form ?? base;
+  const changed = Object.keys(base).some((k) => Number(f[k]) !== Number(base[k]));
+  const set = (patch) => { setForm({ ...f, ...patch }); setMsg(null); };
+  const sess = st.session;
+  const save = async () => {
+    const execPatch = Object.fromEntries(FIELDS.map(([k]) => [k, Number(f[k])]));
+    const variant = { minOrWidth: Number(f.minOrWidth), rollExpiryWithinDays: Number(f.rollExpiryWithinDays) };
+    const lines = Object.keys(base).filter((k) => Number(f[k]) !== Number(base[k])).map((k) => `${k}: ${base[k]} → ${f[k]}`).join("\n");
+    if (!window.confirm(`Save these LIVE PAPER settings?\n\n${lines}\n\nThey apply from the next session that has not started yet${sess ? ` (today's ${sess.date} session keeps ${sess.configVersion})` : ""}. Paper only — no real orders.`)) return;
+    setBusy(true);
+    const r = await ascent.saveLiveSettings({ exec: execPatch, variant });
+    setMsg(r); setBusy(false);
+    if (r.ok) setForm(null);
+  };
+  const orOn = Number(f.minOrWidth) > 0, rollOn = Number(f.rollExpiryWithinDays) > 0;
+  return (
+    <Card title="Live paper · execution, risk & strategy filters" glow style={{ marginBottom: 12 }}
+      sub={`Next session: ${next.rules.version} / ${next.exec.version}${next.savedAt ? ` · saved ${new Date(next.savedAt).toLocaleString("en-IN")}` : " · built-in defaults"}${sess ? ` · today's ${sess.date} session is fixed at ${sess.configVersion}` : ""}`}
+      tools={<><button className="na-chipbtn" disabled={!changed || busy} onClick={() => { setForm(null); setMsg(null); }}>Discard</button><button className="na-chipbtn" data-on={changed} disabled={!changed || busy} onClick={save}>Save for next session</button></>}>
+      <div className="na-grid na-two" style={{ gap: 16 }}>
+        <div>
+          {FIELDS.map(([k, label, hint, step]) => (
+            <div className="na-field" key={k} data-changed={Number(f[k]) !== Number(base[k]) ? "true" : undefined}>
+              <label htmlFor={`na-live-${k}`}>{label}</label>
+              <small>{hint}</small>
+              <input id={`na-live-${k}`} type="number" step={step} value={f[k]} disabled={busy} onChange={(ev) => set({ [k]: ev.target.value })} />
+            </div>
+          ))}
+        </div>
+        <div>
+          <div className="na-field" data-changed={Number(f.minOrWidth) !== Number(base.minOrWidth) ? "true" : undefined}>
+            <label htmlFor="na-live-or">Skip narrow opening range</label>
+            <small>No trade that day (either bot) when the 09:15–09:45 range is narrower than this many points.</small>
+            <div className="flex items-center gap-2">
+              <button className="na-chipbtn" data-on={orOn ? "true" : undefined} disabled={busy} onClick={() => set({ minOrWidth: orOn ? 0 : 60 })}>{orOn ? "On" : "Off"}</button>
+              <input id="na-live-or" type="number" min={0} step={5} value={f.minOrWidth} disabled={busy || !orOn} style={{ width: 64 }} onChange={(ev) => set({ minOrWidth: ev.target.value })} aria-label="Minimum opening-range width in points" />
+            </div>
+          </div>
+          <div className="na-field" data-changed={Number(f.rollExpiryWithinDays) !== Number(base.rollExpiryWithinDays) ? "true" : undefined}>
+            <label>Day before expiry → next expiry</label>
+            <small>When the nearest weekly expiry is 1 day away, buy the following week&apos;s contract. Expiry day itself always rolls.</small>
+            <button className="na-chipbtn" data-on={rollOn ? "true" : undefined} disabled={busy} onClick={() => set({ rollExpiryWithinDays: rollOn ? 0 : 1 })}>{rollOn ? "On" : "Off"}</button>
+          </div>
+          <div className="na-note" style={{ marginTop: 8 }}>
+            Saved settings apply from the next session that has not started yet (the engine is created at 08:50 on trading days). A running session keeps its settings for the whole day, so a restart mid-day can never change them. Backtest 2024–2026: the opening-range filter helped only in 2026 and cut profit in 2024 and 2025; the expiry roll was mixed.
+          </div>
+          {msg && <Reason tone={msg.ok ? "gain" : "loss"} tag={msg.ok ? "SAVED" : "REFUSED"}>{msg.message}</Reason>}
+        </div>
+      </div>
     </Card>
   );
 }

@@ -23,14 +23,16 @@ import type { Instrument } from '../src/nifty-ascent/core/contracts.ts';
 import { ObserveArchive, archiveOptionsFromEnv } from './niftyAscentArchive.ts';
 import { makeAscentStore, type SupabaseAscentStore } from './niftyAscentStore.ts';
 import { AscentHistory } from './niftyAscentHistory.ts';
+import { LiveSettingsStore } from './niftyAscentLiveSettings.ts';
 
 const KITE_REST = 'https://api.kite.trade';
 let service: LiveAscentService | null = null;
 let archive: ObserveArchive | null = null;
 let store: SupabaseAscentStore | null = null;
 let history: AscentHistory | null = null;
+let settings: LiveSettingsStore | null = null;
 
-export function getNiftyAscent(): { service: LiveAscentService | null; archive: ObserveArchive | null; store: SupabaseAscentStore | null; history: AscentHistory | null } { return { service, archive, store, history }; }
+export function getNiftyAscent(): { service: LiveAscentService | null; archive: ObserveArchive | null; store: SupabaseAscentStore | null; history: AscentHistory | null; settings: LiveSettingsStore | null } { return { service, archive, store, history, settings }; }
 
 function instrumentPort(sb: SupabaseClient<any>): InstrumentPort {
   return {
@@ -94,12 +96,15 @@ export async function startNiftyAscent(): Promise<void> {
     if (!store) { console.error('[nifty-ascent] PAPER mode needs Supabase — not started'); return; }
   }
   // Backtest data (real NIFTY candles, cached on the persistent archive disk).
+  // Owner-editable live settings (defaults = LIVE_PAPER_EXECUTION + LIVE_PAPER_RULES); pinned per session.
+  settings = new LiveSettingsStore(archiveOptionsFromEnv().dir);
   history = new AscentHistory({ dir: `${archiveOptionsFromEnv().dir}/history`, fetchData, isTradingDay: (d) => isTradingDay(new Date(`${d}T06:00:00Z`)) });
   service = new LiveAscentService({
     mode, store: store ?? undefined, holder: `web-${process.pid}-${Math.random().toString(36).slice(2, 10)}`,
     stream: marketStream,
     exec: LIVE_PAPER_EXECUTION,
     rules: LIVE_PAPER_RULES,
+    config: settings,
     fetchData,
     instruments: instrumentPort(sb),
     isTradingDay: (d) => isTradingDay(new Date(`${d}T06:00:00Z`)),

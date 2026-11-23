@@ -6,6 +6,7 @@
  *   GET  ?resource=history     filled LIVE PAPER trades (read-only)
  *   POST ?resource=control     { action: START | STOP_ENTRIES | KILL | RELEASE }
  *   POST ?resource=auto-start  { enabled: boolean }
+ *   POST ?resource=settings    { exec?: {...}, variant?: { minOrWidth, rollExpiryWithinDays } } — next session's live paper settings
  *   GET  ?resource=hist-days&month=YYYY-MM   trading days available for backtest
  *   GET  ?resource=hist-day&date=YYYY-MM-DD  real NIFTY candles (+prev day, VIX) for one backtest day
  *
@@ -25,7 +26,7 @@ const ACTIONS = new Set<ControlAction>(['START', 'STOP_ENTRIES', 'KILL', 'RELEAS
 export default async function handler(req: Req, res: Res) {
   res.setHeader('Cache-Control', 'no-store');
   const resource = String(req.query.resource ?? 'status');
-  const { service, archive, store, history } = getNiftyAscent();
+  const { service, archive, store, history, settings } = getNiftyAscent();
   if (req.method === 'GET' && (resource === 'hist-days' || resource === 'hist-day')) {
     if (!history) { res.status(409).json({ error: 'backtest data unavailable', message: 'the NIFTY ASCENT server service is not running' }); return; }
     try {
@@ -51,8 +52,17 @@ export default async function handler(req: Req, res: Res) {
     return;
   }
   try {
-    if (req.method === 'GET' && resource === 'status') { res.status(200).json(status(service, archive)); return; }
-    if (req.method === 'GET' && resource === 'snapshot') { res.status(200).json({ ...status(service, archive), mirror: mirror(service) }); return; }
+    if (req.method === 'GET' && resource === 'status') { res.status(200).json(status(service, archive, settings)); return; }
+    if (req.method === 'GET' && resource === 'snapshot') { res.status(200).json({ ...status(service, archive, settings), mirror: mirror(service) }); return; }
+    if (req.method === 'POST' && resource === 'settings') {
+      if (!settings) { res.status(409).json({ ok: false, message: 'settings store unavailable' }); return; }
+      const r = settings.save(req.body ?? {});
+      if (!r.ok) { res.status(400).json(r); return; }
+      const v = settings.current();
+      console.log(`[nifty-ascent] live settings saved: ${v.rules.version}/${v.exec.version} — applies from the next session not yet started`);
+      res.status(200).json({ ok: true, message: `saved ${v.rules.version} / ${v.exec.version} — applies from the next session that has not started yet` });
+      return;
+    }
     if (req.method === 'GET' && resource === 'history') {
       if (!store) { res.status(200).json({ enabled: true, trades: [], reason: 'observe mode — no live paper trades' }); return; }
       res.status(200).json({ enabled: true, trades: await store.history(Math.min(Number(req.query.limit) || 500, 2000)) });
@@ -81,12 +91,13 @@ export default async function handler(req: Req, res: Res) {
 
 type Svc = NonNullable<ReturnType<typeof getNiftyAscent>['service']>;
 
-function status(service: Svc, archive: ReturnType<typeof getNiftyAscent>['archive']) {
+function status(service: Svc, archive: ReturnType<typeof getNiftyAscent>['archive'], settings: ReturnType<typeof getNiftyAscent>['settings']) {
   const s = service.snapshot();
   const st = (s.stream ?? {}) as Record<string, unknown>;
   const livePaper = s.mode !== 'PAPER' ? 'NOT_ENABLED' : s.engine?.engineStatus === 'RUNNING' ? 'RUNNING' : 'READY_PAUSED';
   return {
     enabled: true, mode: s.mode, livePaper, date: s.date, serverTime: Date.now(), paper: s.paper,
+    settings: settingsView(service, settings, s.date),
     stream: { connected: st.connected ?? null, subscribed: st.subscribed ?? null, wanted: st.wanted ?? null, lastMessageAgoMs: st.lastMessageAgoMs ?? null, reconnects: st.reconnects ?? null },
     prep: s.prep ? { prevDate: s.prep.prev?.date ?? null, prevBars: s.prep.prev?.bars ?? null, prevClose1515: s.prep.prev?.close1515 ?? null, contracts: s.prep.instruments?.valid ?? null, expiries: s.prep.instruments?.expiries ?? null, errors: s.prep.errors } : null,
     engine: s.engine ? {
@@ -108,9 +119,20 @@ function mirror(service: Svc) {
   if (e.trade) { const t = e.instruments.find((i) => i.tradingsymbol === e.trade!.tradingsymbol); if (t) toks.add(t.token); }
   if (e.entryOrder) toks.add(e.entryOrder.token);
   return {
-    snapshot: e.serialize(), exec: e.exec, prev: e.prev,
+    snapshot: e.serialize(), exec: e.exec, rules: e.rules, prev: e.prev,
     instruments: e.instruments.filter((i) => toks.has(i.token)),
     quotes: [...toks].map((t) => e.lastQuote.get(t)).filter(Boolean),
     events: e.events.slice(-300),
+  };
+}
+
+/** Next-session settings (editable) and the settings the current session is running with (fixed for the day). */
+function settingsView(service: Svc, settings: ReturnType<typeof getNiftyAscent>['settings'], date: string | null) {
+  if (!settings) return null;
+  const st = settings.stored(), next = settings.current();
+  const e = service.engine;
+  return {
+    next: { exec: next.exec, variant: st.variant, rules: next.rules, savedAt: st.savedAt },
+    session: e ? { date, exec: e.exec, rules: e.rules, configVersion: e.configVersion } : null,
   };
 }

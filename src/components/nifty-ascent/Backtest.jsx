@@ -6,8 +6,7 @@
  */
 import { useEffect } from "react";
 import { Play, Stop, ArrowSquareOut, Flask } from "@phosphor-icons/react";
-import { useAscent, ascent, lastMonths, btExec, btRules, btVariantOn } from "./store.js";
-import { LIVE_PAPER_RULES } from "../../nifty-ascent/core/rules.ts";
+import { useAscent, ascent, lastMonths, btExec, btRules, btVariantOn, liveNextRules } from "./store.js";
 import { Card, Badge, WsHead, PnL, Kpi, Spark, Empty } from "./ui.jsx";
 import { num, pct, hm, istTime, BOT_LABEL, EXIT_LABEL, REASON_LABEL } from "./format.js";
 
@@ -96,7 +95,7 @@ export default function Backtest({ go }) {
         )}
       </Card>
       <div className="na-note" style={{ marginTop: 10 }}>
-        How it works: each past day&apos;s real NIFTY 1-minute candles are expanded into a second-by-second path (open → low → high → close for up candles, open → high → low → close for down candles) and fed to the unchanged engine. Option bid/ask come from a Black-76 model using the previous day&apos;s India VIX close as volatility, so premiums, fills and P&amp;L are estimates, not real option prices. The current Risk &amp; Settings limits apply (₹{num(btExec().maxPremiumOutlay, 0)} outlay incl. fees, {btExec().lots} lot, one position a day — defaults mirror live paper, settings version {btExec().version}). Research rules: {btRules().version}{` — live paper uses ${LIVE_PAPER_RULES.version}`}. Changing Execution settings in Risk &amp; Settings clears these results.
+        How it works: each past day&apos;s real NIFTY 1-minute candles are expanded into a second-by-second path (open → low → high → close for up candles, open → high → low → close for down candles) and fed to the unchanged engine. Option bid/ask come from a Black-76 model using the previous day&apos;s India VIX close as volatility, so premiums, fills and P&amp;L are estimates, not real option prices. The current Risk &amp; Settings limits apply (₹{num(btExec().maxPremiumOutlay, 0)} outlay incl. fees, {btExec().lots} lot, one position a day — defaults mirror live paper, settings version {btExec().version}). Research rules: {btRules().version}{` — live paper uses ${liveNextRules().version}`}. Changing Execution settings in Risk &amp; Settings clears these results.
       </div>
     </>
   );
@@ -115,8 +114,8 @@ function VariantCard({ B }) {
   const set = (patch) => ascent.btSetVariant(patch);
   return (
     <Card title={<span className="flex items-center gap-2"><Flask size={14} weight="bold" />Rule variant · {btRules().version}</span>}
-      sub={`${btRules().version === LIVE_PAPER_RULES.version ? "Same rules as live paper" : `Live paper uses ${LIVE_PAPER_RULES.version}`} · ${on ? "compared with plain V1 on the same days (V1 net column)" : "plain V1 — no filters"}`}
-      tools={<><button className="na-chipbtn" onClick={() => ascent.btLiveVariant()} disabled={btRules().version === LIVE_PAPER_RULES.version || B.running}>Live paper rules</button><button className="na-chipbtn" onClick={() => ascent.btResetVariant()} disabled={!on || B.running}>Plain V1</button></>}
+      sub={`${btRules().version === liveNextRules().version ? "Same rules as live paper" : `Live paper uses ${liveNextRules().version}`} · ${on ? "compared with plain V1 on the same days (V1 net column)" : "plain V1 — no filters"}`}
+      tools={<><button className="na-chipbtn" onClick={() => ascent.btLiveVariant()} disabled={btRules().version === liveNextRules().version || B.running}>Live paper rules</button><button className="na-chipbtn" onClick={() => ascent.btResetVariant()} disabled={!on || B.running}>Plain V1</button></>}
       style={{ marginBottom: 12 }}>
       <div className="na-field">
         <label htmlFor="na-v-or">Skip narrow opening range</label>

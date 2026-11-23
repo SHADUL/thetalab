@@ -1,0 +1,6 @@
+# ThetaLab self-hosted database jobs (VM clock is UTC). Installed at cut-over by install-cron.sh.
+# Nightly database backup at 02:30 IST (21:00 UTC), 14-day retention.
+0 21 * * * bash /opt/thetalab/app/deploy/oracle/db/backup.sh >> /opt/thetalab/data/db-backups/cron.log 2>&1
+# Swing daily OHLCV backfill at 20:30 IST Mon–Fri (was the GitHub workflow swing-daily-refresh.yml,
+# which cannot reach the private database).
+0 15 * * 1-5 sudo docker exec thetalab-web node --experimental-strip-types --no-warnings src/swing/scripts/backfillDailyOhlcv.ts >> /opt/thetalab/data/swing-refresh.log 2>&1

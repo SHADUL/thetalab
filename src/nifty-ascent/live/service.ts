@@ -11,13 +11,14 @@
 import { AscentEngine, type AuditEvent, type PrevSession } from '../core/engine.ts';
 import { validateInstruments, selectContract, type Instrument, type InstrumentReport, type ContractSelection } from '../core/contracts.ts';
 import { DEFAULT_EXECUTION, RESEARCH_RULES_V1, istDateOf, type ExecutionSettings } from '../core/rules.ts';
-import { QuoteAdapter, NIFTY_INDEX_TOKEN, type StreamQuote } from './adapter.ts';
+import { QuoteAdapter, NIFTY_INDEX_TOKEN, type StreamQuote, type TradeMeta } from './adapter.ts';
 import { loadPrevSession, type FetchData, type PrevReport } from './history.ts';
 import { ObservationRecorder, type StreamStatus } from './observation.ts';
+import { planPresubscription } from './presubscribe.ts';
 
 export interface StreamPort {
   want(tokens: number[], ttlMs?: number): void;
-  onQuote(fn: (q: StreamQuote, exchTs: number | null) => void): () => void;
+  onQuote(fn: (q: StreamQuote, exchTs: number | null, meta?: TradeMeta | null) => void): () => void;
   status(): unknown;
 }
 export interface InstrumentPort {
@@ -35,7 +36,9 @@ export interface LiveDeps {
   log?: (msg: string) => void;
   exec?: ExecutionSettings;
   /** Receives the end-of-session observation report (e.g. writes it to disk). */
-  saveReport?: (date: string, report: unknown) => void;
+  saveReport?: (date: string, report: unknown) => void | Promise<void>;
+  /** Optional raw evidence sink: one row per accepted index/option quote (compact arrays, no credentials). */
+  recordTick?: (row: unknown[], exchTs: number) => void;
 }
 
 export const OBSERVE_ONLY = true;
@@ -43,7 +46,7 @@ const PREP_FROM_MIN = 8 * 60 + 50;
 const ENGINE_DEADLINE_MIN = 9 * 60 + 14;
 const STREAM_FROM_MIN = 9 * 60;
 const STREAM_TO_MIN = 15 * 60 + 35;
-const WANT_EVERY_MS = 30_000, WANT_TTL_MS = 120_000, PREP_RETRY_MS = 60_000;
+const WANT_EVERY_MS = 30_000, WANT_TTL_MS = 180_000, PREP_RETRY_MS = 60_000;
 const STRIKE_BAND = 2_500;
 const minuteOf = (t: number) => { const d = new Date(t + 330 * 60_000); return d.getUTCHours() * 60 + d.getUTCMinutes(); };
 
@@ -69,6 +72,10 @@ export class LiveAscentService {
   wouldSelect: ContractSelection | null = null;
   observation: ObservationRecorder | null = null;
   private orLogged = false;
+  /** Option contracts currently pre-subscribed (approved plan; max 8). */
+  presubscribed: number[] = [];
+  private presubKey = '';
+  readonly subscriptionLog: Array<{ at: number; tokens: number[]; reason: string }> = [];
   private reported = false;
   private lastHealth = 0;
 
@@ -81,7 +88,7 @@ export class LiveAscentService {
   start() {
     if (this.running) return;
     this.running = true;
-    this.off = this.d.stream.onQuote((q, exchTs) => this.onQuote(q, exchTs));
+    this.off = this.d.stream.onQuote((q, exchTs, meta) => this.onQuote(q, exchTs, meta));
     const loop = () => {
       if (!this.running) return;
       try { this.tick(this.now()); } catch (e) { this.log(`tick failed: ${(e as Error).message}`); }
@@ -97,20 +104,25 @@ export class LiveAscentService {
     throw new Error(`live paper execution is not enabled in Phase 3 (observe only) — "${action}" refused`);
   }
 
-  onQuote(q: StreamQuote, exchTs: number | null) {
+  onQuote(q: StreamQuote, exchTs: number | null, meta?: TradeMeta | null) {
     const e = this.engine;
     if (!e) return;
-    const wanted = new Set(e.wantedTokens());
-    const ev = this.adapter.adapt(q, exchTs, (t) => wanted.has(t));
-    if (ev.kind === 'INDEX') { e.onIndexTick(ev.tick); this.observation?.onIndexTick(ev.tick.exchTs, ev.tick.recvTs); }
-    else if (ev.kind === 'OPTION') { e.onOptionTick(ev.tick); this.observation?.onOptionQuote(ev.tick.token, ev.tick.exchTs, ev.tick.recvTs, ev.tick.bid, ev.tick.ask, ev.tick.traded); }
+    const wanted = new Set([...e.wantedTokens(), ...this.presubscribed]);
+    const ev = this.adapter.adapt(q, exchTs, (t) => wanted.has(t), meta);
+    if (ev.kind === 'INDEX') {
+      e.onIndexTick(ev.tick); this.observation?.onIndexTick(ev.tick.exchTs, ev.tick.recvTs);
+      this.d.recordTick?.(['I', q.token, ev.tick.exchTs, ev.tick.recvTs, ev.tick.price], ev.tick.exchTs);
+    } else if (ev.kind === 'OPTION') {
+      e.onOptionTick(ev.tick); this.observation?.onOptionQuote(ev.tick.token, ev.tick.exchTs, ev.tick.recvTs, ev.tick.bid, ev.tick.ask, ev.tick.traded);
+      this.d.recordTick?.(['O', q.token, ev.tick.exchTs, ev.tick.recvTs, q.ltp, q.bid, q.ask, q.volume, meta?.lastTradeTs ?? null, meta?.lastTradedQty ?? null, ev.tick.traded ? 1 : 0], ev.tick.exchTs);
+    }
     this.flushLog();
   }
 
   /** One second of the live clock. Public for deterministic tests. */
   tick(now: number) {
     const date = istDateOf(now), minute = minuteOf(now);
-    if (date !== this.date) { this.date = date; this.engine = null; this.wouldSelect = null; this.observation = new ObservationRecorder(date); this.orLogged = false; this.reported = false; this.lastHealth = 0; this.prep = null; this.preparing = null; this.lastPrepAttempt = 0; this.logged = 0; }
+    if (date !== this.date) { this.date = date; this.engine = null; this.wouldSelect = null; this.presubscribed = []; this.presubKey = ''; this.observation = new ObservationRecorder(date); this.orLogged = false; this.reported = false; this.lastHealth = 0; this.prep = null; this.preparing = null; this.lastPrepAttempt = 0; this.logged = 0; }
     if (!this.d.isTradingDay(date)) return;
     if (minute < PREP_FROM_MIN) return;
 
@@ -121,9 +133,12 @@ export class LiveAscentService {
     const ready = this.prep && !this.prep.errors.length;
     if (!this.engine && (ready || minute >= ENGINE_DEADLINE_MIN)) this.createEngine(date);
 
+    if (this.engine) this.updatePresubscription(now);
     if (minute >= STREAM_FROM_MIN && minute <= STREAM_TO_MIN && now - this.lastWant >= WANT_EVERY_MS) {
       this.lastWant = now;
-      this.d.stream.want([NIFTY_INDEX_TOKEN, ...(this.engine?.wantedTokens() ?? [])], WANT_TTL_MS);
+      // Index + the engine's own contracts + pre-subscribed options, refreshed every 30 s with a 180 s expiry.
+      // Contracts no longer listed are simply not re-requested and the shared stream releases them on expiry.
+      this.d.stream.want([NIFTY_INDEX_TOKEN, ...new Set([...(this.engine?.wantedTokens() ?? []), ...this.presubscribed])], WANT_TTL_MS);
     }
     if (this.engine) { this.engine.onClock(now); this.flushLog(); this.observe(now, minute); }
   }
@@ -139,10 +154,29 @@ export class LiveAscentService {
     if (!this.orLogged && e.or) { this.orLogged = true; this.log(`OBSERVATION opening_range ${JSON.stringify(o.openingRange(e))}`); }
     if (!this.reported && minute >= 15 * 60 + 31) {
       this.reported = true;
-      const report = o.report(e, this.wouldSelect, { ...this.adapter.stats });
+      const report = o.report(e, this.wouldSelect, { ...this.adapter.stats }, {
+        totals: { ...this.adapter.detection },
+        byContract: [...this.adapter.detectionByToken].map(([tok, d]) => ({ contract: e.instruments.find((i) => i.token === tok)?.tradingsymbol ?? String(tok), ...d })),
+      }, this.subscriptionLog.map((x) => ({ at: new Date(x.at).toISOString(), contracts: x.tokens.map((t) => e.instruments.find((i) => i.token === t)?.tradingsymbol ?? String(t)), reason: x.reason })));
       this.log(`OBSERVATION report ${JSON.stringify(report)}`);
-      try { this.d.saveReport?.(e.date, report); } catch (err) { this.log(`report save failed: ${(err as Error).message}`); }
+      Promise.resolve().then(() => this.d.saveReport?.(e.date, report)).catch((err) => this.log(`report save failed: ${(err as Error).message}`));
     }
+  }
+
+  /** Recompute the pre-subscription set; log and request immediately when it changes. */
+  private updatePresubscription(now: number) {
+    const e = this.engine!;
+    const f = e.index.formingBar();
+    const last = f?.close ?? [...e.index.bars].reverse().find((b) => b.close != null)?.close ?? null;
+    const plan = planPresubscription(e, last);
+    const tokens = plan.contracts.map((c) => c.token);
+    const key = tokens.join(',');
+    if (key === this.presubKey) return;
+    this.presubKey = key;
+    this.presubscribed = tokens;
+    this.subscriptionLog.push({ at: now, tokens, reason: plan.reason });
+    this.log(`pre-subscription ${tokens.length ? `→ ${plan.reason}` : `released (${plan.reason})`}`);
+    if (tokens.length) { this.d.stream.want(tokens, WANT_TTL_MS); this.lastWant = 0; }
   }
 
   /** Previous session + instrument master. Retries every minute until 09:14. */
@@ -202,6 +236,8 @@ export class LiveAscentService {
       prep: this.prep ? { prev: this.prep.prevReport, instruments: this.prep.instrumentReport, errors: this.prep.errors } : null,
       stream: this.d.stream.status(),
       observation: this.engine && this.observation ? this.observation.health(this.engine) : null,
+      presubscribed: this.presubscribed.map((t) => this.engine?.instruments.find((i) => i.token === t)?.tradingsymbol ?? t),
+      tradeDetection: { ...this.adapter.detection },
       adapter: { ...this.adapter.stats },
       bars: e ? { index: e.index.bars.length, missing: e.index.bars.filter((b) => b.status === 'MISSING').length, ...e.index.stats } : null,
       engine: e ? {

@@ -153,6 +153,41 @@ server/index.ts                      one startNiftyAscent() call (no-op without 
 - Run observe-only on the VM for at least one session (needs your approval to set `NIFTY_ASCENT=observe` and redeploy).
 - The option contract is subscribed only after a signal, so its quotes must arrive within the next minute or the entry is rejected (`no_executable_quote`). Pre-subscribing the likely strikes from 09:46 can be added in Phase 4.
 
+### Phase 3 additions (approved 23 Nov 2026)
+
+**Shared stream (`server/marketStream.ts`, additive):**
+- `want()` keeps the later expiry when several modules request the same instrument, so a shorter request never cuts another module's subscription short. Expired interest is still pruned on every supervisor pass.
+- Observers receive an optional third argument with Kite's last-trade time and last-traded quantity, read from F&O full packets. The quote object (`LiveQuote`) and existing listeners are unchanged.
+
+**Trade detection:** an option print counts as a trade only if the last-trade time advanced **or** the day volume rose. Every case is counted per contract and reported, never silently resolved:
+- Both advanced.
+- Last-trade time only.
+- Volume only.
+- Quote-only.
+- The LTP field changed on a quote-only update.
+- Last-trade time went backwards.
+- No last-trade time on the packet.
+
+The report also includes total last-traded quantity versus total volume increase.
+
+**Option pre-subscription (`live/presubscribe.ts`):**
+- **When:** from 09:46, once the opening range is final.
+- **Which contracts:**
+  - Gap-and-Go armed: the selector's 150-point in-the-money strike for the breakout band and for the latest close, plus one strike either side, in the gap direction only.
+  - Williams armed: the same for both the CE and PE levels.
+- **Limits:** at most 8 contracts, requested on the shared stream every 30 s with a 180 s expiry.
+- **Release:** after the session is decided the contracts are no longer requested, and the stream releases them when they expire.
+
+**Persistent archive (`server/niftyAscentArchive.ts`):**
+- **Location:** `/opt/thetalab/data/nifty-ascent` on the VM, bind-mounted at `/data/nifty-ascent`. That is outside the release folder that `deploy.sh` replaces.
+- **Contents:**
+  - `reports/<date>.json` — the end-of-session report.
+  - `events/<date>.ndjson` — decisions, data quality, subscriptions and health.
+  - `ticks/<date>/<HH>.ndjson.gz` — optional raw evidence, only with `NIFTY_ASCENT_RECORD_TICKS=on`.
+- **Retention:** 90 days for reports and events, 14 days for ticks.
+- **Limits:** a 1 GB size cap (oldest tick days are deleted first, never today's); events and ticks pause when less than 5 GB is free.
+- **Never written:** credentials.
+
 ## 6. Next phases (each needs approval)
 
 1. **Phase 4:**

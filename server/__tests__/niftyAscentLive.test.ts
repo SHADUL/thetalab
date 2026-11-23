@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { decodePacket, packetExchangeTs } from '../marketStream.ts';
+import { decodePacket, packetExchangeTs, packetTradeMeta } from '../marketStream.ts';
 import { splitPackets } from '../../src/nifty-alpha-ladder/live/kiteTickerProtocol.ts';
 import { FIXTURES } from '../../src/nifty-ascent/sim/fixtures.ts';
 import { Replay, prevSession, simInstruments } from '../../src/nifty-ascent/sim/market.ts';
@@ -26,11 +26,13 @@ function indexPacket(price: number, exchTs: number | null): Buffer {
   if (exchTs != null) b.writeInt32BE(Math.floor(exchTs / 1000), 28);
   return b;
 }
-function optionPacket(t: OptionTick, lastPrice: number): Buffer {
+function optionPacket(t: OptionTick, lastPrice: number, lastTradeTs = 0): Buffer {
   const b = Buffer.alloc(184);
   b.writeUInt32BE(t.token, 0);
   b.writeInt32BE(Math.round(lastPrice * 100), 4);
   b.writeInt32BE(t.volume ?? 0, 16);
+  b.writeInt32BE(65, 8);
+  b.writeInt32BE(Math.floor(lastTradeTs / 1000), 44);
   b.writeInt32BE(Math.floor(t.exchTs / 1000), 60);
   const lvl = (i: number, qty: number, price: number | null) => { const o = 64 + i * 12; b.writeInt32BE(qty, o); b.writeInt32BE(Math.round((price ?? 0) * 100), o + 4); b.writeInt16BE(qty ? 3 : 0, o + 8); };
   lvl(0, t.bid ? 650 : 0, t.bid); lvl(5, t.ask ? 650 : 0, t.ask);
@@ -44,11 +46,11 @@ const frame = (...ps: Buffer[]) => {
 };
 
 /** Exactly what server/marketStream.ts does per packet before calling an onQuote observer. */
-function deliver(f: Buffer, receivedAt: number, sink: (q: ReturnType<typeof decodePacket> & {}, exchTs: number | null) => void) {
+function deliver(f: Buffer, receivedAt: number, sink: (q: ReturnType<typeof decodePacket> & {}, exchTs: number | null, meta: ReturnType<typeof packetTradeMeta>) => void) {
   for (const p of splitPackets(f)) {
     const q = decodePacket(p, receivedAt);
     if (!q || !(q.ltp > 0)) continue;
-    sink(q, packetExchangeTs(p));
+    sink(q, packetExchangeTs(p), packetTradeMeta(p));
   }
 }
 
@@ -71,8 +73,9 @@ function viaLivePath(fx: (typeof FIXTURES)[number], log: Rec[], running: boolean
   const e = new AscentEngine({ date: fx.date, prev: prevSession(fx), instruments: simInstruments(fx), startRunning: running });
   const a = new QuoteAdapter();
   const lastLtp = new Map<number, number>();
-  const sink = (q: any, exchTs: number | null) => {
-    const ev = a.adapt(q, exchTs, (tok) => e.wantedTokens().includes(tok));
+  const lastTrade = new Map<number, number>();
+  const sink = (q: any, exchTs: number | null, meta: any) => {
+    const ev = a.adapt(q, exchTs, (tok) => e.wantedTokens().includes(tok), meta);
     if (ev.kind === 'INDEX') e.onIndexTick(ev.tick);
     else if (ev.kind === 'OPTION') e.onOptionTick(ev.tick);
   };
@@ -82,8 +85,8 @@ function viaLivePath(fx: (typeof FIXTURES)[number], log: Rec[], running: boolean
     else {
       // A real packet always carries the last traded price; a quote-only update repeats the previous one.
       const ltp = v.traded && v.ltp ? v.ltp : lastLtp.get(v.token) ?? v.bid ?? 1;
-      if (v.traded && v.ltp) lastLtp.set(v.token, v.ltp);
-      deliver(frame(optionPacket(v, ltp)), v.recvTs, sink);
+      if (v.traded && v.ltp) { lastLtp.set(v.token, v.ltp); lastTrade.set(v.token, v.exchTs); }
+      deliver(frame(optionPacket(v, ltp, lastTrade.get(v.token) ?? v.exchTs - 60_000)), v.recvTs, sink);
     }
   }
   return { live: e, adapter: a };
@@ -113,8 +116,9 @@ test('observe-only (engine PAUSED): every fixture reaches identical index-driven
 test('paper path (engine running): identical signals, contracts, fills, exits and P&L via real Kite packets', () => {
   for (const fx of FIXTURES) {
     const { replay, log } = record(fx, true);
-    const { live } = viaLivePath(fx, log, true);
+    const { live, adapter } = viaLivePath(fx, log, true);
     assert.deepEqual(decisions(live), decisions(replay), fx.id);
+    if (adapter.detection.packets) assert.equal(adapter.detection.lttOnly + adapter.detection.volumeOnly, 0, `${fx.id}: last-trade time and volume agree on simulated data`);
     const t = (e: AscentEngine) => e.trade && { sym: e.trade.tradingsymbol, entry: e.trade.entryPremium, exit: e.trade.exitPremium, reason: e.trade.exitReason, net: e.trade.net, high: e.trade.highest };
     assert.deepEqual(t(live), t(replay), fx.id);
     assert.deepEqual(live.premiumBars().map((b) => [b.label, b.close, b.status]), replay.premiumBars().map((b) => [b.label, b.close, b.status]), `${fx.id} premium bars`);

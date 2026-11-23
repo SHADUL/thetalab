@@ -37,7 +37,7 @@ test('adapter: an option print is a trade only when cumulative volume rises (fir
   assert.ok(ev3.kind === 'OPTION' && ev3.tick.traded && ev3.tick.ltp === 201.5);
   const ev4 = a.adapt(q(10), 4, () => true);
   assert.equal(ev4.kind === 'OPTION' && ev4.tick.traded, false, 'volume reset is not a trade');
-  assert.equal(a.stats.volumeResets, 1);
+  assert.equal(a.detection.volumeResets, 1);
   assert.equal(a.adapt(q(2000), 5, () => false).kind, 'DROP', 'contracts the engine did not ask for are ignored');
 });
 
@@ -131,7 +131,8 @@ test('selector: strike interval comes from the listing; a missing exact strike i
 function fakes(o: { failHistory?: number } = {}) {
   const wants: number[][] = [];
   let listener: ((q: any, ts: number | null) => void) | null = null;
-  const stream: StreamPort = { want: (t) => { wants.push(t); }, onQuote: (fn) => { listener = fn; return () => { listener = null; }; }, status: () => ({ connected: true }) };
+  const ttls: number[] = [];
+  const stream: StreamPort = { want: (t, ttl) => { wants.push(t); ttls.push(ttl ?? -1); }, onQuote: (fn) => { listener = fn; return () => { listener = null; }; }, status: () => ({ connected: true, subscribed: 3, wanted: 3, reconnects: 1 }) };
   let fails = o.failHistory ?? 0;
   const fetchData = async (path: string) => {
     if (fails > 0) { fails--; throw new Error('Kite 503'); }
@@ -143,7 +144,7 @@ function fakes(o: { failHistory?: number } = {}) {
     nearestExpiries: async (today, n) => ['2026-11-24', '2026-12-01'].filter((e) => e >= today).slice(0, n),
     strikes: async (e, lo, hi) => all.filter((i) => i.expiry === e && i.strike >= lo && i.strike <= hi),
   };
-  return { stream, fetchData, instruments, wants, emit: (q: any, ts: number | null) => listener?.(q, ts) };
+  return { stream, fetchData, instruments, wants, ttls, emit: (q: any, ts: number | null) => listener?.(q, ts) };
 }
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -257,6 +258,7 @@ test('service: logs the OR snapshot, 15-minute health lines and a full end-of-se
     s.tick(t);
     if (t >= at(D, '09:15:00') && t < at(D, '15:30:00') && !(t >= at(D, '13:00:00') && t < at(D, '13:01:00'))) s.onQuote({ token: NIFTY_INDEX_TOKEN, ltp: price(t), bid: null, ask: null, volume: null, receivedAt: t + 180 }, t);
   }
+  await flush(); // the report is saved asynchronously so a slow disk never blocks the service
   assert.ok(logs.some((l) => l.startsWith('OBSERVATION opening_range')));
   assert.ok(logs.filter((l) => l.startsWith('OBSERVATION health')).length >= 20);
   assert.ok(saved && logs.some((l) => l.startsWith('OBSERVATION report')));
@@ -271,4 +273,114 @@ test('service: logs the OR snapshot, 15-minute health lines and a full end-of-se
   assert.equal(saved.dataQuality.indexLag.avgMs, 180);
   assert.equal(saved.perMinute.rows.length, 375);
   assert.equal(saved.dataQuality.adapter.noExchangeTs, 0);
+});
+
+/* ---------------- trade detection with last-trade metadata (owner item 3) ---------------- */
+
+test('trade detection: last-trade time and volume are both used, every disagreement is counted, quote-only never trades', () => {
+  const a = new QuoteAdapter();
+  const pkt = (volume: number, ltt: number | null, ltp = 200, ltq: number | null = 65) =>
+    a.adapt({ token: 5, ltp, bid: 199.5, ask: 200.5, volume, receivedAt: 1 }, 1_000, () => true, ltt == null ? null : { lastTradeTs: ltt, lastTradedQty: ltq });
+  const traded = (ev: ReturnType<typeof pkt>) => ev.kind === 'OPTION' && ev.tick.traded;
+  assert.equal(traded(pkt(1000, 10_000)), false);            // baseline
+  assert.equal(traded(pkt(1065, 11_000, 201)), true);        // both advanced
+  assert.equal(traded(pkt(1065, 11_000, 202)), false);       // quote-only, LTP field changed → NOT a trade
+  assert.equal(traded(pkt(1130, 11_000, 202)), true);        // volume up, same LTT second → volumeOnly
+  assert.equal(traded(pkt(1130, 12_000, 203)), true);        // LTT advanced, volume flat → lttOnly
+  assert.equal(traded(pkt(1130, 11_500, 203)), false);       // LTT went backwards → counted, not a trade
+  assert.equal(traded(pkt(1195, null, 204)), true);          // no LTT on packet: volume decides
+  const d = a.detection;
+  assert.deepEqual([d.packets, d.baselines, d.both, d.quoteOnly, d.volumeOnly, d.lttOnly, d.lttBackwards, d.noLtt, d.ltpChangedWithoutTrade],
+    [7, 1, 1, 2, 2, 1, 1, 1, 1]);
+  assert.equal(d.volumeDeltaSum, 195);
+  assert.ok(a.detectionByToken.get(5)!.packets === 7);
+});
+
+/* ---------------- option pre-subscription (owner item 2 of 23 Nov approval) ---------------- */
+
+import { planPresubscription, MAX_PRESUBSCRIBED } from '../live/presubscribe.ts';
+import { AscentEngine } from '../core/engine.ts';
+import { engine as mkEngine, steps as mkSteps, drive as mkDrive, GAP_UP_OR, D as HD } from './helpers.ts';
+
+const sym = (e: AscentEngine, toks: number[]) => toks.map((t) => e.instruments.find((i) => i.token === t)!).map((i) => `${i.strike}${i.right}@${i.expiry}`);
+
+test('presubscription: nothing before the opening range is final; gap-up armed → CE only around band and close, ± one strike', () => {
+  const e = mkEngine({ running: false });
+  mkDrive(e, { index: mkSteps(HD, GAP_UP_OR), to: '09:45:30' });
+  assert.equal(planPresubscription(e, 25210).contracts.length, 0);
+  mkDrive(e, { index: mkSteps(HD, GAP_UP_OR), from: '09:45:31', to: '09:47:00' });
+  assert.equal(e.state, 'GAP_GO_ARMED');
+  const p = planPresubscription(e, 25210); // band 25,235 → 25,085 → 25,100; close 25,210 → 25,060 → 25,050
+  assert.deepEqual(sym(e, p.contracts.map((c) => c.token)).sort(), ['25050CE@2026-11-24', '25100CE@2026-11-24', '25000CE@2026-11-24', '25150CE@2026-11-24'].sort());
+  assert.ok(p.contracts.every((c) => c.right === 'CE'));
+});
+
+test('presubscription: strikes follow NIFTY as it moves; Williams armed → both CE and PE; capped at eight', () => {
+  const e = mkEngine({ running: false });
+  mkDrive(e, { index: mkSteps(HD, GAP_UP_OR), to: '09:47:00' });
+  const a = planPresubscription(e, 25210).contracts.map((c) => c.strike);
+  const b = planPresubscription(e, 25420).contracts.map((c) => c.strike);
+  assert.ok(b.includes(25250) && !a.includes(25250), 'moved with the latest close');
+  // Williams: opposite band first with a <0.2% gap.
+  const w = mkEngine({ running: false });
+  mkDrive(w, { index: mkSteps(HD, [['09:15:00', 25140], ['09:20', 25160], ['09:30', 25120], ['10:05', 25110]]), to: '10:07:00' });
+  assert.equal(w.state, 'WILLIAMS_ARMED');
+  const pw = planPresubscription(w, 25110);
+  assert.ok(pw.contracts.some((c) => c.right === 'CE') && pw.contracts.some((c) => c.right === 'PE'));
+  assert.ok(pw.contracts.length <= MAX_PRESUBSCRIBED);
+  assert.equal(new Set(pw.contracts.map((c) => c.token)).size, pw.contracts.length, 'no duplicates');
+});
+
+test('presubscription: expiry selection matches the engine selector, including the PROVISIONAL expiry-day roll', () => {
+  const e = mkEngine({ date: '2026-11-24', running: false });
+  mkDrive(e, { date: '2026-11-24', index: mkSteps('2026-11-24', GAP_UP_OR), to: '09:47:00' });
+  const p = planPresubscription(e, 25210);
+  assert.ok(p.contracts.length > 0 && p.contracts.every((c) => c.expiry === '2026-12-01'));
+});
+
+test('presubscription: released when the session is decided; the service stops re-requesting and uses a 180 s expiry', async () => {
+  const D = '2026-11-23';
+  const f = fakes();
+  const logs: string[] = [];
+  const s = new LiveAscentService({ ...f, isTradingDay: weekday, log: (m) => logs.push(m) });
+  s.tick(at(D, '08:55:00')); await flush(); await flush();
+  // Gap up, then the opposite band breaks at 10:05 with a 0.40% gap → Williams forbidden → NO_TRADE.
+  const price = (t: number) => (t < at(D, '09:20:00') ? 25200 : t < at(D, '09:30:00') ? 25230 : t < at(D, '10:05:00') ? 25190 : 25150);
+  let during: number[] = [];
+  for (let t = at(D, '08:55:01'); t <= at(D, '10:10:00'); t += 1000) {
+    s.tick(t);
+    if (t >= at(D, '09:15:00')) s.onQuote({ token: NIFTY_INDEX_TOKEN, ltp: price(t), bid: null, ask: null, volume: null, receivedAt: t + 150 }, t);
+    if (t === at(D, '10:00:00')) during = [...s.presubscribed];
+  }
+  assert.ok(during.length >= 2 && during.length <= 8, 'pre-subscribed while armed');
+  assert.ok(f.wants.some((w) => during.every((t) => w.includes(t))), 'requested from the shared stream');
+  assert.ok(f.ttls.every((x) => x === 180_000));
+  assert.equal(s.engine!.state, 'NO_TRADE');
+  assert.equal(s.presubscribed.length, 0, 'released after the session is decided');
+  const last = f.wants[f.wants.length - 1];
+  assert.deepEqual(last, [NIFTY_INDEX_TOKEN], 'no longer re-requested — the shared stream drops them on expiry');
+  assert.ok(logs.some((l) => /pre-subscription released/.test(l)));
+});
+
+test('presubscription quotes: freshness, spread and stale quotes are recorded; stale quotes are never trades or fills', async () => {
+  const D = '2026-11-23';
+  const f = fakes();
+  const s = new LiveAscentService({ ...f, isTradingDay: weekday });
+  s.tick(at(D, '08:55:00')); await flush(); await flush();
+  const price = (t: number) => (t < at(D, '09:20:00') ? 25200 : t < at(D, '09:30:00') ? 25230 : 25190);
+  for (let t = at(D, '08:55:01'); t <= at(D, '09:50:00'); t += 1000) {
+    s.tick(t);
+    if (t >= at(D, '09:15:00')) s.onQuote({ token: NIFTY_INDEX_TOKEN, ltp: price(t), bid: null, ask: null, volume: null, receivedAt: t + 150 }, t);
+    for (const [k, tok] of s.presubscribed.entries()) {
+      const stale = k === 0;   // first contract's quotes arrive 4 s old
+      s.onQuote({ token: tok, ltp: 180, bid: 179.5, ask: 180.5, volume: 1000 + Math.floor(t / 1000) % 3, receivedAt: t + (stale ? 4000 : 300) }, t, { lastTradeTs: t - 1000, lastTradedQty: 65 });
+    }
+  }
+  const rep = s.observation!.report(s.engine!, null, {}, null, null) as any;
+  const opts = rep.dataQuality.options;
+  assert.ok(opts.length >= 2);
+  assert.ok(opts.some((o: any) => o.freshness.maxMs >= 4000), 'stale contract visible in freshness');
+  assert.ok(opts.every((o: any) => o.spreadPct && o.spreadPct.avg > 0.5 && o.spreadPct.avg < 0.6));
+  assert.equal(s.engine!.positionsToday, 0);
+  assert.equal(s.engine!.entryOrder, null);
 });

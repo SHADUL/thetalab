@@ -74,7 +74,7 @@ export class ObservationRecorder {
     };
   }
 
-  report(e: AscentEngine, wouldSelect: ContractSelection | null, adapterStats: unknown) {
+  report(e: AscentEngine, wouldSelect: ContractSelection | null, adapterStats: unknown, tradeDetection: unknown = null, subscriptions: unknown = null) {
     const perMinute = e.index.bars.map((b) => {
       const l = this.indexLagByMin.get(b.label);
       return [hhmm(b.label), b.close, b.ticks, b.status, l?.n ? Math.round(l.sum / l.n) : null, l?.n ? l.max : null];
@@ -103,6 +103,7 @@ export class ObservationRecorder {
       wouldSelect: w ? (w.ok ? { tradingsymbol: w.instrument.tradingsymbol, strike: w.strike, expiry: w.expiry, itmPoints: w.itmPoints, lotSize: w.instrument.lotSize, expiryRolledProvisional: w.expiryRolled } : { rejected: w.code, detail: w.detail }) : null,
       outcome: e.outcome, finalState: e.state,
       dataQuality: { ...this.health(e), adapter: adapterStats, options },
+      tradeDetection, subscriptions,
       transitions: e.events.filter((x) => x.kind === 'TRANSITION').map((x) => [x.bar != null ? hhmm(x.bar) : null, x.from, x.to, x.trigger]),
       perMinute: { columns: ['bar', 'close', 'ticks', 'status', 'avgLagMs', 'maxLagMs'], rows: perMinute },
     };

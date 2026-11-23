@@ -10,19 +10,18 @@
  *  - The engine is created PAUSED and cannot be started in this phase;
  *    there is no order path, no database write and no API.
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { marketStream } from './marketStream.ts';
 import { isTradingDay } from '../src/nifty-alpha-ladder/calendar/signalCalendar.ts';
 import { LiveAscentService, type InstrumentPort } from '../src/nifty-ascent/live/service.ts';
 import type { Instrument } from '../src/nifty-ascent/core/contracts.ts';
+import { ObserveArchive, archiveOptionsFromEnv } from './niftyAscentArchive.ts';
 
 const KITE_REST = 'https://api.kite.trade';
 let service: LiveAscentService | null = null;
+let archive: ObserveArchive | null = null;
 
-export function getNiftyAscent(): LiveAscentService | null { return service; }
+export function getNiftyAscent(): { service: LiveAscentService | null; archive: ObserveArchive | null } { return { service, archive }; }
 
 function instrumentPort(sb: SupabaseClient<any>): InstrumentPort {
   return {
@@ -74,19 +73,20 @@ export async function startNiftyAscent(): Promise<void> {
     return json?.data;
   };
 
+  // Persistent archive outside the app release folder (bind-mounted volume). Best-effort: if it is
+  // not writable the service still runs and the full report remains in the container log.
+  archive = new ObserveArchive(archiveOptionsFromEnv());
+  if (!(await archive.start())) console.error(`[nifty-ascent] archive NOT writable (${archive.status().dir}): ${archive.lastError} — reports only in the log`);
+  const a = archive;
   service = new LiveAscentService({
     stream: marketStream,
     fetchData,
     instruments: instrumentPort(sb),
     isTradingDay: (d) => isTradingDay(new Date(`${d}T06:00:00Z`)),
-    log: (m) => console.log(`[nifty-ascent] ${m}`),
-    // The full report is also logged; this file copy is a convenience (container disk, lost on redeploy).
-    saveReport: (date, report) => {
-      const dir = process.env.NIFTY_ASCENT_OBSERVE_DIR || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'nifty-ascent-observe');
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(path.join(dir, `${date}.json`), JSON.stringify(report, null, 2));
-    },
+    log: (m) => { console.log(`[nifty-ascent] ${m}`); a.event(m); },
+    saveReport: (date, report) => a.report(date, report),
+    recordTick: (row, exchTs) => a.tick(row, exchTs),
   });
   service.start();
-  console.log('[nifty-ascent] observe-only live data service started (engine PAUSED, no execution)');
+  console.log(`[nifty-ascent] observe-only live data service started (engine PAUSED, no execution) · archive ${JSON.stringify(a.status())}`);
 }

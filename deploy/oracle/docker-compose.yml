@@ -11,6 +11,9 @@ services:
     image: thetalab:latest
     restart: unless-stopped
     env_file: .env
+    # NIFTY ASCENT observe-only archive: persists across deploys (outside /opt/thetalab/app).
+    volumes:
+      - ./data/nifty-ascent:/data/nifty-ascent
     networks: [apex]
 
   # The Alpha Ladder worker. Behind a profile so it never starts by accident

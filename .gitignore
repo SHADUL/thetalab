@@ -11,4 +11,3 @@ src/options-auto/backtest/.bhavcopy-cache/
 
 # NIFTY PULSE tick recordings (VM only)
 /data/nifty-pulse-ticks/
-data/nifty-ascent-observe

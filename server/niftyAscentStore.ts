@@ -35,7 +35,8 @@ export class SupabaseAscentStore implements AscentStorePort {
       .update({ lease_holder: holder, lease_expires_at: new Date(nowMs + ttlMs).toISOString(), updated_at: nowIso })
       .eq('id', 1)
       .or(`lease_holder.is.null,lease_holder.eq.${holder},lease_expires_at.lt.${nowIso}`)
-      .select('lease_holder'));
+      // PostgREST re-applies or() to the returned rows, so every column it references must be selected.
+      .select('lease_holder,lease_expires_at'));
     return !!rows?.length;
   }
 

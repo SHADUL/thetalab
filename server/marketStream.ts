@@ -66,8 +66,21 @@ export function packetExchangeTs(p: Buffer): number | null {
   return s > 0 ? s * 1000 : null;
 }
 
+/**
+ * Trade metadata carried only by F&O full-mode packets (184 B): last trade
+ * time (offset 44, epoch seconds → ms) and last traded quantity (offset 8).
+ * Optional extra for observers; LiveQuote itself is unchanged.
+ */
+export interface QuoteMeta { lastTradeTs: number | null; lastTradedQty: number | null }
+
+export function packetTradeMeta(p: Buffer): QuoteMeta | null {
+  if (p.length !== 184) return null;
+  const ltt = p.readInt32BE(44), ltq = p.readInt32BE(8);
+  return { lastTradeTs: ltt > 0 ? ltt * 1000 : null, lastTradedQty: ltq >= 0 ? ltq : null };
+}
+
 /** Receives every decoded quote as it arrives (read-only observers, e.g. NIFTY PULSE paper engine). */
-export type QuoteListener = (q: LiveQuote, exchTs: number | null) => void;
+export type QuoteListener = (q: LiveQuote, exchTs: number | null, meta?: QuoteMeta | null) => void;
 
 export function decodeFrame(frame: Buffer, receivedAt: number): LiveQuote[] {
   if (frame.length < 2) return []; // 1-byte heartbeat
@@ -110,11 +123,15 @@ class MarketStream {
     const fresh: number[] = [];
     for (const t of tokens) {
       if (!(t > 0)) continue;
-      if (!this.interest.has(t)) {
+      const cur = this.interest.get(t);
+      if (cur === undefined) {
         if (this.interest.size >= MAX_STREAM_TOKENS) continue;
         fresh.push(t);
       }
-      this.interest.set(t, exp);
+      // Several modules can want the same instrument: keep the LATER expiry so
+      // one caller's shorter TTL never cuts another caller's interest short.
+      // Expired entries are still pruned on every supervisor pass.
+      if (cur === undefined || exp > cur) this.interest.set(t, exp);
     }
     if (fresh.length && this.isHealthy()) this.subscribe(fresh);
   }
@@ -201,7 +218,8 @@ class MarketStream {
         if (!q || !(q.ltp > 0)) continue;
         this.quotes.set(q.token, q);
         const exchTs = packetExchangeTs(p);
-        for (const fn of this.listeners) { try { fn(q, exchTs); } catch { /* an observer must never break the stream */ } }
+        const meta = packetTradeMeta(p);
+        for (const fn of this.listeners) { try { fn(q, exchTs, meta); } catch { /* an observer must never break the stream */ } }
       }
     });
     ws.on('error', (e: Error) => { this.lastError = e.message; });

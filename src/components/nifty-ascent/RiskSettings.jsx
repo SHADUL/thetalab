@@ -2,10 +2,10 @@
 import { useState } from "react";
 import { useState as useStateR } from "react";
 import { Play, Prohibit, Skull, LockOpen, Lock, Power } from "@phosphor-icons/react";
-import { useAscent, ascent } from "./store.js";
+import { useAscent, ascent, defaultExec } from "./store.js";
 import { Card, WsHead, Badge, KV, Reason } from "./ui.jsx";
 import { num } from "./format.js";
-import { RESEARCH_RULES_V1 as R, DEFAULT_EXECUTION } from "../../nifty-ascent/core/rules.ts";
+import { RESEARCH_RULES_V1 as R } from "../../nifty-ascent/core/rules.ts";
 import { COST_MODEL } from "../../nifty-ascent/core/costs.ts";
 
 const FIELDS = [
@@ -43,8 +43,8 @@ export default function RiskSettings() {
             <div className="na-note">KILL blocks entries, cancels a pending entry and closes an open paper position at the first fresh bid. Live paper is NOT ENABLED; when it is (after your approval) the live engine will have its own controls and start PAUSED every day.</div>
           </div>
         </Card>
-        <Card title="Execution & risk settings" sub={`Version ${S.exec.version} · replay restarts from 09:10 and re-runs to the current time when saved`}
-          tools={<><button className="na-chipbtn" onClick={() => { ascent.resetExec(); setForm({ ...DEFAULT_EXECUTION }); }}>Defaults</button><button className="na-chipbtn" data-on={changed} disabled={!changed} onClick={save}>Save new version</button></>}>
+        <Card title="Execution & risk settings" sub={`${S.source === "BACKTEST" ? "BACKTEST (defaults mirror live paper)" : "SIMULATION"} · version ${S.exec.version} · replay restarts from 09:10 and re-runs to the current time when saved`}
+          tools={<><button className="na-chipbtn" onClick={() => { ascent.resetExec(); setForm(defaultExec(S.source)); }}>Defaults</button><button className="na-chipbtn" data-on={changed} disabled={!changed} onClick={save}>Save new version</button></>}>
           {FIELDS.map(([k, label, hint, step]) => (
             <div className="na-field" key={k} data-changed={Number(form[k]) !== S.exec[k] ? "true" : undefined}>
               <label htmlFor={`na-${k}`}>{label}</label>

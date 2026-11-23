@@ -7,7 +7,7 @@ import { useSyncExternalStore } from "react";
 import { FIXTURES } from "../../nifty-ascent/sim/fixtures.ts";
 import { Replay } from "../../nifty-ascent/sim/market.ts";
 import { histReplay } from "../../nifty-ascent/sim/historical.ts";
-import { DEFAULT_EXECUTION, barStart } from "../../nifty-ascent/core/rules.ts";
+import { DEFAULT_EXECUTION, LIVE_PAPER_EXECUTION, barStart } from "../../nifty-ascent/core/rules.ts";
 import { AscentEngine } from "../../nifty-ascent/core/engine.ts";
 
 export const SPEEDS = [1, 10, 60, 300];
@@ -20,6 +20,9 @@ function loadPrefs() {
 function savePrefs(p) { try { localStorage.setItem(PREF, JSON.stringify(p)); } catch { /* ignore */ } }
 
 const prefs = loadPrefs();
+/** Default execution settings per source: BACKTEST mirrors live paper (EXEC-2, ₹20,000); SIMULATION keeps EXEC-1 (₹15,000). */
+export const defaultExec = (src) => ({ ...(src === "BACKTEST" ? LIVE_PAPER_EXECUTION : DEFAULT_EXECUTION) });
+const initialSource = ["LIVE", "BACKTEST"].includes(prefs.source) ? prefs.source : "SIMULATION";
 const initialFixture = FIXTURES.some((f) => f.id === prefs.fixtureId) ? prefs.fixtureId : FIXTURES[0].id;
 
 export const S = {
@@ -28,14 +31,16 @@ export const S = {
   replay: null,
   playing: false,
   speed: SPEEDS.includes(prefs.speed) ? prefs.speed : 60,
-  exec: { ...DEFAULT_EXECUTION },
+  /** Settings of the source on screen (SIMULATION or BACKTEST). Each source keeps its own copy. */
+  exec: defaultExec(initialSource),
+  execBySource: {},
   execVersion: 1,
   overlays: { or: true, bands: true, prev: true, williams: true, markers: true, ...(prefs.overlays ?? {}) },
   runs: null,
   /** Live server status (observe-only service). Read-only; null until the first poll. */
   live: null,
   /** SIMULATION (replay in this browser) or LIVE (read-only mirror of the server engine). Never mixed. */
-  source: ["LIVE", "BACKTEST"].includes(prefs.source) ? prefs.source : "SIMULATION",
+  source: initialSource,
   /** BACKTEST: real NIFTY 1-minute data (Kite) with MODELLED option prices. Never mixed with sim or live. */
   bt: { month: null, days: [], daysError: null, loadingDays: false, date: null, data: null, loading: false, error: null, results: {}, running: false, progress: null },
   mirror: null,
@@ -81,6 +86,12 @@ async function getJson(url) {
   if (!r.ok) throw new Error(j.message || j.error || `HTTP ${r.status}`);
   return j;
 }
+/** Execution settings used for BACKTEST runs, whichever source is on screen. */
+export const btExec = () => (S.source === "BACKTEST" ? S.exec : S.execBySource.BACKTEST ?? defaultExec("BACKTEST"));
+function histDay(h) {
+  if (h?.kind !== "NIFTY_ASCENT_HIST_DAY" || !Array.isArray(h.bars)) throw new Error("the server did not return backtest data for this day");
+  return h;
+}
 /** Compact per-day backtest result (the engine is kept for analytics). */
 function summarise(e) {
   return {
@@ -104,7 +115,8 @@ function loop(t) {
 
 /** Every fixture run to the end with the current execution settings (Journal / Analytics). */
 function computeRuns() {
-  S.runs = { execVersion: S.execVersion, list: FIXTURES.map((f) => ({ fixture: f, engine: new Replay(f, { exec: S.exec }).runToEnd() })) };
+  const exec = S.source === "SIMULATION" ? S.exec : S.execBySource.SIMULATION ?? defaultExec("SIMULATION");
+  S.runs = { execVersion: S.execVersion, list: FIXTURES.map((f) => ({ fixture: f, engine: new Replay(f, { exec }).runToEnd() })) };
 }
 
 export const ascent = {
@@ -133,14 +145,14 @@ export const ascent = {
   control(action) { S.replay.engine.control(action, S.replay.t); emit(true); },
   setOverlay(k, v) { S.overlays = { ...S.overlays, [k]: v }; savePrefs({ ...loadPrefs(), overlays: S.overlays }); emit(true); },
   setExec(patch) {
-    S.exec = { ...S.exec, ...patch, version: `EXEC-${S.execVersion + 1}` };
+    S.exec = { ...S.exec, ...patch, version: `${defaultExec(S.source).version}-custom${S.execVersion}` };
     S.execVersion++;
     const t = S.replay.t;
     load(); S.replay.stepTo(t);
     S.runs = null; S.bt.results = {};
     emit(true);
   },
-  resetExec() { S.exec = { ...DEFAULT_EXECUTION }; S.execVersion++; const t = S.replay.t; load(); S.replay.stepTo(t); S.runs = null; S.bt.results = {}; emit(true); },
+  resetExec() { S.exec = defaultExec(S.source); S.execVersion++; const t = S.replay.t; load(); S.replay.stepTo(t); S.runs = null; S.bt.results = {}; emit(true); },
   runs() {
     if (!S.runs || S.runs.execVersion !== S.execVersion) computeRuns();
     return S.runs.list;
@@ -150,6 +162,8 @@ export const ascent = {
     const prev = S.source;
     S.source = ["LIVE", "BACKTEST"].includes(src) ? src : "SIMULATION";
     S.playing = false;
+    if (prev !== "LIVE") S.execBySource[prev] = S.exec;
+    if (S.source !== "LIVE" && prev !== S.source) { S.exec = S.execBySource[S.source] ?? defaultExec(S.source); S.execVersion++; S.runs = null; }
     if (prev !== S.source && S.source !== "LIVE") load("09:14");
     if (S.source === "BACKTEST" && !S.bt.month) ascent.btLoadMonth(lastMonths()[0]);
     savePrefs({ ...loadPrefs(), source: S.source });
@@ -160,7 +174,11 @@ export const ascent = {
   async btLoadMonth(month) {
     S.bt = { ...S.bt, month, days: [], daysError: null, loadingDays: true };
     emit(true);
-    try { S.bt.days = (await getJson(`/api/nifty-ascent?resource=hist-days&month=${month}`)).days; }
+    try {
+      const days = (await getJson(`/api/nifty-ascent?resource=hist-days&month=${month}`)).days;
+      if (!Array.isArray(days)) throw new Error("the server did not return a day list (is the backtest API available?)");
+      S.bt.days = days;
+    }
     catch (e) { S.bt.daysError = e.message; }
     S.bt.loadingDays = false;
     emit(true);
@@ -170,7 +188,7 @@ export const ascent = {
     S.playing = false;
     emit(true);
     try {
-      S.bt.data = await getJson(`/api/nifty-ascent?resource=hist-day&date=${date}`);
+      S.bt.data = histDay(await getJson(`/api/nifty-ascent?resource=hist-day&date=${date}`));
       const d = S.bt.days.find((x) => x.date === date); if (d) d.cached = true;
       load(jump);
     } catch (e) { S.bt.error = e.message; S.bt.data = null; }
@@ -188,9 +206,9 @@ export const ascent = {
       S.bt.progress = { i: i + 1, n: days.length, date };
       emit(true);
       try {
-        const h = await getJson(`/api/nifty-ascent?resource=hist-day&date=${date}`);
+        const h = histDay(await getJson(`/api/nifty-ascent?resource=hist-day&date=${date}`));
         const d = S.bt.days.find((x) => x.date === date); if (d) d.cached = true;
-        S.bt.results = { ...S.bt.results, [date]: summarise(histReplay(h, { exec: S.exec, startRunning: true }).runToEnd()) };
+        S.bt.results = { ...S.bt.results, [date]: summarise(histReplay(h, { exec: btExec(), startRunning: true }).runToEnd()) };
       } catch (e) {
         S.bt.results = { ...S.bt.results, [date]: { error: e.message } };
       }

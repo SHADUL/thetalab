@@ -6,7 +6,7 @@
  */
 import { useEffect } from "react";
 import { Play, Stop, ArrowSquareOut } from "@phosphor-icons/react";
-import { useAscent, ascent, lastMonths } from "./store.js";
+import { useAscent, ascent, lastMonths, btExec } from "./store.js";
 import { Card, Badge, WsHead, PnL, Kpi, Spark, Empty } from "./ui.jsx";
 import { num, pct, hm, istTime, BOT_LABEL, EXIT_LABEL, REASON_LABEL } from "./format.js";
 
@@ -85,7 +85,7 @@ export default function Backtest({ go }) {
         )}
       </Card>
       <div className="na-note" style={{ marginTop: 10 }}>
-        How it works: each past day&apos;s real NIFTY 1-minute candles are expanded into a second-by-second path (open → low → high → close for up candles, open → high → low → close for down candles) and fed to the unchanged engine. Option bid/ask come from a Black-76 model using the previous day&apos;s India VIX close as volatility, so premiums, fills and P&amp;L are estimates, not real option prices. The current Risk &amp; Settings limits apply (₹{num(S.exec.maxPremiumOutlay, 0)} outlay incl. fees, {S.exec.lots} lot, one position a day). Changing Execution settings in Risk &amp; Settings clears these results.
+        How it works: each past day&apos;s real NIFTY 1-minute candles are expanded into a second-by-second path (open → low → high → close for up candles, open → high → low → close for down candles) and fed to the unchanged engine. Option bid/ask come from a Black-76 model using the previous day&apos;s India VIX close as volatility, so premiums, fills and P&amp;L are estimates, not real option prices. The current Risk &amp; Settings limits apply (₹{num(btExec().maxPremiumOutlay, 0)} outlay incl. fees, {btExec().lots} lot, one position a day — defaults mirror live paper, settings version {btExec().version}). Changing Execution settings in Risk &amp; Settings clears these results.
       </div>
     </>
   );

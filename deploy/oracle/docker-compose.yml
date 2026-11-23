@@ -25,6 +25,7 @@ services:
     image: ${THETALAB_WORKER_IMAGE:-thetalab:latest}
     restart: unless-stopped
     env_file: .env
+    entrypoint: ["docker-entrypoint.sh"]
     command: ["node", "--experimental-strip-types", "--no-warnings", "src/nifty-alpha-ladder/worker/main.ts"]
     profiles: [worker]
     networks: [apex, thetalab_internal]

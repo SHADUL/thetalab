@@ -114,6 +114,19 @@ export const DEFAULT_EXECUTION: ExecutionSettings = {
   minPrevDayBars: 370,
 };
 
+/**
+ * LIVE PAPER execution settings. Owner decision 23 Nov 2026: premium outlay and
+ * theoretical loss raised to ₹20,000 (one lot of a 150-pt ITM weekly costs ~₹16.5–18.5k
+ * at lot 65). Everything else — including the ₹15,000 daily loss cutoff — is unchanged.
+ * Simulation and backtest keep DEFAULT_EXECUTION unless changed in Risk & Settings.
+ */
+export const LIVE_PAPER_EXECUTION: ExecutionSettings = {
+  ...DEFAULT_EXECUTION,
+  version: 'EXEC-2',
+  maxPremiumOutlay: 20_000,
+  maxTheoreticalLoss: 20_000,
+};
+
 /* ------------------------------------------------------------------ */
 /* Time helpers (all IST)                                               */
 /* ------------------------------------------------------------------ */

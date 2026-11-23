@@ -202,3 +202,12 @@ test('server/niftyAscent.ts: observe-only, read-only Kite GETs, no orders, no cr
   assert.match(src, /marketStream\.start/);
   assert.ok(!/new WebSocket|wss:\/\//.test(src), 'no second Kite connection');
 });
+
+test('live paper uses LIVE_PAPER_EXECUTION (EXEC-2): ₹20,000 outlay and max loss, everything else default', async () => {
+  const src = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../niftyAscent.ts'), 'utf8');
+  assert.match(src, /exec: LIVE_PAPER_EXECUTION/);
+  const { LIVE_PAPER_EXECUTION: L, DEFAULT_EXECUTION: D } = await import('../../src/nifty-ascent/core/rules.ts');
+  assert.deepEqual([L.version, L.maxPremiumOutlay, L.maxTheoreticalLoss, L.dailyLossCutoff, L.lots, L.paperCapital], ['EXEC-2', 20_000, 20_000, 15_000, 1, 200_000]);
+  assert.deepEqual({ ...L, version: D.version, maxPremiumOutlay: D.maxPremiumOutlay, maxTheoreticalLoss: D.maxTheoreticalLoss }, D);
+  assert.equal(D.maxPremiumOutlay, 15_000, 'simulation/backtest defaults unchanged');
+});

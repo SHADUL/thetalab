@@ -96,7 +96,7 @@ export default function OptionPosition() {
       <Card title="Premium trajectory" sub="1-minute LTP closes since entry" bodyClass="">
         <div style={{ padding: "6px 4px 2px" }}><AscentChart kind="premium" height={320} /></div>
       </Card>
-      <div className="na-note" style={{ marginTop: 10 }}>Entry fees ₹{num(p?.entryFees ?? buyFees(entry, qty), 2)} are included in the ₹15,000 premium-outlay check. A bought option can lose its entire premium.</div>
+      <div className="na-note" style={{ marginTop: 10 }}>Entry fees ₹{num(p?.entryFees ?? buyFees(entry, qty), 2)} are included in the ₹{num(e.exec.maxPremiumOutlay, 0)} premium-outlay check. A bought option can lose its entire premium.</div>
     </>
   );
 }

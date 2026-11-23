@@ -42,8 +42,28 @@ export class AscentHistory {
   private readonly fetchData: FetchData;
   private readonly isTradingDay: (d: string) => boolean;
   private inflight = new Map<string, Promise<HistDay>>();
-  constructor(o: { dir: string; fetchData: FetchData; isTradingDay: (d: string) => boolean }) {
+  /** Kite allows ~3 historical requests/s: requests are serialised and spaced, and a 429 is retried with backoff. */
+  private queue: Promise<unknown> = Promise.resolve();
+  private readonly gapMs: number;
+  private readonly sleep: (ms: number) => Promise<void>;
+  constructor(o: { dir: string; fetchData: FetchData; isTradingDay: (d: string) => boolean; gapMs?: number; sleep?: (ms: number) => Promise<void> }) {
     this.dir = o.dir; this.fetchData = o.fetchData; this.isTradingDay = o.isTradingDay;
+    this.gapMs = o.gapMs ?? 400; this.sleep = o.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+  }
+  private get(p: string): Promise<any> {
+    const run = async () => {
+      for (let attempt = 0; ; attempt++) {
+        try { const v = await this.fetchData(p); await this.sleep(this.gapMs); return v; }
+        catch (e) {
+          await this.sleep(this.gapMs);
+          if (attempt >= 3 || !/\b429\b/.test(String((e as Error)?.message))) throw e;
+          await this.sleep(1000 * (attempt + 1));
+        }
+      }
+    };
+    const next = this.queue.then(run, run);
+    this.queue = next.catch(() => undefined);
+    return next;
   }
   private file(date: string) { return path.join(this.dir, `${date}.json`); }
   isCached(date: string) { return fs.existsSync(this.file(date)); }
@@ -63,9 +83,9 @@ export class AscentHistory {
   private async fetchDay(date: string): Promise<HistDay> {
     const prevDate = previousTradingDay(date, this.isTradingDay);
     if (!prevDate) throw new Error(`no previous trading day for ${date}`);
-    const today = await this.fetchData(`/instruments/historical/${NIFTY}/minute?from=${date}+09:15:00&to=${date}+15:30:00`);
-    const prev = await this.fetchData(`/instruments/historical/${NIFTY}/minute?from=${prevDate}+09:15:00&to=${prevDate}+15:30:00`);
-    const vix = await this.fetchData(`/instruments/historical/${INDIA_VIX}/day?from=${addDays(prevDate, -10)}+00:00:00&to=${prevDate}+23:59:59`);
+    const today = await this.get(`/instruments/historical/${NIFTY}/minute?from=${date}+09:15:00&to=${date}+15:30:00`);
+    const prev = await this.get(`/instruments/historical/${NIFTY}/minute?from=${prevDate}+09:15:00&to=${prevDate}+15:30:00`);
+    const vix = await this.get(`/instruments/historical/${INDIA_VIX}/day?from=${addDays(prevDate, -10)}+00:00:00&to=${prevDate}+23:59:59`);
     const bars = candles(date, today?.candles ?? []);
     const prevBars = candles(prevDate, prev?.candles ?? []).map((b) => ({ label: b.label, close: b.c }));
     if (bars.length < 300) throw new Error(`Kite returned only ${bars.length} NIFTY minute candles for ${date}`);

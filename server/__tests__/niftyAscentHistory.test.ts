@@ -25,7 +25,7 @@ function fake() {
 test('history: fetches today + previous session + VIX once, then serves from the disk cache', async () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'na-hist-'));
   const f = fake();
-  const h = new AscentHistory({ dir, fetchData: f.fetchData, isTradingDay: weekday });
+  const h = new AscentHistory({ dir, fetchData: f.fetchData, isTradingDay: weekday, gapMs: 0 });
   const now = Date.parse('2026-11-23T12:00:00+05:30');
   const d = await h.day('2026-11-18', now);
   assert.deepEqual([d.date, d.prevDate, d.bars.length, d.prevBars.length, d.vixPrevClose], ['2026-11-18', '2026-11-17', 375, 375, 13.1]);
@@ -39,11 +39,38 @@ test('history: fetches today + previous session + VIX once, then serves from the
 });
 
 test('history: refuses today/future, non-trading days and bad dates', async () => {
-  const h = new AscentHistory({ dir: mkdtempSync(path.join(tmpdir(), 'na-hist-')), fetchData: fake().fetchData, isTradingDay: weekday });
+  const h = new AscentHistory({ dir: mkdtempSync(path.join(tmpdir(), 'na-hist-')), fetchData: fake().fetchData, isTradingDay: weekday, gapMs: 0 });
   const now = Date.parse('2026-11-23T12:00:00+05:30');
   await assert.rejects(h.day('2026-11-23', now), /completed past/);
   await assert.rejects(h.day('2026-11-22', now), /not a trading day/);
   await assert.rejects(h.day('18-11-2026', now), /YYYY-MM-DD/);
+});
+
+test('history: Kite requests are serialised and a 429 is retried with backoff', async () => {
+  const f = fake();
+  let active = 0, maxActive = 0, fails = 1;
+  const sleeps: number[] = [];
+  const fetchData = async (p: string) => {
+    active++; maxActive = Math.max(maxActive, active);
+    await new Promise((r) => setTimeout(r, 1));
+    active--;
+    if (fails-- > 0) throw new Error('Kite historical 429 NetworkException');
+    return f.fetchData(p);
+  };
+  const h = new AscentHistory({ dir: mkdtempSync(path.join(tmpdir(), 'na-hist-')), fetchData, isTradingDay: weekday, gapMs: 5, sleep: async (ms) => { sleeps.push(ms); } });
+  const now = Date.parse('2026-11-23T12:00:00+05:30');
+  const [a, b] = await Promise.all([h.day('2026-11-18', now), h.day('2026-11-19', now)]);
+  assert.equal(a.date, '2026-11-18'); assert.equal(b.date, '2026-11-19');
+  assert.equal(maxActive, 1, 'never two Kite requests at once');
+  assert.ok(sleeps.includes(1000), 'backed off after the 429');
+  assert.equal(f.calls.length, 6);
+});
+
+test('history: a non-429 error is not retried', async () => {
+  let n = 0;
+  const h = new AscentHistory({ dir: mkdtempSync(path.join(tmpdir(), 'na-hist-')), fetchData: async () => { n++; throw new Error('Kite historical 403 TokenException'); }, isTradingDay: weekday, gapMs: 0 });
+  await assert.rejects(h.day('2026-11-18', Date.parse('2026-11-23T12:00:00+05:30')), /403/);
+  assert.equal(n, 1);
 });
 
 test('month trading days exclude weekends, holidays and today', () => {

@@ -122,8 +122,25 @@ test('database failure blocks new entries; the engine is stopped before the sign
   store.fail = true;
   await run(s, '09:50:01', '10:05:00');
   assert.equal(s.storeOk, false);
-  assert.equal(s.engine!.engineStatus, 'ENTRIES_STOPPED');
+  assert.equal(s.engine!.engineStatus, 'RUNNING', "the owner's START is not overwritten");
+  assert.match(String(s.engine!.externalBlock), /database|lease/, 'a failing database also fails the lease renewal');
   assert.equal(s.engine!.positionsToday, 0);
+});
+
+test('a restart before the lease is re-acquired never leaves entries stopped for the day', async () => {
+  const store = new MemoryAscentStore();
+  store.control.autoStart = true;
+  const a = new LiveAscentService(deps(store, 'A'));
+  await run(a, '08:55:00', '09:40:05'); // dies just after the 09:39 bar is confirmed and saved
+  assert.equal(a.engine!.engineStatus, 'RUNNING');
+  // Restart (a restart that loses a whole minute in a signal window is DATA_ERROR by the approved policy): new process, previous lease still valid for a while → temporarily blocked, then lifted.
+  const b = new LiveAscentService(deps(store, 'B'));
+  await run(b, '09:40:30', '09:41:00');
+  assert.equal(b.engine!.engineStatus, 'RUNNING', 'restored as RUNNING, not stopped');
+  assert.ok(b.engine!.externalBlock, 'blocked while the old lease is still held');
+  await run(b, '09:41:01', '10:05:00');
+  assert.equal(b.engine!.externalBlock, null, 'block lifted once the lease is acquired');
+  assert.equal(b.engine!.positionsToday, 1, 'the 10:00 breakout is traded');
 });
 
 test('KILL / FLATTEN closes the open paper position at a fresh bid and persists the kill switch into the next session', async () => {

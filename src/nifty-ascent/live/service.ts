@@ -240,14 +240,16 @@ export class LiveAscentService {
       .finally(() => { this.leaseBusy = false; });
   }
 
-  /** No lease or no database ⇒ no new entries (an open position keeps being managed). */
+  /**
+   * No lease or no database ⇒ no NEW entries (an open position keeps being managed). This is a
+   * temporary gate on the engine, lifted automatically once both are healthy again — it never
+   * changes the owner's START / STOP NEW ENTRIES / KILL state, and it is not persisted.
+   */
   private enforceSafety() {
     const e = this.engine!;
     const why = !this.leaseOk ? 'single-engine lease not held' : !this.storeOk ? 'database unavailable' : null;
-    if (why && e.engineStatus === 'RUNNING') {
-      e.control('STOP_ENTRIES', this.now());
-      this.log(`RISK new entries stopped: ${why}`);
-    }
+    if (why !== this.blockedReason) this.log(why ? `RISK new entries blocked: ${why}` : 'new-entry block lifted (lease and database healthy)');
+    e.externalBlock = why;
     this.blockedReason = why;
   }
 

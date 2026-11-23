@@ -302,7 +302,13 @@ export class AscentEngine {
     this.log({ kind: 'CONTROL', bar: null, bot: null, trigger: action.toLowerCase(), reason: `engine ${this.engineStatus}` });
   }
 
-  get entriesAllowed(): boolean { return this.engineStatus === 'RUNNING' && !this.killed; }
+  /**
+   * Temporary, non-persisted block set by the live service (no lease / database down).
+   * Blocks NEW entries only; never changes the owner's START / STOP / KILL state.
+   */
+  externalBlock: string | null = null;
+
+  get entriesAllowed(): boolean { return this.engineStatus === 'RUNNING' && !this.killed && !this.externalBlock; }
 
   /** Tokens whose quotes the engine needs (for stream subscription / replay). */
   wantedTokens(): number[] {
@@ -525,7 +531,7 @@ export class AscentEngine {
     const sig = this.signal!;
     const bot = sig.bot;
     if (this.positionsToday >= this.rules.maxPositionsPerDay) { this.rejectSignal('daily_limit', 'one position per day already used'); return; }
-    if (!this.entriesAllowed) { this.rejectSignal('entries_disabled', `engine is ${this.engineStatus} — signal recorded, no entry`); return; }
+    if (!this.entriesAllowed) { this.rejectSignal('entries_disabled', this.externalBlock && this.engineStatus === 'RUNNING' ? `new entries blocked: ${this.externalBlock} — signal recorded, no entry` : `engine is ${this.engineStatus} — signal recorded, no entry`); return; }
     if (this.realizedToday <= -Math.abs(this.exec.dailyLossCutoff)) { this.rejectSignal('daily_loss_cutoff', `daily realized loss cutoff ₹${this.exec.dailyLossCutoff} reached`); return; }
 
     // Contract (Q7, Q8, Q9) from the instrument master — never invented.

@@ -1,5 +1,5 @@
 /** Trade Journal — blotter of replay sessions with a full audit drawer. */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { X } from "@phosphor-icons/react";
 import { useAscent, ascent } from "./store.js";
 import { Card, Badge, WsHead, PnL, Timeline, KV, Reason } from "./ui.jsx";
@@ -34,9 +34,7 @@ export default function TradeJournal() {
           {[["REPLAY", "Replay (simulation)"], ["LIVE", "Live paper"]].map(([k, l]) => <button key={k} data-on={source === k} onClick={() => setSource(k)}>{l}</button>)}
         </div>
       </WsHead>
-      {source === "LIVE" ? (
-        <Card><div className="na-note" style={{ padding: 18 }}>No live paper sessions yet. Live paper trading arrives with Phase 3–4 (server engine on the shared Kite stream) and is enabled only after your approval. Live and replay results are never mixed.</div></Card>
-      ) : (
+      {source === "LIVE" ? <LiveJournal /> : (
         <Card title="Replay sessions · SIMULATION" sub={`${rows.filter((r) => r.t).length} trades in ${rows.length} synthetic fixture sessions — not market data, not evidence of performance`}
           tools={<>
             <div className="na-seg" role="group" aria-label="Bot filter">{["ALL", "GAP_AND_GO", "WILLIAMS"].map((b) => <button key={b} data-on={bot === b} onClick={() => setBot(b)}>{b === "ALL" ? "All" : BOT_LABEL[b]}</button>)}</div>
@@ -94,5 +92,30 @@ export default function TradeJournal() {
         </>
       )}
     </>
+  );
+}
+
+/** LIVE PAPER trades from the server database. Never mixed with replay sessions. */
+function LiveJournal() {
+  const S = useAscent();
+  useEffect(() => { ascent.loadLiveHistory(); }, []);
+  const H = S.liveHistory;
+  const trades = H?.trades ?? [];
+  return (
+    <Card title="Live paper trades · real Kite data" sub={H?.reason ?? `${trades.length} filled paper trade(s) — paper fills only, never real orders`} bodyClass="">
+      {!trades.length ? <div className="na-note" style={{ padding: 18 }}>{H ? "No live paper trades yet." : "Loading…"}</div> : (
+        <div className="na-tablewrap"><table className="na-table">
+          <thead><tr><th>Date</th><th>Bot</th><th className="r">Gap %</th><th>Signal</th><th>Entry</th><th>Exit</th><th>CE/PE</th><th>Contract</th><th className="r">Qty</th><th className="r">Entry ₹</th><th className="r">Exit ₹</th><th className="r">Gross</th><th className="r">Costs</th><th className="r">Net</th><th className="r">Return</th><th>Exit reason</th><th>Version</th></tr></thead>
+          <tbody>{trades.map((t) => (
+            <tr key={t.date}>
+              <td>{t.date}</td><td>{BOT_LABEL[t.bot]}</td><td className="r">{pct(t.gapPct, 3, { sign: false })}</td><td>{hm(t.signalBar)}</td>
+              <td>{istTime(t.entryAt).slice(0, 5)}</td><td>{istTime(t.exitAt).slice(0, 5)}</td><td><Badge tone={t.right === "CE" ? "gain" : "loss"}>{t.right}</Badge></td>
+              <td>{t.tradingsymbol}</td><td className="r">{t.qty}</td><td className="r">{num(t.entryPremium, 2)}</td><td className="r">{num(t.exitPremium, 2)}</td>
+              <td className="r"><PnL value={t.gross} /></td><td className="r">{num(t.costs, 2)}</td><td className="r"><PnL value={t.net} /></td><td className="r">{pct(t.returnPct, 1)}</td>
+              <td>{EXIT_LABEL[t.exitReason]}</td><td className="na-faint">{String(t.strategyVersion).split(":")[1]}</td>
+            </tr>))}</tbody>
+        </table></div>
+      )}
+    </Card>
   );
 }

@@ -164,7 +164,9 @@ test('service: prepares at 08:50, creates a PAUSED engine, subscribes NIFTY from
   assert.equal(f.wants.length, 0, 'no subscription before 09:00');
   s.tick(at(D, '09:00:00'));
   assert.deepEqual(f.wants[0], [NIFTY_INDEX_TOKEN]);
-  assert.throws(() => s.control('START'), /not enabled in Phase 3/);
+  const refused = await s.control('START');
+  assert.equal(refused.ok, false);
+  assert.match(refused.message, /LIVE PAPER — NOT ENABLED/);
   assert.ok(logs.some((l) => /created PAUSED/.test(l)));
 });
 

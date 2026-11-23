@@ -1,6 +1,6 @@
 /** Gap-and-Go workspace — the primary bot in full detail. */
 import { useState } from "react";
-import { useAscent } from "./store.js";
+import { useAscent, view } from "./store.js";
 import { Card, Badge, Check, WsHead, KV, Reason, SideBadge } from "./ui.jsx";
 import { lastIndex } from "./derive.js";
 import { num, pct, hm, istTime, dur, REASON_LABEL } from "./format.js";
@@ -45,7 +45,7 @@ export function BandScale({ e, px }) {
 
 export default function GapAndGo() {
   const S = useAscent();
-  const e = S.replay.engine, now = S.replay.t;
+  const { engine: e, now } = view(S);
   const [open, setOpen] = useState(false);
   const px = lastIndex(e)?.price;
   const orBars = e.index.bars.filter((b) => b.label >= R.orFirstBar && b.label <= R.orLastBar);

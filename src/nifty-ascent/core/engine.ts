@@ -147,6 +147,24 @@ export interface EngineOptions {
   realizedToday?: number;
 }
 
+/** Everything needed to resume a session after a process restart (JSON-safe). */
+export interface EngineSnapshot {
+  v: 1;
+  date: string;
+  configVersion: string;
+  savedAt: number;
+  state: State; engineStatus: EngineStatus; killed: boolean; activeBot: Bot | null;
+  outcome: AscentEngine['outcome']; now: number; seq: number; sessionClosed: boolean;
+  reference: AscentEngine['reference']; gap: Gap | null; gapFill: AscentEngine['gapFill'];
+  or: OpeningRange | null; orCollected: number; williams: WilliamsLevels | null; williamsEligible: boolean | null;
+  standDown: AscentEngine['standDown']; handover: AscentEngine['handover']; williamsStartBar: number | null;
+  signal: AscentEngine['signal']; entryOrder: PaperOrder | null; exitOrder: PaperOrder | null;
+  position: Position | null; trade: Trade | null; realizedToday: number; positionsToday: number;
+  pendingInstrument: Instrument | null;
+  indexBars: Bar[]; indexNext: number;
+  premium: { token: number; bars: Bar[]; next: number } | null;
+}
+
 const TERMINAL: ReadonlySet<State> = new Set(['NO_TRADE', 'TRADE_CLOSED', 'SESSION_COMPLETE', 'DATA_ERROR']);
 const r2 = (v: number) => Math.round(v * 100) / 100;
 
@@ -659,6 +677,52 @@ export class AscentEngine {
     this.position = null;
     this.outcome = { kind: 'TRADE', reason: xs.reason };
     this.go('TRADE_CLOSED', 'exit_fill', `${xs.reason} · net ₹${net}`, null, { exit: exitPrice }, p.bot);
+  }
+
+  /* ---------------- persistence / restart recovery ---------------- */
+
+  serialize(): EngineSnapshot {
+    const tok = this.position?.instrument.token ?? null;
+    const pb = tok != null ? this.options.get(tok) : undefined;
+    return {
+      v: 1, date: this.date, configVersion: this.configVersion, savedAt: this.now,
+      state: this.state, engineStatus: this.engineStatus, killed: this.killed, activeBot: this.activeBot,
+      outcome: this.outcome, now: this.now, seq: this.seq, sessionClosed: this.sessionClosed,
+      reference: this.reference, gap: this.gap, gapFill: this.gapFill, or: this.or, orCollected: this.orCollected,
+      williams: this.williams, williamsEligible: this.williamsEligible, standDown: this.standDown, handover: this.handover,
+      williamsStartBar: this.williamsStartBar, signal: this.signal, entryOrder: this.entryOrder, exitOrder: this.exitOrder,
+      position: this.position, trade: this.trade, realizedToday: this.realizedToday, positionsToday: this.positionsToday,
+      pendingInstrument: this.pendingInstrument,
+      indexBars: this.index.bars.map((b) => ({ ...b })), indexNext: this.index.nextLabel,
+      premium: tok != null && pb ? { token: tok, bars: pb.bars.map((b) => ({ ...b })), next: pb.nextLabel } : null,
+    };
+  }
+
+  /**
+   * Rebuilds an engine from a snapshot after a restart. Decisions already made
+   * are kept exactly; minutes that were not observed while the process was
+   * down are confirmed as MISSING / NO_PRINT on the next clock tick, so the
+   * approved data policies apply (no entries on incomplete data; an open
+   * position keeps being managed; nothing is reconstructed from later data).
+   */
+  static restore(o: EngineOptions, snap: EngineSnapshot, restoredAt: number): AscentEngine {
+    if (snap.v !== 1 || snap.date !== o.date) throw new Error(`snapshot for ${snap.date} cannot restore session ${o.date}`);
+    const e = new AscentEngine(o);
+    if (snap.configVersion !== e.configVersion) throw new Error(`snapshot config ${snap.configVersion} differs from ${e.configVersion}`);
+    e.events.length = 0;
+    Object.assign(e, {
+      state: snap.state, engineStatus: snap.engineStatus, killed: snap.killed, activeBot: snap.activeBot, outcome: snap.outcome,
+      now: Math.max(snap.now, 0), seq: snap.seq, sessionClosed: snap.sessionClosed, reference: snap.reference, gap: snap.gap, gapFill: snap.gapFill,
+      or: snap.or, orCollected: snap.orCollected, williams: snap.williams, williamsEligible: snap.williamsEligible, standDown: snap.standDown,
+      handover: snap.handover, williamsStartBar: snap.williamsStartBar, signal: snap.signal, entryOrder: snap.entryOrder, exitOrder: snap.exitOrder,
+      position: snap.position, trade: snap.trade, realizedToday: snap.realizedToday, positionsToday: snap.positionsToday, pendingInstrument: snap.pendingInstrument,
+    });
+    e.index.restore(snap.indexBars, snap.indexNext);
+    if (snap.premium) e.optionBars(snap.premium.token).restore(snap.premium.bars, snap.premium.next);
+    const gapMin = Math.max(0, barLabelOf(e.date, restoredAt) - snap.indexNext);
+    e.log({ kind: 'CONTROL', bar: null, bot: e.activeBot, trigger: 'restored',
+      reason: `engine restored after restart in state ${e.state} (saved ${new Date(snap.savedAt).toISOString()})${gapMin > 0 ? ` — ${gapMin} unobserved minute(s) will be treated as missing data` : ''}`, at: restoredAt });
+    return e;
   }
 
   /* ---------------- read model ---------------- */

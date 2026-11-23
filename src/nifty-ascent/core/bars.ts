@@ -88,6 +88,17 @@ export class MinuteBarBuilder {
     const b = this.bars[i];
     return b && b.label === label ? b : this.bars.find((x) => x.label === label);
   }
+  /** Restore confirmed bars after a restart. Minutes from `nextLabel` on are confirmed afresh (missed ones become MISSING / NO_PRINT). */
+  restore(bars: Bar[], nextLabel: number) {
+    this.bars.length = 0;
+    for (const b of bars) this.bars.push({ ...b });
+    this.nextLabel = nextLabel;
+    this.pending.clear();
+    this.forming = null;
+    this.lastExchTs = -Infinity;
+    this.lastPrice = null;
+  }
+
   /** The bar still forming (not yet confirmed), for display only. */
   formingBar(): Bar | null { return this.forming; }
 }

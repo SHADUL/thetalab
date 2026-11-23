@@ -1,6 +1,7 @@
 /** Risk & Settings — controls, execution/risk settings, and the locked research rules. */
 import { useState } from "react";
-import { Play, Prohibit, Skull, LockOpen, Lock } from "@phosphor-icons/react";
+import { useState as useStateR } from "react";
+import { Play, Prohibit, Skull, LockOpen, Lock, Power } from "@phosphor-icons/react";
 import { useAscent, ascent } from "./store.js";
 import { Card, WsHead, Badge, KV, Reason } from "./ui.jsx";
 import { num } from "./format.js";
@@ -30,6 +31,7 @@ export default function RiskSettings() {
   return (
     <>
       <WsHead title="Risk & Settings" desc="Research rules are locked; execution and risk settings are adjustable and versioned. Every limit is enforced by the engine, not the page." />
+      {S.source !== "LIVE" && (<>
       <div className="na-grid na-risk" style={{ marginBottom: 12 }}>
         <Card title="Replay engine controls · SIMULATION only" sub="These act on the replay session in this browser — not on the live server" glow>
           <div style={{ display: "grid", gap: 10 }}>
@@ -52,6 +54,9 @@ export default function RiskSettings() {
           ))}
         </Card>
       </div>
+      </>)}
+      {S.source === "LIVE" && S.mirror && <Card title="Server execution & risk settings (read-only)" sub={`Version ${S.mirror.exec.version} — the live engine uses these; they are not edited from the browser`} style={{ marginBottom: 12 }}><KV rows={FIELDS.map(([k, label]) => [label, String(S.mirror.exec[k])])} /></Card>}
+      {S.source === "LIVE" && <LivePaperControls L={S.live} />}
       <LiveServiceCard L={S.live} />
       <div className="na-grid na-two">
         <Card title={<span className="flex items-center gap-2"><Lock size={14} weight="bold" />Research rules {R.version}</span>} sub="Fixed research specification (OptionsBuyer.in data + your Q1–Q15 decisions). Changing any of these requires a new strategy version.">
@@ -94,8 +99,9 @@ function LiveServiceCard({ L }) {
   const e = L?.engine;
   const fmt = (v, dp = 2) => (v == null ? "—" : Number(v).toLocaleString("en-IN", { maximumFractionDigits: dp, minimumFractionDigits: dp }));
   return (
-    <Card title="Live server · real Kite data (observe only)" sub="Read-only. LIVE PAPER — NOT ENABLED: the live engine records signals but cannot place paper or real orders." style={{ marginBottom: 12 }}
-      tools={<Badge tone="warn">LIVE PAPER — NOT ENABLED</Badge>}>
+    <Card title={`Live server · real Kite data (${L?.mode === "PAPER" ? "live paper" : "observe only"})`}
+      sub={L?.mode === "PAPER" ? "Read-only status. Paper fills only — no real order can ever be sent." : "Read-only. LIVE PAPER — NOT ENABLED: the live engine records signals but cannot place paper or real orders."} style={{ marginBottom: 12 }}
+      tools={<Badge tone={L?.mode === "PAPER" ? "accent" : "warn"}>{L?.mode === "PAPER" ? `LIVE PAPER · ${L.livePaper === "RUNNING" ? "RUNNING" : "READY · PAUSED"}` : "LIVE PAPER — NOT ENABLED"}</Badge>}>
       {!L ? <div className="na-note">Checking the server…</div> : !L.enabled ? (
         <Reason tone="warn" tag="NOT OBSERVING">{L.reason}</Reason>
       ) : (
@@ -113,8 +119,52 @@ function LiveServiceCard({ L }) {
             ["Gap", e?.gap ? `${e.gap.direction} ${fmt(e.gap.points)} pts · ${fmt(e.gap.pct, 4)}%` : "—"],
             ["Opening range", e?.or ? `${fmt(e.or.low)}–${fmt(e.or.high)} · bands ${fmt(e.or.downsideBand)} / ${fmt(e.or.upsideBand)}` : e ? `${e.orCollected}/31 closes` : "—"],
             ["Stand-down / handover", e?.standDown ? `${e.standDown.reason}${e.handover ? " → Williams" : ""}` : "—"],
-            ["Signal (recorded, not traded)", e?.signal ? `${e.signal.bot} ${e.signal.right} · close ${fmt(e.signal.close)}` : "—"],
+            [L?.mode === "PAPER" ? "Signal" : "Signal (recorded, not traded)", e?.signal ? `${e.signal.bot} ${e.signal.right} · close ${fmt(e.signal.close)}` : "—"],
             ["Would select", e?.wouldSelect ? (e.wouldSelect.ok ? `${e.wouldSelect.tradingsymbol} (exp ${e.wouldSelect.expiry})` : e.wouldSelect.code) : "—"],
+          ]} />
+        </div>
+      )}
+    </Card>
+  );
+}
+
+/** Owner controls for the LIVE PAPER engine on the server. Paper only — there is no order path. */
+function LivePaperControls({ L }) {
+  const [msg, setMsg] = useStateR(null);
+  const [busy, setBusy] = useStateR(false);
+  const paper = L?.enabled && L.mode === "PAPER";
+  const P = L?.paper;
+  const act = async (fn, confirmText) => {
+    if (confirmText && !window.confirm(confirmText)) return;
+    setBusy(true); setMsg(null);
+    const r = await fn();
+    setMsg(r); setBusy(false);
+  };
+  return (
+    <Card title="Live paper engine · server" sub="Real Kite quotes, PAPER fills only — no real Zerodha order can ever be sent" glow style={{ marginBottom: 12 }}
+      tools={<Badge tone={paper ? (L.engine?.engineStatus === "RUNNING" ? "gain" : "accent") : "warn"}>{paper ? (L.engine?.engineStatus ?? "NO ENGINE YET") : "LIVE PAPER — NOT ENABLED"}</Badge>}>
+      {!paper ? <Reason tone="warn" tag="OBSERVE ONLY">The server runs NIFTY ASCENT in observe mode. Live paper mode is switched on separately on the server, only after your approval.</Reason> : (
+        <div className="na-grid na-two" style={{ gap: 16 }}>
+          <div style={{ display: "grid", gap: 8 }}>
+            <button className="na-stop" data-kind="start" disabled={busy} onClick={() => act(() => ascent.liveControl("START"), "START the live PAPER engine for today? It will paper-trade NIFTY ASCENT on real Kite quotes. No real orders are ever placed.")}><Play size={18} weight="fill" />START LIVE PAPER</button>
+            <button className="na-chipbtn" style={{ height: 40, justifyContent: "center" }} disabled={busy} onClick={() => act(() => ascent.liveControl("STOP_ENTRIES"))}><Prohibit size={15} />STOP NEW ENTRIES — keep managing the open position</button>
+            <button className="na-stop" disabled={busy} onClick={() => act(() => ascent.liveControl("KILL"), "KILL / FLATTEN: block entries and close any open PAPER position at the first fresh bid?")}><Skull size={18} weight="fill" />KILL / FLATTEN</button>
+            <button className="na-chipbtn" style={{ height: 34, justifyContent: "center" }} disabled={busy || !P?.killSwitch} onClick={() => act(() => ascent.liveControl("RELEASE"))}><LockOpen size={14} />Release kill switch</button>
+            <button className="na-chipbtn" style={{ height: 38, justifyContent: "center" }} data-on={!!P?.autoStart} disabled={busy}
+              onClick={() => act(() => ascent.setAutoStart(!P?.autoStart), P?.autoStart ? "Turn auto-start OFF? The paper engine will stay PAUSED each day until you press START." : "Turn auto-start ON? From now on the paper engine STARTS automatically each trading day (before 09:15) and paper-trades during market hours. Paper only.")}>
+              <Power size={15} />Auto-start each trading day: <b>{P?.autoStart ? "ON" : "OFF"}</b>
+            </button>
+            {msg && <Reason tone={msg.ok ? "gain" : "loss"} tag={msg.ok ? "OK" : "REFUSED"}>{msg.message}</Reason>}
+          </div>
+          <KV rows={[
+            ["Engine", L.engine ? `${L.engine.engineStatus} · ${L.engine.state.replaceAll("_", " ")}` : "not created yet (08:50 on trading days)"],
+            ["Single-engine lease", P?.leaseOk ? "held by this server" : "NOT held — entries blocked", P?.leaseOk ? undefined : "loss"],
+            ["Database", P?.store?.migrationApplied === false ? "migration NOT applied" : P?.storeOk ? "OK" : `ERROR — ${P?.store?.lastError ?? ""}`, P?.storeOk && P?.store?.migrationApplied !== false ? undefined : "loss"],
+            ["Kill switch", P?.killSwitch ? "ON" : "off", P?.killSwitch ? "loss" : undefined],
+            ["Auto-start", P?.autoStart ? "ON" : "OFF"],
+            ["Entries blocked because", P?.blockedReason ?? "—"],
+            ["Positions today", L.engine ? `${L.engine.positionsToday}/1` : "—"],
+            ["Today's paper trade", L.engine?.trade ? `${L.engine.trade.tradingsymbol} · net ₹${Math.round(L.engine.trade.net)}` : "—"],
           ]} />
         </div>
       )}

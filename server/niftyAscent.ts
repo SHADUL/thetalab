@@ -1,6 +1,10 @@
 /**
- * Wires NIFTY ASCENT's Phase 3 OBSERVE-ONLY live service into the web
- * process. Does nothing unless NIFTY_ASCENT=observe.
+ * Wires the NIFTY ASCENT live service into the web process.
+ *   NIFTY_ASCENT unset  → nothing runs.
+ *   NIFTY_ASCENT=observe → observe only (engine PAUSED, cannot start).
+ *   NIFTY_ASCENT=paper   → live PAPER mode (Phase 4): still starts PAUSED every
+ *                          day; trades paper only after START / owner auto-start;
+ *                          needs the database tables and the single-engine lease.
  *
  *  - Market data: observes ThetaLab's EXISTING shared Kite WebSocket
  *    (server/marketStream.ts) — no new connection, same Kite session.
@@ -16,12 +20,14 @@ import { isTradingDay } from '../src/nifty-alpha-ladder/calendar/signalCalendar.
 import { LiveAscentService, type InstrumentPort } from '../src/nifty-ascent/live/service.ts';
 import type { Instrument } from '../src/nifty-ascent/core/contracts.ts';
 import { ObserveArchive, archiveOptionsFromEnv } from './niftyAscentArchive.ts';
+import { makeAscentStore, type SupabaseAscentStore } from './niftyAscentStore.ts';
 
 const KITE_REST = 'https://api.kite.trade';
 let service: LiveAscentService | null = null;
 let archive: ObserveArchive | null = null;
+let store: SupabaseAscentStore | null = null;
 
-export function getNiftyAscent(): { service: LiveAscentService | null; archive: ObserveArchive | null } { return { service, archive }; }
+export function getNiftyAscent(): { service: LiveAscentService | null; archive: ObserveArchive | null; store: SupabaseAscentStore | null } { return { service, archive, store }; }
 
 function instrumentPort(sb: SupabaseClient<any>): InstrumentPort {
   return {
@@ -52,7 +58,9 @@ function instrumentPort(sb: SupabaseClient<any>): InstrumentPort {
 }
 
 export async function startNiftyAscent(): Promise<void> {
-  if (process.env.NIFTY_ASCENT !== 'observe') return;
+  const flag = process.env.NIFTY_ASCENT;
+  if (flag !== 'observe' && flag !== 'paper') return;
+  const mode = flag === 'paper' ? 'PAPER' as const : 'OBSERVE' as const;
   const url = process.env.SUPABASE_URL, key = process.env.SUPABASE_SERVICE_ROLE_KEY, apiKey = process.env.KITE_API_KEY;
   if (!url || !key || !apiKey) { console.error('[nifty-ascent] not started: Supabase or Kite API key not configured'); return; }
   const sb: SupabaseClient<any> = createClient(url, key, { auth: { persistSession: false } });
@@ -78,7 +86,12 @@ export async function startNiftyAscent(): Promise<void> {
   archive = new ObserveArchive(archiveOptionsFromEnv());
   if (!(await archive.start())) console.error(`[nifty-ascent] archive NOT writable (${archive.status().dir}): ${archive.lastError} — reports only in the log`);
   const a = archive;
+  if (mode === 'PAPER') {
+    store = makeAscentStore();
+    if (!store) { console.error('[nifty-ascent] PAPER mode needs Supabase — not started'); return; }
+  }
   service = new LiveAscentService({
+    mode, store: store ?? undefined, holder: `web-${process.pid}-${Math.random().toString(36).slice(2, 10)}`,
     stream: marketStream,
     fetchData,
     instruments: instrumentPort(sb),
@@ -88,5 +101,7 @@ export async function startNiftyAscent(): Promise<void> {
     recordTick: (row, exchTs) => a.tick(row, exchTs),
   });
   service.start();
-  console.log(`[nifty-ascent] observe-only live data service started (engine PAUSED, no execution) · archive ${JSON.stringify(a.status())}`);
+  console.log(mode === 'PAPER'
+    ? `[nifty-ascent] LIVE PAPER service started (engine PAUSED until START/auto-start; paper fills only — no order code) · archive ${JSON.stringify(a.status())}`
+    : `[nifty-ascent] observe-only live data service started (engine PAUSED, no execution) · archive ${JSON.stringify(a.status())}`);
 }

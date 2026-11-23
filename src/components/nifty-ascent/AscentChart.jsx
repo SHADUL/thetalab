@@ -8,7 +8,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { createChart, CandlestickSeries, LineSeries, createSeriesMarkers, CrosshairMode, LineStyle } from "lightweight-charts";
-import { ascent, S } from "./store.js";
+import { ascent, S, view } from "./store.js";
 import { num, hm } from "./format.js";
 import { barStart } from "../../nifty-ascent/core/rules.ts";
 
@@ -85,7 +85,9 @@ export default function AscentChart({ kind = "index", height = 420, compact = fa
     };
 
     function sync() {
-      const e = S.replay.engine, date = e.date, ov = S.overlays;
+      const e = view(S).engine;
+      if (!e) { main.setData([]); setEmpty(true); return; }
+      const date = e.date, ov = S.overlays;
       if (date !== lastDate) { lastDate = date; lastLen = -1; }
       if (kind === "index") {
         const bars = e.index.bars.filter((b) => b.close != null).map((b) => ({ time: tOf(date, b.label), open: b.open, high: b.high, low: b.low, close: b.close }));
@@ -147,7 +149,7 @@ export default function AscentChart({ kind = "index", height = 420, compact = fa
       if (!lg) return;
       const d = p?.time != null ? p.seriesData?.get(main) : null;
       if (!d) { lg.textContent = ""; return; }
-      const label = Math.round((p.time - IST - barStart(S.replay.engine.date, 0) / 1000) / 60);
+      const label = Math.round((p.time - IST - barStart((view(S).engine ?? S.replay.engine).date, 0) / 1000) / 60);
       lg.textContent = kind === "index"
         ? `${hm(label)} IST · O ${num(d.open, 2)} H ${num(d.high, 2)} L ${num(d.low, 2)} C ${num(d.close, 2)}`
         : `${hm(label)} IST · premium close ₹${num(d.value, 2)}`;

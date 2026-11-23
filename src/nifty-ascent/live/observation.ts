@@ -74,7 +74,7 @@ export class ObservationRecorder {
     };
   }
 
-  report(e: AscentEngine, wouldSelect: ContractSelection | null, adapterStats: unknown, tradeDetection: unknown = null, subscriptions: unknown = null) {
+  report(e: AscentEngine, wouldSelect: ContractSelection | null, adapterStats: unknown, tradeDetection: unknown = null, subscriptions: unknown = null, mode: 'OBSERVE_ONLY' | 'LIVE_PAPER' = 'OBSERVE_ONLY') {
     const perMinute = e.index.bars.map((b) => {
       const l = this.indexLagByMin.get(b.label);
       return [hhmm(b.label), b.close, b.ticks, b.status, l?.n ? Math.round(l.sum / l.n) : null, l?.n ? l.max : null];
@@ -86,7 +86,7 @@ export class ObservationRecorder {
     });
     const w = wouldSelect;
     return {
-      kind: 'NIFTY_ASCENT_OBSERVATION', mode: 'OBSERVE_ONLY', date: e.date, configVersion: e.configVersion,
+      kind: 'NIFTY_ASCENT_OBSERVATION', mode, date: e.date, configVersion: e.configVersion,
       previousSession: { date: e.prev.date, close1515: e.prevClose, bars: e.prevBarsCount },
       reference: e.reference && { price: e.reference.price, exchTs: new Date(e.reference.exchTs).toISOString(), recvLagMs: e.reference.recvTs - e.reference.exchTs },
       gap: e.gap && { points: e.gap.points, pct: Math.round(e.gap.pct * 10_000) / 10_000, direction: e.gap.direction },

@@ -1,5 +1,5 @@
 /** Option Position — the active (or last) paper position in detail. */
-import { useAscent } from "./store.js";
+import { useAscent, view } from "./store.js";
 import { Card, Badge, WsHead, KV, Reason, PnL, Empty, SideBadge } from "./ui.jsx";
 import AscentChart from "./AscentChart.jsx";
 import { premiumNow } from "./derive.js";
@@ -31,7 +31,7 @@ function Ladder({ entry, now, fixed, act, hi, trail }) {
 
 export default function OptionPosition() {
   const S = useAscent();
-  const e = S.replay.engine, now = S.replay.t;
+  const { engine: e, now } = view(S);
   const p = e.position, t = e.trade;
   if (!p && !t) {
     return (

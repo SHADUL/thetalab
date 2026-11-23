@@ -7,6 +7,7 @@ import { useSyncExternalStore } from "react";
 import { FIXTURES } from "../../nifty-ascent/sim/fixtures.ts";
 import { Replay } from "../../nifty-ascent/sim/market.ts";
 import { DEFAULT_EXECUTION, barStart } from "../../nifty-ascent/core/rules.ts";
+import { AscentEngine } from "../../nifty-ascent/core/engine.ts";
 
 export const SPEEDS = [1, 10, 60, 300];
 const listeners = new Set();
@@ -32,7 +33,18 @@ export const S = {
   runs: null,
   /** Live server status (observe-only service). Read-only; null until the first poll. */
   live: null,
+  /** SIMULATION (replay in this browser) or LIVE (read-only mirror of the server engine). Never mixed. */
+  source: prefs.source === "LIVE" ? "LIVE" : "SIMULATION",
+  mirror: null,
+  mirrorError: null,
+  liveHistory: null,
 };
+
+/** The engine and clock the workspaces display: the replay, or the read-only live mirror. */
+export function view(s = S) {
+  if (s.source === "LIVE") return { live: true, engine: s.mirror, now: s.live?.serverTime ?? Date.now() };
+  return { live: false, engine: s.replay.engine, now: s.replay.t };
+}
 
 let lastEmit = 0, pendingEmit = false;
 function emit(force = false) {
@@ -110,26 +122,69 @@ export const ascent = {
     return S.runs.list;
   },
   fixture,
+  setSource(src) {
+    S.source = src === "LIVE" ? "LIVE" : "SIMULATION";
+    if (S.source === "LIVE") S.playing = false;
+    savePrefs({ ...loadPrefs(), source: S.source });
+    if (livePoll) { pollLive(); schedule(); }
+    emit(true);
+  },
+  liveControl: (action) => post("control", { action }),
+  setAutoStart: (enabled) => post("auto-start", { enabled }),
+  async loadLiveHistory() {
+    try {
+      const r = await fetch("/api/nifty-ascent?resource=history", { credentials: "same-origin" });
+      S.liveHistory = r.ok ? await r.json() : { trades: [], reason: `HTTP ${r.status}` };
+    } catch (e) { S.liveHistory = { trades: [], reason: e.message }; }
+    emit(true);
+  },
 };
 
 load(prefs.fixtureId ? "09:14" : "11:45");
 
 /* Live server status — polled every 10 s while the section is open. Never used as replay data. */
 let livePoll = 0;
-async function pollLive() {
+/** Rebuilds a READ-ONLY engine copy from the server snapshot (same restore code as server recovery). */
+function buildMirror(m, serverTime) {
+  if (!m) { S.mirror = null; return; }
   try {
-    const r = await fetch("/api/nifty-ascent?resource=status", { credentials: "same-origin" });
-    S.live = r.ok ? { ...(await r.json()), fetchedAt: Date.now() } : { enabled: false, livePaper: "NOT_ENABLED", reason: `status ${r.status}`, error: true, fetchedAt: Date.now() };
-  } catch (e) {
+    const e = AscentEngine.restore({ date: m.snapshot.date, prev: m.prev, instruments: m.instruments, exec: m.exec, startRunning: false }, m.snapshot, serverTime);
+    e.events.splice(0, e.events.length, ...m.events);
+    for (const q of m.quotes) e.lastQuote.set(q.token, q);
+    S.mirror = e; S.mirrorError = null;
+  } catch (err) { S.mirror = null; S.mirrorError = err.message; }
+}
+let pollBusy = false;
+async function pollLive() {
+  if (pollBusy) return;
+  pollBusy = true;
+  const res = S.source === "LIVE" ? "snapshot" : "status";
+  try {
+    const r = await fetch(`/api/nifty-ascent?resource=${res}`, { credentials: "same-origin" });
+    const j = r.ok ? await r.json() : null;
+    S.live = j ? { ...j, fetchedAt: Date.now() } : { enabled: false, livePaper: "NOT_ENABLED", reason: `status ${r.status}`, error: true, fetchedAt: Date.now() };
+    if (res === "snapshot") buildMirror(j?.mirror ?? null, j?.serverTime ?? Date.now());
+  } catch {
     S.live = { enabled: false, livePaper: "NOT_ENABLED", reason: "status unavailable", error: true, fetchedAt: Date.now() };
-  }
+  } finally { pollBusy = false; }
   emit(true);
+}
+function schedule() {
+  clearInterval(livePoll);
+  livePoll = setInterval(pollLive, S.source === "LIVE" ? 3_000 : 10_000);
 }
 export function startLivePolling() {
   if (livePoll) return () => {};
-  pollLive();
-  livePoll = setInterval(pollLive, 10_000);
+  pollLive(); schedule();
   return () => { clearInterval(livePoll); livePoll = 0; };
+}
+async function post(resource, body) {
+  try {
+    const r = await fetch(`/api/nifty-ascent?resource=${resource}`, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({}));
+    await pollLive();
+    return { ok: r.ok && j.ok !== false, message: j.message ?? j.error ?? `HTTP ${r.status}` };
+  } catch (e) { return { ok: false, message: e.message }; }
 }
 
 export function useAscent() {

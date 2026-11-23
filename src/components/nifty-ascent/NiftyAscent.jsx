@@ -10,7 +10,7 @@ import {
   Play, Pause, ArrowCounterClockwise, Sun, Moon, Lock, FastForward,
 } from "@phosphor-icons/react";
 import "./nifty-ascent.css";
-import { ascent, useAscent, SPEEDS, startLivePolling } from "./store.js";
+import { ascent, useAscent, SPEEDS, startLivePolling, view } from "./store.js";
 import { Pill, AscentGlyph } from "./ui.jsx";
 import { istTime, istDate, hm, BOT_LABEL } from "./format.js";
 import { FIXTURES } from "../../nifty-ascent/sim/fixtures.ts";
@@ -51,10 +51,19 @@ function useTheme() {
   return [theme, setTheme];
 }
 
+/** Live paper status word from the server. */
+function livePaperPill(L) {
+  if (!L || !L.enabled || L.mode !== "PAPER") return { tone: "warn", text: "NOT ENABLED", title: "Live paper execution is not enabled. No paper or real orders are placed." };
+  if (L.livePaper === "RUNNING") return { tone: "gain", text: "RUNNING", title: "Paper engine running on real Kite quotes — paper fills only, never real orders." };
+  return { tone: "accent", text: "READY · PAUSED", title: L.paper?.blockedReason ? `Blocked: ${L.paper.blockedReason}` : "Paper engine ready and PAUSED — it trades only after START or auto-start." };
+}
+
 function Header({ onExit, theme, setTheme }) {
   const S = useAscent();
-  const e = S.replay.engine;
-  const now = S.replay.t;
+  const v = view(S);
+  const e = v.engine ?? S.replay.engine;
+  const now = v.now;
+  const lp = livePaperPill(S.live);
   const open = now >= barStart(e.date, 555) && now < barStart(e.date, 930);
   const L = S.live;
   const st = L?.stream;
@@ -64,7 +73,8 @@ function Header({ onExit, theme, setTheme }) {
     : { tone: undefined, text: "IDLE", title: "The shared Kite stream connects 09:00–15:45 IST on trading days" };
   const liveEng = !L ? { tone: undefined, text: "—", title: "" }
     : !L.enabled ? { tone: "warn", text: "OFF", title: L.reason }
-    : { tone: "warn", text: `PAUSED · OBSERVE${L.engine ? ` · ${L.engine.state.replaceAll("_", " ")}` : ""}`, title: "The live engine observes real NIFTY data and records signals; it cannot place paper or real orders." };
+    : !L.engine ? { tone: undefined, text: "NOT CREATED", title: "The live engine is created from 08:50 on trading days" }
+    : { tone: L.engine.engineStatus === "RUNNING" ? "gain" : "warn", text: `${L.engine.engineStatus.replace("_", " ")}${L.mode === "PAPER" ? "" : " · OBSERVE"}`, title: L.mode === "PAPER" ? "Live PAPER engine — paper fills only, never real orders." : "The live engine observes real NIFTY data and records signals; it cannot place paper or real orders." };
   const stTone = e.state === "DATA_ERROR" ? "loss" : e.state === "POSITION_OPEN" || e.state === "EXIT_PENDING" ? "gain" : e.state.includes("ARMED") ? "accent" : undefined;
   return (
     <header className="na-header">
@@ -81,13 +91,15 @@ function Header({ onExit, theme, setTheme }) {
         </div>
       </div>
       <div className="na-pills" role="status" aria-live="off">
-        <Pill k="Replay data" tone="warn" title="Every price on these screens comes from a synthetic replay fixture — not market data">SIMULATION</Pill>
-        <Pill k="Live paper" tone="warn" title="Live paper execution is not enabled. No paper or real orders are placed."><Lock size={10} weight="bold" style={{ marginRight: 3, verticalAlign: -1 }} />NOT ENABLED</Pill>
+        {v.live
+          ? <Pill k="Showing" tone="accent" title="Real NIFTY data from the server engine (read-only)">LIVE · REAL DATA</Pill>
+          : <Pill k="Showing" tone="warn" title="Every price on these screens comes from a synthetic replay fixture — not market data">SIMULATION</Pill>}
+        <Pill k="Live paper" tone={lp.tone} title={lp.title}><Lock size={10} weight="bold" style={{ marginRight: 3, verticalAlign: -1 }} />{lp.text}</Pill>
         <Pill k="Kite feed" tone={kite.tone} live={kite.live} title={kite.title}>{kite.text}</Pill>
         <Pill k="Live engine" tone={liveEng.tone} title={liveEng.title}>{liveEng.text}</Pill>
-        <Pill k="Replay" optional tone={open ? "gain" : undefined} live={open && S.playing}>{open ? "SESSION" : now < barStart(e.date, 555) ? "PRE-OPEN" : "CLOSED"} · engine {e.engineStatus.replace("_", " ").toLowerCase()}</Pill>
-        <Pill k="State" tone={stTone}>{e.state.replaceAll("_", " ")}</Pill>
-        <Pill k="Bot" optional tone={e.activeBot === "WILLIAMS" ? "accent" : undefined}>{e.activeBot ? BOT_LABEL[e.activeBot] : "—"}</Pill>
+        {!v.live && <Pill k="Replay" optional tone={open ? "gain" : undefined} live={open && S.playing}>{open ? "SESSION" : now < barStart(e.date, 555) ? "PRE-OPEN" : "CLOSED"} · engine {e.engineStatus.replace("_", " ").toLowerCase()}</Pill>}
+        {(!v.live || v.engine) && <Pill k="State" tone={stTone}>{e.state.replaceAll("_", " ")}</Pill>}
+        {(!v.live || v.engine) && <Pill k="Bot" optional tone={e.activeBot === "WILLIAMS" ? "accent" : undefined}>{e.activeBot ? BOT_LABEL[e.activeBot] : "—"}</Pill>}
         <Pill k="Session" optional>{istDate(now)} · {istTime(now)} IST</Pill>
       </div>
       <button className="na-icon-btn" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}>
@@ -99,6 +111,44 @@ function Header({ onExit, theme, setTheme }) {
 
 const JUMPS = ["09:14", "09:46", "10:30", "12:00", "14:29", "15:15"];
 
+function SourceSwitch() {
+  const S = useAscent();
+  return (
+    <div className="na-seg" role="group" aria-label="Data source">
+      <button data-on={S.source === "SIMULATION"} onClick={() => ascent.setSource("SIMULATION")} title="Deterministic replay in this browser">Simulation</button>
+      <button data-on={S.source === "LIVE"} onClick={() => ascent.setSource("LIVE")} title="Read-only view of the server engine on real Kite data">Live paper</button>
+    </div>
+  );
+}
+
+function LiveBand() {
+  const S = useAscent();
+  const L = S.live, lp = livePaperPill(L);
+  return (
+    <div className="na-simband na-liveband" data-down={!L?.enabled} role="note">
+      <span className="na-simtag na-livetag">{L?.mode === "PAPER" ? "LIVE PAPER" : "LIVE · OBSERVE"}</span>
+      <span className="na-long">Real NIFTY data from the shared Kite stream · {L?.mode === "PAPER" ? <>paper fills only — <b>no real order can ever be sent</b></> : <><b>LIVE PAPER — NOT ENABLED</b> (observe only)</>} · status: <b>{lp.text}</b>{L?.date ? <> · session {L.date}</> : null}</span>
+      <span className="na-short">Real data · <b>{lp.text}</b></span>
+      <span className="n na-muted">{L?.serverTime ? `${istTime(L.serverTime)} IST` : ""}</span>
+      <div className="na-simctl"><SourceSwitch /></div>
+    </div>
+  );
+}
+
+function LiveEmpty() {
+  const S = useAscent();
+  const L = S.live;
+  return (
+    <div className="na-card" style={{ padding: 22 }}>
+      <div className="na-ws-title" style={{ fontSize: 16 }}>No live engine to show yet</div>
+      <div className="na-note" style={{ marginTop: 6 }}>
+        {!L ? "Contacting the server…" : !L.enabled ? L.reason : S.mirrorError ? `Live view unavailable: ${S.mirrorError}` : "The live engine is created from 08:50 IST on trading days. Switch to Simulation to explore the strategy with replay data."}
+      </div>
+      <div style={{ marginTop: 12 }}><SourceSwitch /></div>
+    </div>
+  );
+}
+
 function SimBand() {
   const S = useAscent();
   const f = ascent.fixture();
@@ -109,6 +159,7 @@ function SimBand() {
       <span className="na-short">Synthetic data — <b>not market data</b></span>
       <span className="n na-muted">SIM {istTime(S.replay.t)} IST</span>
       <div className="na-simctl">
+        <SourceSwitch />
         <select className="na-chipbtn" aria-label="Replay fixture" value={S.fixtureId} onChange={(ev) => ascent.select(ev.target.value)} style={{ maxWidth: 280 }} title={f.summary}>
           {FIXTURES.map((x) => <option key={x.id} value={x.id}>{x.date.slice(5)} · {x.title}</option>)}
         </select>
@@ -131,7 +182,7 @@ function SimBand() {
 
 function Rail({ tab, go }) {
   const S = useAscent();
-  const e = S.replay.engine;
+  const e = view(S).engine ?? S.replay.engine;
   return (
     <nav className="na-rail" aria-label="NIFTY ASCENT workspaces">
       <div className="lbl na-rail-label">Workspaces</div>
@@ -189,19 +240,22 @@ export default function NiftyAscent({ onExit }) {
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+  const S = useAscent();
   const W = WORKSPACES.find((w) => w.id === tab) ?? WORKSPACES[0];
   const C = W.C;
+  const needsEngine = !["trade-journal", "analytics", "risk-settings"].includes(W.id);
+  const showEmpty = S.source === "LIVE" && !S.mirror && needsEngine;
   return (
     <div className="na-root" ref={rootRef}>
       <div className="na-top" ref={topRef}>
         <Header onExit={onExit} theme={theme} setTheme={setTheme} />
-        <SimBand />
+        {S.source === "LIVE" ? <LiveBand /> : <SimBand />}
       </div>
       <div className="na-shell">
         <Rail tab={tab} go={go} />
         <main className="na-main" id="na-main">
           <Suspense fallback={<div className="skeleton" style={{ height: 420, borderRadius: 14 }} />}>
-            <div className="na-ws" key={tab}><C go={go} /></div>
+            <div className="na-ws" key={`${tab}-${S.source}`}>{showEmpty ? <LiveEmpty /> : <C go={go} />}</div>
           </Suspense>
         </main>
       </div>

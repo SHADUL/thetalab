@@ -1,5 +1,5 @@
 /** Command Center — the flagship NIFTY ASCENT dashboard. */
-import { useAscent, ascent } from "./store.js";
+import { useAscent, ascent, view } from "./store.js";
 import { Card, Kpi, Badge, PnL, SideBadge, Timeline, WsHead, KV, Reason, Check } from "./ui.jsx";
 import AscentChart, { OverlayToggles } from "./AscentChart.jsx";
 import { flow, FLOW_TITLES, explain, nextAction, lastIndex, positionPnl } from "./derive.js";
@@ -55,13 +55,13 @@ export function DecisionPanel({ e, now }) {
 
 export default function CommandCenter() {
   const S = useAscent();
-  const e = S.replay.engine, now = S.replay.t;
+  const { engine: e, now, live } = view(S);
   const ix = lastIndex(e);
   const pnl = e.trade ? e.trade.net : positionPnl(e)?.gross ?? null;
   const f = ascent.fixture();
   return (
     <>
-      <WsHead title="Command Center" desc={<>Fixture <b>{f.title}</b> — {f.summary}</>} />
+      <WsHead title="Command Center" desc={live ? <>LIVE PAPER view — real NIFTY data from the server engine (read-only mirror). Session {e.date}.</> : <>Fixture <b>{f.title}</b> — {f.summary}</>} />
       <div className="na-grid na-kpis10" style={{ marginBottom: 12 }}>
         <Kpi label="NIFTY" value={ix ? num(ix.price, 2) : "—"} sub={ix ? `${ix.forming ? "forming" : "last close"} · ${istTime(ix.ts)}` : "waiting"} />
         <Kpi label="Prev 15:15 close" value={num(e.prevClose, 2)} sub={`${e.prev.date} · bar 15:15`} />

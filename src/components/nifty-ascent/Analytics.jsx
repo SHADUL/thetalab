@@ -1,5 +1,5 @@
 /** Analytics — computed only from recorded sessions; sources never mixed. */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useAscent, ascent } from "./store.js";
 import { Card, Kpi, WsHead, PnL, Spark, Badge } from "./ui.jsx";
 import { num, pct, dur, BOT_LABEL, EXIT_LABEL, REASON_LABEL } from "./format.js";
@@ -52,8 +52,8 @@ export default function Analytics() {
           {[["REPLAY", "Replay (simulation)"], ["LIVE", "Live paper"], ["HIST", "Historical research"]].map(([k, l]) => <button key={k} data-on={source === k} onClick={() => setSource(k)}>{l}</button>)}
         </div>
       </WsHead>
-      {source !== "REPLAY" ? (
-        <Card><div className="na-note" style={{ padding: 18 }}>{source === "LIVE" ? "No live paper sessions recorded yet (Phase 3–4, after your approval)." : "Historical research mode is optional and not built. It would replay real NIFTY 1-minute history for the signal side; option premiums would be modelled and labelled as such."} No numbers are shown rather than invented ones.</div></Card>
+      {source === "LIVE" ? <LiveAnalytics /> : source !== "REPLAY" ? (
+        <Card><div className="na-note" style={{ padding: 18 }}>Historical research mode is optional and not built. It would replay real NIFTY 1-minute history for the signal side; option premiums would be modelled and labelled as such. No numbers are shown rather than invented ones.</div></Card>
       ) : (
         <>
           <div className="na-banner" style={{ marginBottom: 12 }}><Badge tone="warn">SIMULATION</Badge><span>These figures come from {sessions.length} hand-built fixture sessions designed to exercise each rule. They say nothing about how the strategy performs on real markets.</span></div>
@@ -91,6 +91,28 @@ export default function Analytics() {
           </div>
         </>
       )}
+    </>
+  );
+}
+
+/** LIVE PAPER statistics from the server's filled paper trades only. */
+function LiveAnalytics() {
+  const S = useAscent();
+  useEffect(() => { ascent.loadLiveHistory(); }, []);
+  const trades = [...(S.liveHistory?.trades ?? [])].sort((a, b) => a.date.localeCompare(b.date));
+  const s = stats(trades);
+  if (!trades.length) return <Card><div className="na-note" style={{ padding: 18 }}>{S.liveHistory ? "No live paper trades recorded yet. Statistics appear once real paper trades exist — none are invented." : "Loading…"}</div></Card>;
+  return (
+    <>
+      <div className="na-banner" data-tone="accent" style={{ marginBottom: 12 }}><Badge tone="accent">LIVE PAPER</Badge><span>{trades.length} paper trade(s) on real Kite data. A small sample says little about long-run performance.</span></div>
+      <div className="na-grid na-kpis" style={{ marginBottom: 12 }}>
+        <Kpi label="Paper trades" value={s.n} /><Kpi label="Win rate" value={s.win == null ? "—" : pct(s.win, 0, { sign: false })} />
+        <Kpi label="Gross P&L" value={<PnL value={s.gross} />} /><Kpi label="Net P&L" value={<PnL value={s.net} />} />
+        <Kpi label="Avg winner / loser" value={<><PnL value={s.avgW} /> <span className="na-faint">/</span> <PnL value={s.avgL} /></>} />
+        <Kpi label="Profit factor" value={s.pf == null ? "—" : num(s.pf, 2)} /><Kpi label="Max drawdown" value={<PnL value={s.dd} />} />
+        <Kpi label="Avg holding" value={s.hold == null ? "—" : dur(Math.round(s.hold))} />
+      </div>
+      <Card title="Equity curve (net, live paper)"><Spark values={s.curve} height={150} baseline={0} color={s.net >= 0 ? "var(--c-gain)" : "var(--c-loss)"} /></Card>
     </>
   );
 }

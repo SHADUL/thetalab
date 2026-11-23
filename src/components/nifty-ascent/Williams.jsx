@@ -1,5 +1,5 @@
 /** Williams workspace — the conditional backup bot. */
-import { useAscent } from "./store.js";
+import { useAscent, view } from "./store.js";
 import { Card, Badge, WsHead, KV, Reason, SideBadge } from "./ui.jsx";
 import { lastIndex } from "./derive.js";
 import { num, pct, hm, istTime, dur, REASON_LABEL } from "./format.js";
@@ -13,7 +13,7 @@ function bucket(e) {
 
 export default function Williams() {
   const S = useAscent();
-  const e = S.replay.engine, now = S.replay.t;
+  const { engine: e, now } = view(S);
   const w = e.williams, px = lastIndex(e)?.price;
   const armed = e.state === "WILLIAMS_ARMED";
   const active = !!e.handover;

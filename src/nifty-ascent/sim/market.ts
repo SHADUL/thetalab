@@ -136,7 +136,7 @@ export interface ReplayOptions { exec?: ExecutionSettings; startRunning?: boolea
  */
 export class Replay {
   readonly sc: Scenario;
-  readonly engine: AscentEngine;
+  engine: AscentEngine;
   readonly path: Float64Array;
   readonly instruments: Instrument[];
   readonly startMs: number;

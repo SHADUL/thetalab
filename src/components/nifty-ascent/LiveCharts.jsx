@@ -1,5 +1,5 @@
 /** Live Charts — NIFTY and the traded option's premium, 1-minute. */
-import { useAscent } from "./store.js";
+import { useAscent, view } from "./store.js";
 import { Card, Kpi, WsHead, Badge } from "./ui.jsx";
 import AscentChart, { OverlayToggles } from "./AscentChart.jsx";
 import { lastIndex, premiumNow } from "./derive.js";
@@ -7,7 +7,7 @@ import { num, pct, secs, istTime } from "./format.js";
 
 export default function LiveCharts() {
   const S = useAscent();
-  const e = S.replay.engine, now = S.replay.t;
+  const { engine: e, now } = view(S);
   const ix = lastIndex(e);
   const q = premiumNow(e);
   const p = e.position, t = e.trade;

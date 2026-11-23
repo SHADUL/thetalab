@@ -285,10 +285,16 @@ export function useAscent() {
   return S;
 }
 
-/** The current IST month and the five before it (YYYY-MM), newest first. */
-export function lastMonths(n = 6) {
+/** Earliest backtest month (NIFTY weekly expiries are Tuesdays and the lot is 65 throughout 2026). */
+export const BACKTEST_FIRST_MONTH = "2026-01";
+/** Backtest months from the current IST month back to BACKTEST_FIRST_MONTH (YYYY-MM), newest first. */
+export function lastMonths(first = BACKTEST_FIRST_MONTH) {
   const d = new Date(Date.now() + 330 * 60_000);
   const out = [];
-  for (let i = 0; i < n; i++) { const x = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - i, 1)); out.push(x.toISOString().slice(0, 7)); }
+  for (let i = 0; i < 120; i++) {
+    const m = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - i, 1)).toISOString().slice(0, 7);
+    if (m < first) break;
+    out.push(m);
+  }
   return out;
 }

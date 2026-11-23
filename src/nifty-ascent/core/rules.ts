@@ -48,6 +48,17 @@ export interface ResearchRules {
   readonly maxPositionsPerDay: number;
   /** Q9: on expiry day use the next listed expiry (provisional research convention). */
   readonly expiryDayUsesNextExpiry: boolean;
+  /**
+   * BACKTEST VARIANTS ONLY — absent from RESEARCH_RULES_V1, so live paper is
+   * unaffected. Skip the whole day (both bots) when the 09:15–09:45 opening
+   * range is narrower than this many index points.
+   */
+  readonly minOrWidth?: number;
+  /**
+   * BACKTEST VARIANTS ONLY — when the nearest listed expiry is this many
+   * calendar days away or fewer (but not today), trade the next listed expiry.
+   */
+  readonly rollExpiryWithinDays?: number;
 }
 
 export const RESEARCH_RULES_V1: ResearchRules = Object.freeze({
@@ -71,6 +82,18 @@ export const RESEARCH_RULES_V1: ResearchRules = Object.freeze({
   maxPositionsPerDay: 1,
   expiryDayUsesNextExpiry: true,
 });
+
+/** Backtest-only rule variant on top of V1. Never used by live paper. */
+export interface RuleVariant { minOrWidth: number; rollExpiryWithinDays: number }
+export const NO_VARIANT: RuleVariant = Object.freeze({ minOrWidth: 0, rollExpiryWithinDays: 0 });
+
+/** V1 plus the variant; returns V1 itself when nothing is switched on. */
+export function variantRules(v: RuleVariant): ResearchRules {
+  const or = v.minOrWidth > 0 ? v.minOrWidth : 0, roll = v.rollExpiryWithinDays > 0 ? v.rollExpiryWithinDays : 0;
+  if (!or && !roll) return RESEARCH_RULES_V1;
+  const tag = [or ? `OR${or}` : '', roll ? `ROLL${roll}` : ''].filter(Boolean).join('+');
+  return Object.freeze({ ...RESEARCH_RULES_V1, version: `${RESEARCH_RULES_V1.version}+${tag}`, ...(or ? { minOrWidth: or } : {}), ...(roll ? { rollExpiryWithinDays: roll } : {}) });
+}
 
 /** Adjustable execution / risk settings (Q13 defaults). Not research rules. */
 export interface ExecutionSettings {

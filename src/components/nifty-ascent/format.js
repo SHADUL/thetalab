@@ -48,6 +48,7 @@ export const REASON_LABEL = {
   filled: "filled — the gap had already filled",
   no_break: "no_break — no breakout by 12:00",
   no_gap: "no_gap — zero gap (no direction)",
+  narrow_or: "Skipped — opening range below the variant minimum",
   williams_gap_ineligible: "Williams forbidden — gap in [0.2%, 0.5%)",
   williams_no_trigger: "Williams — no level broke by 14:29",
   entry_rejected: "Entry rejected",

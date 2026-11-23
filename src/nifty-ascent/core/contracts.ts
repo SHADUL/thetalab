@@ -76,7 +76,9 @@ export function selectContract(instruments: Instrument[], date: string, right: R
   let expiry = expiries[0];
   let expiryRolled = false;
   if (expiry === date && rules.expiryDayUsesNextExpiry) { expiry = expiries[1]; expiryRolled = true; }
-  if (!expiry) return { ok: false, code: 'expiry_missing', detail: expiryRolled ? `expiry day ${date}: no next listed NIFTY expiry` : 'no listed NIFTY expiry on or after today' };
+  // Backtest variant only (absent from V1): roll when expiry is ≤ N calendar days away.
+  else if (expiry && rules.rollExpiryWithinDays && Math.round((Date.parse(`${expiry}T00:00:00Z`) - Date.parse(`${date}T00:00:00Z`)) / 864e5) <= rules.rollExpiryWithinDays) { expiry = expiries[1]; expiryRolled = true; }
+  if (!expiry) return { ok: false, code: 'expiry_missing', detail: expiryRolled ? `${date}: nearest expiry rolled but no next listed NIFTY expiry` : 'no listed NIFTY expiry on or after today' };
   const chain = instruments.filter((i) => i.expiry === expiry && i.right === right);
   const step = strikeStep(chain.map((i) => i.strike), reference);
   if (step == null) return { ok: false, code: 'contract_missing', detail: `no listed ${right} strikes near ${reference} for ${expiry}` };

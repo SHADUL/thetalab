@@ -7,7 +7,7 @@ import { useSyncExternalStore } from "react";
 import { FIXTURES } from "../../nifty-ascent/sim/fixtures.ts";
 import { Replay } from "../../nifty-ascent/sim/market.ts";
 import { histReplay } from "../../nifty-ascent/sim/historical.ts";
-import { DEFAULT_EXECUTION, LIVE_PAPER_EXECUTION, barStart } from "../../nifty-ascent/core/rules.ts";
+import { DEFAULT_EXECUTION, LIVE_PAPER_EXECUTION, NO_VARIANT, RESEARCH_RULES_V1, variantRules, barStart } from "../../nifty-ascent/core/rules.ts";
 import { AscentEngine } from "../../nifty-ascent/core/engine.ts";
 
 export const SPEEDS = [1, 10, 60, 300];
@@ -42,7 +42,9 @@ export const S = {
   /** SIMULATION (replay in this browser) or LIVE (read-only mirror of the server engine). Never mixed. */
   source: initialSource,
   /** BACKTEST: real NIFTY 1-minute data (Kite) with MODELLED option prices. Never mixed with sim or live. */
-  bt: { month: null, days: [], daysError: null, loadingDays: false, date: null, data: null, loading: false, error: null, results: {}, running: false, progress: null },
+  bt: { month: null, days: [], daysError: null, loadingDays: false, date: null, data: null, loading: false, error: null, results: {}, running: false, progress: null,
+    /** Backtest-only rule variant (OFF = locked V1 rules). `baseline` holds V1 results for the same days when a variant is on. */
+    variant: cleanVariant(prefs.btVariant), baseline: {} },
   mirror: null,
   mirrorError: null,
   liveHistory: null,
@@ -72,7 +74,7 @@ const hmToMs = (hm) => { const [h, m] = hm.split(":").map(Number); return barSta
 
 /** The replay being shown: a real historical day in BACKTEST (when loaded), otherwise the synthetic fixture. */
 function factory() {
-  if (S.source === "BACKTEST" && S.bt.data) return histReplay(S.bt.data, { exec: S.exec, startRunning: true });
+  if (S.source === "BACKTEST" && S.bt.data) return histReplay(S.bt.data, { exec: S.exec, rules: btRules(), startRunning: true });
   return new Replay(fixture(), { exec: S.exec, startRunning: true });
 }
 function load(jump) {
@@ -88,6 +90,14 @@ async function getJson(url) {
 }
 /** Execution settings used for BACKTEST runs, whichever source is on screen. */
 export const btExec = () => (S.source === "BACKTEST" ? S.exec : S.execBySource.BACKTEST ?? defaultExec("BACKTEST"));
+function cleanVariant(v) {
+  const n = (x, max) => (Number.isFinite(+x) && +x > 0 ? Math.min(max, Math.round(+x)) : 0);
+  return { minOrWidth: n(v?.minOrWidth, 500), rollExpiryWithinDays: n(v?.rollExpiryWithinDays, 6) };
+}
+/** Research rules used by BACKTEST: locked V1, or V1 plus the backtest-only variant. Live paper never reads this. */
+export const btRules = () => variantRules(S.bt.variant);
+export const btVariantOn = () => btRules() !== RESEARCH_RULES_V1;
+const runDay = (h, rules) => summarise(histReplay(h, { exec: btExec(), rules, startRunning: true }).runToEnd());
 function histDay(h) {
   if (h?.kind !== "NIFTY_ASCENT_HIST_DAY" || !Array.isArray(h.bars)) throw new Error("the server did not return backtest data for this day");
   return h;
@@ -149,10 +159,10 @@ export const ascent = {
     S.execVersion++;
     const t = S.replay.t;
     load(); S.replay.stepTo(t);
-    S.runs = null; S.bt.results = {};
+    S.runs = null; S.bt.results = {}; S.bt.baseline = {};
     emit(true);
   },
-  resetExec() { S.exec = defaultExec(S.source); S.execVersion++; const t = S.replay.t; load(); S.replay.stepTo(t); S.runs = null; S.bt.results = {}; emit(true); },
+  resetExec() { S.exec = defaultExec(S.source); S.execVersion++; const t = S.replay.t; load(); S.replay.stepTo(t); S.runs = null; S.bt.results = {}; S.bt.baseline = {}; emit(true); },
   runs() {
     if (!S.runs || S.runs.execVersion !== S.execVersion) computeRuns();
     return S.runs.list;
@@ -208,7 +218,8 @@ export const ascent = {
       try {
         const h = histDay(await getJson(`/api/nifty-ascent?resource=hist-day&date=${date}`));
         const d = S.bt.days.find((x) => x.date === date); if (d) d.cached = true;
-        S.bt.results = { ...S.bt.results, [date]: summarise(histReplay(h, { exec: btExec(), startRunning: true }).runToEnd()) };
+        S.bt.results = { ...S.bt.results, [date]: runDay(h, btRules()) };
+        if (btVariantOn()) S.bt.baseline = { ...S.bt.baseline, [date]: runDay(h, RESEARCH_RULES_V1) };
       } catch (e) {
         S.bt.results = { ...S.bt.results, [date]: { error: e.message } };
       }
@@ -220,8 +231,22 @@ export const ascent = {
   },
   btStop() { S.bt.running = false; emit(true); },
   btRecordCurrent() {
-    if (S.source === "BACKTEST" && S.bt.data && S.replay.done) { S.bt.results = { ...S.bt.results, [S.bt.date]: summarise(S.replay.engine) }; emit(true); }
+    if (S.source === "BACKTEST" && S.bt.data && S.replay.done) {
+      S.bt.results = { ...S.bt.results, [S.bt.date]: summarise(S.replay.engine) };
+      if (btVariantOn() && !S.bt.baseline[S.bt.date]) S.bt.baseline = { ...S.bt.baseline, [S.bt.date]: runDay(S.bt.data, RESEARCH_RULES_V1) };
+      emit(true);
+    }
   },
+  /** Switch the backtest-only rule variant. Clears backtest results; never touches live paper. */
+  btSetVariant(patch) {
+    if (S.bt.running) return;
+    S.bt.variant = cleanVariant({ ...S.bt.variant, ...patch });
+    S.bt.results = {}; S.bt.baseline = {};
+    savePrefs({ ...loadPrefs(), btVariant: S.bt.variant });
+    if (S.source === "BACKTEST") { S.playing = false; load("09:14"); }
+    emit(true);
+  },
+  btResetVariant() { ascent.btSetVariant({ ...NO_VARIANT }); },
   liveControl: (action) => post("control", { action }),
   setAutoStart: (enabled) => post("auto-start", { enabled }),
   async loadLiveHistory() {

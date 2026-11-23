@@ -6,7 +6,7 @@
  * profitability. Same scenario + same seed ⇒ identical event stream.
  */
 import { black76 } from '../../quant/pricing/black76.ts';
-import { barStart, istMidnight, SESSION_FIRST_BAR, type ExecutionSettings } from '../core/rules.ts';
+import { barStart, istMidnight, SESSION_FIRST_BAR, type ExecutionSettings, type ResearchRules } from '../core/rules.ts';
 import { AscentEngine, type Instrument, type PrevSession } from '../core/engine.ts';
 
 export interface Scenario {
@@ -129,6 +129,8 @@ export function simInstruments(sc: Scenario): Instrument[] {
 
 export interface ReplayOptions {
   exec?: ExecutionSettings;
+  /** Research-rule override for backtest experiments only (live always uses RESEARCH_RULES_V1). */
+  rules?: ResearchRules;
   startRunning?: boolean;
   /** Replay real data instead of a synthetic scenario path (historical backtest). */
   data?: { path: Float64Array; prev: PrevSession; instruments: Instrument[] };
@@ -158,7 +160,7 @@ export class Replay {
     this.path = o.data?.path ?? indexPath(sc);
     this.instruments = o.data?.instruments ?? simInstruments(sc);
     this.byToken = new Map(this.instruments.map((i) => [i.token, i]));
-    this.engine = new AscentEngine({ date: sc.date, prev: o.data?.prev ?? prevSession(sc), instruments: this.instruments, exec: o.exec, startRunning: o.startRunning ?? true });
+    this.engine = new AscentEngine({ date: sc.date, prev: o.data?.prev ?? prevSession(sc), instruments: this.instruments, rules: o.rules, exec: o.exec, startRunning: o.startRunning ?? true });
     this.startMs = barStart(sc.date, 9 * 60 + 10);
     this.endMs = barStart(sc.date, 15 * 60 + 31);
     this.t = this.startMs;

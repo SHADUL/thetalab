@@ -34,7 +34,7 @@ export type State =
 export type Bot = 'GAP_AND_GO' | 'WILLIAMS';
 export type StandDown = 'opposite_first' | 'filled' | 'no_break';
 export type NoTradeReason =
-  | 'no_gap' | 'no_break' | 'williams_gap_ineligible' | 'williams_no_trigger' | 'entry_rejected' | 'data_error' | 'killed';
+  | 'no_gap' | 'no_break' | 'narrow_or' | 'williams_gap_ineligible' | 'williams_no_trigger' | 'entry_rejected' | 'data_error' | 'killed';
 export type ExitReason = 'FIXED_STOP' | 'TRAILING_STOP' | 'TIME_EXIT' | 'KILL_FLATTEN';
 export type EngineStatus = 'PAUSED' | 'RUNNING' | 'ENTRIES_STOPPED' | 'KILLED';
 export type EventKind = 'TRANSITION' | 'DATA' | 'ORDER' | 'FILL' | 'RISK' | 'CONTROL' | 'SIGNAL' | 'STOP';
@@ -452,6 +452,11 @@ export class AscentEngine {
           reason: `31 closes 09:15–09:45: high ${this.or.high}, low ${this.or.low}, width ${r2(this.or.width)}; bands ${this.or.upsideBand.toFixed(2)} / ${this.or.downsideBand.toFixed(2)}`,
           levels: this.levelsNow() });
         if (!this.gap) { this.dataError(bar.label, 'gap could not be measured (no valid 09:15 reference or previous close)'); return; }
+        // Backtest variant only (absent from V1): skip narrow-range days, both bots.
+        if (R.minOrWidth && this.gap.direction !== 'NONE' && this.or.width < R.minOrWidth) {
+          this.noTrade('narrow_or', `opening range ${r2(this.or.width)} pts < ${R.minOrWidth} pts minimum (rules ${R.version}) — no trade today`, bar.label);
+          return;
+        }
         if (this.gap.direction !== 'NONE') {
           this.activeBot = 'GAP_AND_GO';
           this.go('GAP_GO_ARMED', 'opening_range_final', `gap ${this.gap.direction}: watching ${this.gap.direction === 'UP' ? `close > ${this.or.upsideBand.toFixed(2)} (CE)` : `close < ${this.or.downsideBand.toFixed(2)} (PE)`} from 09:46 to 12:00`, bar.label);
@@ -546,7 +551,7 @@ export class AscentEngine {
       signalBar: bar.label, windowStart: ws, windowEnd: ws + 60_000, status: 'PENDING', late: false, skipped: {},
     };
     this.pendingInstrument = inst;
-    this.go('ENTRY_PENDING', 'order_created', `BUY ${this.exec.lots} lot ${inst.tradingsymbol} (strike ${strike}, ${sel.itmPoints.toFixed(2)} pts ITM, expiry ${expiry}${sel.expiryRolled ? ' — expiry-day roll, PROVISIONAL Q9 convention' : ''}) at the first fresh ask in ${hhmm(bar.label + 1)}`, bar.label);
+    this.go('ENTRY_PENDING', 'order_created', `BUY ${this.exec.lots} lot ${inst.tradingsymbol} (strike ${strike}, ${sel.itmPoints.toFixed(2)} pts ITM, expiry ${expiry}${sel.expiryRolled ? (this.rules.rollExpiryWithinDays ? ` — rolled to the next expiry (rules ${this.rules.version})` : ' — expiry-day roll, PROVISIONAL Q9 convention') : ''}) at the first fresh ask in ${hhmm(bar.label + 1)}`, bar.label);
     this.log({ kind: 'ORDER', bar: bar.label, bot, trigger: 'entry_order', reason: `paper BUY ${inst.tradingsymbol} × ${inst.lotSize * this.exec.lots}`, prices: { signalClose: sig.close, strike } });
     // A quote already observed may fill only if it is inside the window and fresh now.
     const q = this.lastQuote.get(inst.token);

@@ -14,21 +14,67 @@ services:
     # NIFTY ASCENT observe-only archive: persists across deploys (outside /opt/thetalab/app).
     volumes:
       - ./data/nifty-ascent:/data/nifty-ascent
-    networks: [apex]
+    networks: [apex, thetalab_internal]
 
   # The Alpha Ladder worker. Behind a profile so it never starts by accident
   # while the Railway worker is still running (two workers would both write
   # the same health/checkpoint rows). Start with: --profile worker up -d
   thetalab-worker:
     container_name: thetalab-worker
-    image: thetalab:latest
+    # Pinned image so recreating the worker (e.g. for new env settings) never changes its code.
+    image: ${THETALAB_WORKER_IMAGE:-thetalab:latest}
     restart: unless-stopped
     env_file: .env
     command: ["node", "--experimental-strip-types", "--no-warnings", "src/nifty-alpha-ladder/worker/main.ts"]
     profiles: [worker]
-    networks: [apex]
+    networks: [apex, thetalab_internal]
+
+  # ── Self-hosted ThetaLab database (replaces Supabase). Private network only: no published ports. ──
+  thetalab-db:
+    container_name: thetalab-db
+    image: postgres:17-alpine
+    restart: unless-stopped
+    env_file: db.env
+    shm_size: 256mb
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d thetalab"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [thetalab_internal]
+
+  # PostgREST: the same REST API Supabase serves, so supabase-js works unchanged.
+  thetalab-rest:
+    container_name: thetalab-rest
+    image: postgrest/postgrest:v12.2.12
+    restart: unless-stopped
+    env_file: db.env
+    environment:
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_DB_EXTRA_SEARCH_PATH: public,extensions
+      PGRST_DB_MAX_ROWS: "1000"
+      PGRST_DB_POOL: "20"
+    depends_on:
+      thetalab-db: { condition: service_healthy }
+    networks: [thetalab_internal]
+
+  # Maps supabase-js's /rest/v1/* paths onto PostgREST.
+  thetalab-dbapi:
+    container_name: thetalab-dbapi
+    image: caddy:2.8
+    restart: unless-stopped
+    volumes:
+      - ./db/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on: [thetalab-rest]
+    networks: [thetalab_internal]
 
 networks:
   apex:
     external: true
     name: apex_default
+  thetalab_internal:
+    internal: true

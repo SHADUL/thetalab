@@ -1,0 +1,10 @@
+# Internal-only gateway: supabase-js calls <SUPABASE_URL>/rest/v1/<table>; PostgREST serves /<table>.
+# No published port — reachable only on the private thetalab_internal Docker network.
+:8080 {
+	handle_path /rest/v1/* {
+		reverse_proxy thetalab-rest:3000
+	}
+	handle {
+		respond "not found" 404
+	}
+}

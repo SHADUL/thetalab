@@ -88,9 +88,9 @@ test('restart recovery: a new process resumes the open paper position from the d
   const a = new LiveAscentService(deps(store, 'A'));
   await run(a, '08:55:00', '11:00:00');
   assert.equal(a.engine!.state, 'POSITION_OPEN');
-  // Process A dies. B starts 40 s later (A's 30 s lease has expired).
+  // Process A dies. B starts 100 s later (A's 90 s lease has expired).
   const b = new LiveAscentService(deps(store, 'B'));
-  await run(b, '11:00:40', '15:31:30');
+  await run(b, '11:01:40', '15:31:30');
   const e = b.engine!;
   assert.ok(e.events.some((x) => x.trigger === 'restored'));
   assert.equal(e.positionsToday, 1, 'never re-entered');

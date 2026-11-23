@@ -197,7 +197,7 @@ The report also includes total last-traded quantity versus total volume increase
 - It trades only after **START** (Risk & Settings → Live paper), or automatically when the owner turns **auto-start** ON. Auto-start is stored in `nifty_ascent_control.auto_start` and is OFF by default.
 
 **Safety:**
-- **Single-engine lease:** `nifty_ascent_control.lease_holder`, 30 s, renewed every 10 s.
+- **Single-engine lease:** `nifty_ascent_control.lease_holder`, 90 s, renewed every 30 s.
 - **No lease, or a database write failure:** new entries are blocked, and any open paper position keeps being managed.
 - **One trade per day:** the `nifty_ascent_trades` primary key on `session_date`. Orders are limited to one ENTRY and one EXIT per day by primary key.
 

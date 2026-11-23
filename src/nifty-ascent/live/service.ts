@@ -55,7 +55,8 @@ export interface LiveDeps {
 
 export type ControlAction = 'START' | 'STOP_ENTRIES' | 'KILL' | 'RELEASE';
 export interface ControlResult { ok: boolean; message: string }
-const LEASE_TTL_MS = 30_000, LEASE_EVERY_MS = 10_000, EVENTS_EVERY_MS = 5_000, SNAPSHOT_EVERY_MS = 60_000;
+// Tuned for Supabase request volume (each request is logged against the plan's log-ingestion quota).
+const LEASE_TTL_MS = 90_000, LEASE_EVERY_MS = 30_000, EVENTS_EVERY_MS = 15_000, SNAPSHOT_EVERY_MS = 300_000;
 
 export const OBSERVE_ONLY = true;
 const PREP_FROM_MIN = 8 * 60 + 50;

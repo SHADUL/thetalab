@@ -21,13 +21,15 @@ import { LiveAscentService, type InstrumentPort } from '../src/nifty-ascent/live
 import type { Instrument } from '../src/nifty-ascent/core/contracts.ts';
 import { ObserveArchive, archiveOptionsFromEnv } from './niftyAscentArchive.ts';
 import { makeAscentStore, type SupabaseAscentStore } from './niftyAscentStore.ts';
+import { AscentHistory } from './niftyAscentHistory.ts';
 
 const KITE_REST = 'https://api.kite.trade';
 let service: LiveAscentService | null = null;
 let archive: ObserveArchive | null = null;
 let store: SupabaseAscentStore | null = null;
+let history: AscentHistory | null = null;
 
-export function getNiftyAscent(): { service: LiveAscentService | null; archive: ObserveArchive | null; store: SupabaseAscentStore | null } { return { service, archive, store }; }
+export function getNiftyAscent(): { service: LiveAscentService | null; archive: ObserveArchive | null; store: SupabaseAscentStore | null; history: AscentHistory | null } { return { service, archive, store, history }; }
 
 function instrumentPort(sb: SupabaseClient<any>): InstrumentPort {
   return {
@@ -72,7 +74,7 @@ export async function startNiftyAscent(): Promise<void> {
   marketStream.start(async () => { const t = await session(); return t ? { apiKey, accessToken: t } : null; });
 
   const fetchData = async (path: string) => {
-    if (!/^\/instruments\/historical\/\d+\/minute\?/.test(path)) throw new Error('only historical minute reads are allowed');
+    if (!/^\/instruments\/historical\/\d+\/(minute|day)\?/.test(path)) throw new Error('only historical minute/day reads are allowed');
     const t = await session();
     if (!t) throw new Error('no Kite session');
     const resp = await fetch(`${KITE_REST}${path}`, { headers: { 'X-Kite-Version': '3', Authorization: `token ${apiKey}:${t}` }, signal: AbortSignal.timeout(15_000) });
@@ -90,6 +92,8 @@ export async function startNiftyAscent(): Promise<void> {
     store = makeAscentStore();
     if (!store) { console.error('[nifty-ascent] PAPER mode needs Supabase — not started'); return; }
   }
+  // Backtest data (real NIFTY candles, cached on the persistent archive disk).
+  history = new AscentHistory({ dir: `${archiveOptionsFromEnv().dir}/history`, fetchData, isTradingDay: (d) => isTradingDay(new Date(`${d}T06:00:00Z`)) });
   service = new LiveAscentService({
     mode, store: store ?? undefined, holder: `web-${process.pid}-${Math.random().toString(36).slice(2, 10)}`,
     stream: marketStream,

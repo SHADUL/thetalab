@@ -6,6 +6,7 @@
 import { useSyncExternalStore } from "react";
 import { FIXTURES } from "../../nifty-ascent/sim/fixtures.ts";
 import { Replay } from "../../nifty-ascent/sim/market.ts";
+import { histReplay } from "../../nifty-ascent/sim/historical.ts";
 import { DEFAULT_EXECUTION, barStart } from "../../nifty-ascent/core/rules.ts";
 import { AscentEngine } from "../../nifty-ascent/core/engine.ts";
 
@@ -34,7 +35,9 @@ export const S = {
   /** Live server status (observe-only service). Read-only; null until the first poll. */
   live: null,
   /** SIMULATION (replay in this browser) or LIVE (read-only mirror of the server engine). Never mixed. */
-  source: prefs.source === "LIVE" ? "LIVE" : "SIMULATION",
+  source: ["LIVE", "BACKTEST"].includes(prefs.source) ? prefs.source : "SIMULATION",
+  /** BACKTEST: real NIFTY 1-minute data (Kite) with MODELLED option prices. Never mixed with sim or live. */
+  bt: { month: null, days: [], daysError: null, loadingDays: false, date: null, data: null, loading: false, error: null, results: {}, running: false, progress: null },
   mirror: null,
   mirrorError: null,
   liveHistory: null,
@@ -43,6 +46,7 @@ export const S = {
 /** The engine and clock the workspaces display: the replay, or the read-only live mirror. */
 export function view(s = S) {
   if (s.source === "LIVE") return { live: true, engine: s.mirror, now: s.live?.serverTime ?? Date.now() };
+  if (s.source === "BACKTEST") return { live: false, backtest: true, engine: s.bt.data ? s.replay.engine : null, now: s.replay.t };
   return { live: false, engine: s.replay.engine, now: s.replay.t };
 }
 
@@ -59,11 +63,31 @@ function emit(force = false) {
 }
 
 const fixture = () => FIXTURES.find((f) => f.id === S.fixtureId);
-const hmToMs = (hm) => { const [h, m] = hm.split(":").map(Number); return barStart(fixture().date, h * 60 + m); };
+const hmToMs = (hm) => { const [h, m] = hm.split(":").map(Number); return barStart(S.replay?.sc.date ?? fixture().date, h * 60 + m); };
 
+/** The replay being shown: a real historical day in BACKTEST (when loaded), otherwise the synthetic fixture. */
+function factory() {
+  if (S.source === "BACKTEST" && S.bt.data) return histReplay(S.bt.data, { exec: S.exec, startRunning: true });
+  return new Replay(fixture(), { exec: S.exec, startRunning: true });
+}
 function load(jump) {
-  S.replay = new Replay(fixture(), { exec: S.exec, startRunning: true });
+  S.replay = factory();
   if (jump) S.replay.stepTo(hmToMs(jump));
+}
+
+async function getJson(url) {
+  const r = await fetch(url, { credentials: "same-origin" });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.message || j.error || `HTTP ${r.status}`);
+  return j;
+}
+/** Compact per-day backtest result (the engine is kept for analytics). */
+function summarise(e) {
+  return {
+    engine: e, outcome: e.outcome, gap: e.gap ? { pct: e.gap.pct, dir: e.gap.direction, pts: e.gap.points } : null,
+    standDown: e.standDown?.reason ?? null, handover: !!e.handover, signal: e.signal ? { bot: e.signal.bot, right: e.signal.right, bar: e.signal.bar } : null,
+    trade: e.trade, rejected: e.entryOrder?.status === "REJECTED" ? e.entryOrder.rejectReason : null,
+  };
 }
 
 let raf = 0, lastT = 0;
@@ -73,7 +97,7 @@ function loop(t) {
   const dt = lastT ? Math.min(250, t - lastT) : 16;
   lastT = t;
   S.replay.stepTo(S.replay.t + dt * S.speed);
-  if (S.replay.done) S.playing = false;
+  if (S.replay.done) { S.playing = false; ascent.btRecordCurrent(); }
   emit();
   if (S.playing) raf = requestAnimationFrame(loop);
 }
@@ -105,7 +129,7 @@ export const ascent = {
     emit(true);
   },
   restart() { S.playing = false; load(); emit(true); },
-  toEnd() { S.playing = false; S.replay.runToEnd(); emit(true); },
+  toEnd() { S.playing = false; S.replay.runToEnd(); ascent.btRecordCurrent(); emit(true); },
   control(action) { S.replay.engine.control(action, S.replay.t); emit(true); },
   setOverlay(k, v) { S.overlays = { ...S.overlays, [k]: v }; savePrefs({ ...loadPrefs(), overlays: S.overlays }); emit(true); },
   setExec(patch) {
@@ -113,21 +137,72 @@ export const ascent = {
     S.execVersion++;
     const t = S.replay.t;
     load(); S.replay.stepTo(t);
-    S.runs = null;
+    S.runs = null; S.bt.results = {};
     emit(true);
   },
-  resetExec() { S.exec = { ...DEFAULT_EXECUTION }; S.execVersion++; const t = S.replay.t; load(); S.replay.stepTo(t); S.runs = null; emit(true); },
+  resetExec() { S.exec = { ...DEFAULT_EXECUTION }; S.execVersion++; const t = S.replay.t; load(); S.replay.stepTo(t); S.runs = null; S.bt.results = {}; emit(true); },
   runs() {
     if (!S.runs || S.runs.execVersion !== S.execVersion) computeRuns();
     return S.runs.list;
   },
   fixture,
   setSource(src) {
-    S.source = src === "LIVE" ? "LIVE" : "SIMULATION";
-    if (S.source === "LIVE") S.playing = false;
+    const prev = S.source;
+    S.source = ["LIVE", "BACKTEST"].includes(src) ? src : "SIMULATION";
+    S.playing = false;
+    if (prev !== S.source && S.source !== "LIVE") load("09:14");
+    if (S.source === "BACKTEST" && !S.bt.month) ascent.btLoadMonth(lastMonths()[0]);
     savePrefs({ ...loadPrefs(), source: S.source });
     if (livePoll) { pollLive(); schedule(); }
     emit(true);
+  },
+  /* ---------------- BACKTEST (real data, modelled options) ---------------- */
+  async btLoadMonth(month) {
+    S.bt = { ...S.bt, month, days: [], daysError: null, loadingDays: true };
+    emit(true);
+    try { S.bt.days = (await getJson(`/api/nifty-ascent?resource=hist-days&month=${month}`)).days; }
+    catch (e) { S.bt.daysError = e.message; }
+    S.bt.loadingDays = false;
+    emit(true);
+  },
+  async btOpenDay(date, jump = "09:14") {
+    S.bt = { ...S.bt, date, loading: true, error: null };
+    S.playing = false;
+    emit(true);
+    try {
+      S.bt.data = await getJson(`/api/nifty-ascent?resource=hist-day&date=${date}`);
+      const d = S.bt.days.find((x) => x.date === date); if (d) d.cached = true;
+      load(jump);
+    } catch (e) { S.bt.error = e.message; S.bt.data = null; }
+    S.bt.loading = false;
+    emit(true);
+  },
+  /** Run every day of the loaded month to the end (sequentially; data cached on the server after the first fetch). */
+  async btRunAll() {
+    if (S.bt.running) return;
+    S.bt.running = true;
+    const days = S.bt.days.map((d) => d.date);
+    for (let i = 0; i < days.length; i++) {
+      if (!S.bt.running) break;
+      const date = days[i];
+      S.bt.progress = { i: i + 1, n: days.length, date };
+      emit(true);
+      try {
+        const h = await getJson(`/api/nifty-ascent?resource=hist-day&date=${date}`);
+        const d = S.bt.days.find((x) => x.date === date); if (d) d.cached = true;
+        S.bt.results = { ...S.bt.results, [date]: summarise(histReplay(h, { exec: S.exec, startRunning: true }).runToEnd()) };
+      } catch (e) {
+        S.bt.results = { ...S.bt.results, [date]: { error: e.message } };
+      }
+      emit(true);
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    S.bt.running = false; S.bt.progress = null;
+    emit(true);
+  },
+  btStop() { S.bt.running = false; emit(true); },
+  btRecordCurrent() {
+    if (S.source === "BACKTEST" && S.bt.data && S.replay.done) { S.bt.results = { ...S.bt.results, [S.bt.date]: summarise(S.replay.engine) }; emit(true); }
   },
   liveControl: (action) => post("control", { action }),
   setAutoStart: (enabled) => post("auto-start", { enabled }),
@@ -190,4 +265,12 @@ async function post(resource, body) {
 export function useAscent() {
   useSyncExternalStore(ascent.subscribe, () => S.version, () => S.version);
   return S;
+}
+
+/** The current IST month and the five before it (YYYY-MM), newest first. */
+export function lastMonths(n = 6) {
+  const d = new Date(Date.now() + 330 * 60_000);
+  const out = [];
+  for (let i = 0; i < n; i++) { const x = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - i, 1)); out.push(x.toISOString().slice(0, 7)); }
+  return out;
 }

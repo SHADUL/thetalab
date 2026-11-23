@@ -7,7 +7,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, lazy, Suspense } from "react";
 import {
   ArrowLeft, Gauge, TrendUp, ArrowsSplit, ChartLine, Crosshair, Notebook, ChartBar, ShieldCheck,
-  Play, Pause, ArrowCounterClockwise, Sun, Moon, Lock, FastForward,
+  Play, Pause, ArrowCounterClockwise, Sun, Moon, Lock, FastForward, ClockCounterClockwise,
 } from "@phosphor-icons/react";
 import "./nifty-ascent.css";
 import { ascent, useAscent, SPEEDS, startLivePolling, view } from "./store.js";
@@ -24,6 +24,7 @@ const OptionPosition = lazy(() => import("./OptionPosition.jsx"));
 const TradeJournal = lazy(() => import("./TradeJournal.jsx"));
 const Analytics = lazy(() => import("./Analytics.jsx"));
 const RiskSettings = lazy(() => import("./RiskSettings.jsx"));
+const Backtest = lazy(() => import("./Backtest.jsx"));
 
 const WORKSPACES = [
   { id: "command-center", label: "Command Center", icon: Gauge, C: CommandCenter },
@@ -34,6 +35,7 @@ const WORKSPACES = [
   { id: "trade-journal", label: "Trade Journal", icon: Notebook, C: TradeJournal },
   { id: "analytics", label: "Analytics", icon: ChartBar, C: Analytics },
   { id: "risk-settings", label: "Risk & Settings", icon: ShieldCheck, C: RiskSettings },
+  { id: "backtest", label: "Backtest", icon: ClockCounterClockwise, C: Backtest },
 ];
 const BASE = "/nifty-ascent";
 
@@ -93,6 +95,8 @@ function Header({ onExit, theme, setTheme }) {
       <div className="na-pills" role="status" aria-live="off">
         {v.live
           ? <Pill k="Showing" tone="accent" title="Real NIFTY data from the server engine (read-only)">LIVE · REAL DATA</Pill>
+          : v.backtest
+          ? <Pill k="Showing" tone="accent" title="Real NIFTY 1-minute history from Kite; option premiums are MODELLED (Black-76 with the previous day's India VIX)">BACKTEST · {S.bt.date ?? "no day"}</Pill>
           : <Pill k="Showing" tone="warn" title="Every price on these screens comes from a synthetic replay fixture — not market data">SIMULATION</Pill>}
         <Pill k="Live paper" tone={lp.tone} title={lp.title}><Lock size={10} weight="bold" style={{ marginRight: 3, verticalAlign: -1 }} />{lp.text}</Pill>
         <Pill k="Kite feed" tone={kite.tone} live={kite.live} title={kite.title}>{kite.text}</Pill>
@@ -116,6 +120,7 @@ function SourceSwitch() {
   return (
     <div className="na-seg" role="group" aria-label="Data source">
       <button data-on={S.source === "SIMULATION"} onClick={() => ascent.setSource("SIMULATION")} title="Deterministic replay in this browser">Simulation</button>
+      <button data-on={S.source === "BACKTEST"} onClick={() => ascent.setSource("BACKTEST")} title="Replay past trading days: real NIFTY 1-minute data, modelled option prices">Backtest</button>
       <button data-on={S.source === "LIVE"} onClick={() => ascent.setSource("LIVE")} title="Read-only view of the server engine on real Kite data">Live paper</button>
     </div>
   );
@@ -149,6 +154,62 @@ function LiveEmpty() {
   );
 }
 
+function ReplayControls() {
+  const S = useAscent();
+  return (
+    <>
+        <button className="na-chipbtn" onClick={() => (S.playing ? ascent.pause() : ascent.play())} disabled={S.replay.done} aria-label={S.playing ? "Pause replay" : "Play replay"}>
+          {S.playing ? <Pause size={13} weight="fill" /> : <Play size={13} weight="fill" />}{S.playing ? "Pause" : S.replay.done ? "Ended" : "Play"}
+        </button>
+        <div className="na-seg" role="group" aria-label="Replay speed">
+          {SPEEDS.map((x) => <button key={x} data-on={S.speed === x} onClick={() => ascent.setSpeed(x)}>{x}×</button>)}
+        </div>
+        <select className="na-chipbtn" aria-label="Jump to time" value="" onChange={(ev) => ev.target.value && ascent.jumpTo(ev.target.value)}>
+          <option value="">Jump to…</option>
+          {JUMPS.map((j) => <option key={j} value={j}>{j} IST</option>)}
+        </select>
+        <button className="na-chipbtn" onClick={() => ascent.toEnd()} title="Run to the end of the session"><FastForward size={13} />End</button>
+        <button className="na-chipbtn" onClick={() => ascent.restart()} title="Restart this day from 09:10"><ArrowCounterClockwise size={13} />Restart</button>
+    </>
+  );
+}
+
+function BacktestBand() {
+  const S = useAscent();
+  const B = S.bt;
+  const i = B.days.findIndex((d) => d.date === B.date);
+  const step = (k) => { const d = B.days[i + k]; if (d) ascent.btOpenDay(d.date); };
+  return (
+    <div className="na-simband na-liveband" role="note">
+      <span className="na-simtag na-livetag">BACKTEST</span>
+      <span className="na-long">Real NIFTY 1-minute data (Kite history) · option prices <b>MODELLED</b> (Black-76, previous-day VIX) · paper only — never mixed with live paper</span>
+      <span className="na-short">Real NIFTY · <b>modelled options</b></span>
+      <span className="n na-muted">{B.data ? `${B.date} ${istTime(S.replay.t)} IST` : B.loading ? `Loading ${B.date}…` : "No day loaded"}</span>
+      <div className="na-simctl">
+        <SourceSwitch />
+        <button className="na-chipbtn" onClick={() => step(-1)} disabled={i <= 0 || B.loading} aria-label="Previous day">‹</button>
+        <select className="na-chipbtn" aria-label="Backtest day" value={B.date ?? ""} onChange={(ev) => ev.target.value && ascent.btOpenDay(ev.target.value)} disabled={B.loading}>
+          <option value="">{B.loadingDays ? "Loading days…" : "Pick a day…"}</option>
+          {B.days.map((d) => <option key={d.date} value={d.date}>{d.date}</option>)}
+        </select>
+        <button className="na-chipbtn" onClick={() => step(1)} disabled={i < 0 || i >= B.days.length - 1 || B.loading} aria-label="Next day">›</button>
+        {B.data && !B.loading && <ReplayControls />}
+      </div>
+    </div>
+  );
+}
+
+function BacktestEmpty({ go }) {
+  const S = useAscent();
+  return (
+    <div className="na-card" style={{ padding: 22 }}>
+      <div className="na-ws-title" style={{ fontSize: 16 }}>{S.bt.loading ? `Loading ${S.bt.date}…` : "No backtest day loaded"}</div>
+      <div className="na-note" style={{ marginTop: 6 }}>{S.bt.error ? `Could not load the day: ${S.bt.error}` : "Pick a trading day in the band above, or open the Backtest workspace to see the whole month."}</div>
+      <div style={{ marginTop: 12 }}><button className="na-chipbtn" onClick={() => go("backtest")}>Open the Backtest workspace</button></div>
+    </div>
+  );
+}
+
 function SimBand() {
   const S = useAscent();
   const f = ascent.fixture();
@@ -163,18 +224,7 @@ function SimBand() {
         <select className="na-chipbtn" aria-label="Replay fixture" value={S.fixtureId} onChange={(ev) => ascent.select(ev.target.value)} style={{ maxWidth: 280 }} title={f.summary}>
           {FIXTURES.map((x) => <option key={x.id} value={x.id}>{x.date.slice(5)} · {x.title}</option>)}
         </select>
-        <button className="na-chipbtn" onClick={() => (S.playing ? ascent.pause() : ascent.play())} disabled={S.replay.done} aria-label={S.playing ? "Pause replay" : "Play replay"}>
-          {S.playing ? <Pause size={13} weight="fill" /> : <Play size={13} weight="fill" />}{S.playing ? "Pause" : S.replay.done ? "Ended" : "Play"}
-        </button>
-        <div className="na-seg" role="group" aria-label="Replay speed">
-          {SPEEDS.map((x) => <button key={x} data-on={S.speed === x} onClick={() => ascent.setSpeed(x)}>{x}×</button>)}
-        </div>
-        <select className="na-chipbtn" aria-label="Jump to time" value="" onChange={(ev) => ev.target.value && ascent.jumpTo(ev.target.value)}>
-          <option value="">Jump to…</option>
-          {JUMPS.map((j) => <option key={j} value={j}>{j} IST</option>)}
-        </select>
-        <button className="na-chipbtn" onClick={() => ascent.toEnd()} title="Run to the end of the session"><FastForward size={13} />End</button>
-        <button className="na-chipbtn" onClick={() => ascent.restart()} title="Restart this fixture from 09:10"><ArrowCounterClockwise size={13} />Restart</button>
+        <ReplayControls />
       </div>
     </div>
   );
@@ -224,7 +274,7 @@ export default function NiftyAscent({ onExit }) {
       if (ev.target instanceof HTMLElement && /^(INPUT|SELECT|TEXTAREA)$/.test(ev.target.tagName)) return;
       if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
       const i = Number(ev.key);
-      if (i >= 1 && i <= WORKSPACES.length) go(WORKSPACES[i - 1].id);
+      if (i >= 1 && i <= Math.min(9, WORKSPACES.length)) go(WORKSPACES[i - 1].id);
     };
     window.addEventListener("keydown", onKey);
     const prevTitle = document.title;
@@ -243,19 +293,20 @@ export default function NiftyAscent({ onExit }) {
   const S = useAscent();
   const W = WORKSPACES.find((w) => w.id === tab) ?? WORKSPACES[0];
   const C = W.C;
-  const needsEngine = !["trade-journal", "analytics", "risk-settings"].includes(W.id);
+  const needsEngine = !["trade-journal", "analytics", "risk-settings", "backtest"].includes(W.id);
   const showEmpty = S.source === "LIVE" && !S.mirror && needsEngine;
+  const btEmpty = S.source === "BACKTEST" && !S.bt.data && needsEngine;
   return (
     <div className="na-root" ref={rootRef}>
       <div className="na-top" ref={topRef}>
         <Header onExit={onExit} theme={theme} setTheme={setTheme} />
-        {S.source === "LIVE" ? <LiveBand /> : <SimBand />}
+        {S.source === "LIVE" ? <LiveBand /> : S.source === "BACKTEST" ? <BacktestBand /> : <SimBand />}
       </div>
       <div className="na-shell">
         <Rail tab={tab} go={go} />
         <main className="na-main" id="na-main">
           <Suspense fallback={<div className="skeleton" style={{ height: 420, borderRadius: 14 }} />}>
-            <div className="na-ws" key={`${tab}-${S.source}`}>{showEmpty ? <LiveEmpty /> : <C go={go} />}</div>
+            <div className="na-ws" key={`${tab}-${S.source}`}>{showEmpty ? <LiveEmpty /> : btEmpty ? <BacktestEmpty go={go} /> : <C go={go} />}</div>
           </Suspense>
         </main>
       </div>

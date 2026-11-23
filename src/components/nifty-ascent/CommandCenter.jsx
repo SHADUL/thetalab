@@ -55,13 +55,13 @@ export function DecisionPanel({ e, now }) {
 
 export default function CommandCenter() {
   const S = useAscent();
-  const { engine: e, now, live } = view(S);
+  const { engine: e, now, live, backtest } = view(S);
   const ix = lastIndex(e);
   const pnl = e.trade ? e.trade.net : positionPnl(e)?.gross ?? null;
   const f = ascent.fixture();
   return (
     <>
-      <WsHead title="Command Center" desc={live ? <>LIVE PAPER view — real NIFTY data from the server engine (read-only mirror). Session {e.date}.</> : <>Fixture <b>{f.title}</b> — {f.summary}</>} />
+      <WsHead title="Command Center" desc={live ? <>LIVE PAPER view — real NIFTY data from the server engine (read-only mirror). Session {e.date}.</> : backtest ? <>BACKTEST {e.date} — real NIFTY 1-minute data, <b>modelled</b> option prices (Black-76, previous-day VIX). Paper only.</> : <>Fixture <b>{f.title}</b> — {f.summary}</>} />
       <div className="na-grid na-kpis10" style={{ marginBottom: 12 }}>
         <Kpi label="NIFTY" value={ix ? num(ix.price, 2) : "—"} sub={ix ? `${ix.forming ? "forming" : "last close"} · ${istTime(ix.ts)}` : "waiting"} />
         <Kpi label="Prev 15:15 close" value={num(e.prevClose, 2)} sub={`${e.prev.date} · bar 15:15`} />

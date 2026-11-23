@@ -127,7 +127,12 @@ export function simInstruments(sc: Scenario): Instrument[] {
 
 /* ---------------- replay driver ---------------- */
 
-export interface ReplayOptions { exec?: ExecutionSettings; startRunning?: boolean }
+export interface ReplayOptions {
+  exec?: ExecutionSettings;
+  startRunning?: boolean;
+  /** Replay real data instead of a synthetic scenario path (historical backtest). */
+  data?: { path: Float64Array; prev: PrevSession; instruments: Instrument[] };
+}
 
 /**
  * Drives an AscentEngine second by second: clock(t) → index tick (exch t,
@@ -150,10 +155,10 @@ export class Replay {
 
   constructor(sc: Scenario, o: ReplayOptions = {}) {
     this.sc = sc;
-    this.path = indexPath(sc);
-    this.instruments = simInstruments(sc);
+    this.path = o.data?.path ?? indexPath(sc);
+    this.instruments = o.data?.instruments ?? simInstruments(sc);
     this.byToken = new Map(this.instruments.map((i) => [i.token, i]));
-    this.engine = new AscentEngine({ date: sc.date, prev: prevSession(sc), instruments: this.instruments, exec: o.exec, startRunning: o.startRunning ?? true });
+    this.engine = new AscentEngine({ date: sc.date, prev: o.data?.prev ?? prevSession(sc), instruments: this.instruments, exec: o.exec, startRunning: o.startRunning ?? true });
     this.startMs = barStart(sc.date, 9 * 60 + 10);
     this.endMs = barStart(sc.date, 15 * 60 + 31);
     this.t = this.startMs;
@@ -180,7 +185,7 @@ export class Replay {
     const e = this.engine;
     e.onClock(t);
     const spot = this.spotAt(t);
-    if (spot == null) return;
+    if (spot == null || Number.isNaN(spot)) return; // outside the session, or a minute with no real data
     if (!this.missing.some(([a, b]) => t >= a && t <= b)) {
       e.onIndexTick({ exchTs: t, recvTs: t + 120 + Math.floor(this.rnd() * 140), price: spot });
     }

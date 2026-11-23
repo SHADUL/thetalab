@@ -6,6 +6,8 @@
  *   GET  ?resource=history     filled LIVE PAPER trades (read-only)
  *   POST ?resource=control     { action: START | STOP_ENTRIES | KILL | RELEASE }
  *   POST ?resource=auto-start  { enabled: boolean }
+ *   GET  ?resource=hist-days&month=YYYY-MM   trading days available for backtest
+ *   GET  ?resource=hist-day&date=YYYY-MM-DD  real NIFTY candles (+prev day, VIX) for one backtest day
  *
  * PAPER ONLY. Controls only change the paper engine's state; there is no
  * broker or order code behind any endpoint, and in observe mode every
@@ -13,6 +15,8 @@
  */
 import { getNiftyAscent } from '../server/niftyAscent.ts';
 import type { ControlAction } from '../src/nifty-ascent/live/service.ts';
+import { monthTradingDays } from '../server/niftyAscentHistory.ts';
+import { isTradingDay } from '../src/nifty-alpha-ladder/calendar/signalCalendar.ts';
 
 interface Req { method?: string; query: Record<string, unknown>; body?: any }
 interface Res { status(n: number): Res; json(b: unknown): void; setHeader(k: string, v: string): void }
@@ -21,7 +25,22 @@ const ACTIONS = new Set<ControlAction>(['START', 'STOP_ENTRIES', 'KILL', 'RELEAS
 export default async function handler(req: Req, res: Res) {
   res.setHeader('Cache-Control', 'no-store');
   const resource = String(req.query.resource ?? 'status');
-  const { service, archive, store } = getNiftyAscent();
+  const { service, archive, store, history } = getNiftyAscent();
+  if (req.method === 'GET' && (resource === 'hist-days' || resource === 'hist-day')) {
+    if (!history) { res.status(409).json({ error: 'backtest data unavailable', message: 'the NIFTY ASCENT server service is not running' }); return; }
+    try {
+      if (resource === 'hist-days') {
+        const month = String(req.query.month ?? '');
+        const days = monthTradingDays(month, (d) => isTradingDay(new Date(`${d}T06:00:00Z`)));
+        res.status(200).json({ month, days: days.map((d) => ({ date: d, cached: history.isCached(d) })) });
+      } else {
+        res.status(200).json(await history.day(String(req.query.date ?? '')));
+      }
+    } catch (err: any) {
+      res.status(422).json({ error: 'backtest_data', message: String(err?.message ?? err).replace(/token|api_key/gi, '***') });
+    }
+    return;
+  }
   if (!service) {
     if (req.method === 'GET' && (resource === 'status' || resource === 'snapshot')) {
       res.status(200).json({ enabled: false, livePaper: 'NOT_ENABLED', reason: process.env.NIFTY_ASCENT ? 'starting or not configured' : 'NIFTY ASCENT live service is not enabled on this server' });

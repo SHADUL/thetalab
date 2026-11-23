@@ -198,7 +198,7 @@ test('server/niftyAscent.ts: observe-only, read-only Kite GETs, no orders, no cr
   for (const re of [/\/orders\b/, /place_?order/i, /transaction_type/i, /method:\s*'POST'/i, /kiteconnect/i, /console\.\w+\([^)]*(accessToken|access_token|apiKey)\b/]) assert.ok(!re.test(src), `matches ${re}`);
   assert.match(src, /flag !== 'observe' && flag !== 'paper'/);
   assert.match(src, /PAPER mode needs Supabase/);
-  assert.match(src, /only historical minute reads are allowed/);
+  assert.match(src, /only historical minute\/day reads are allowed/);
   assert.match(src, /marketStream\.start/);
   assert.ok(!/new WebSocket|wss:\/\//.test(src), 'no second Kite connection');
 });

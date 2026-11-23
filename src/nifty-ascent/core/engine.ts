@@ -452,7 +452,7 @@ export class AscentEngine {
           reason: `31 closes 09:15–09:45: high ${this.or.high}, low ${this.or.low}, width ${r2(this.or.width)}; bands ${this.or.upsideBand.toFixed(2)} / ${this.or.downsideBand.toFixed(2)}`,
           levels: this.levelsNow() });
         if (!this.gap) { this.dataError(bar.label, 'gap could not be measured (no valid 09:15 reference or previous close)'); return; }
-        // Backtest variant only (absent from V1): skip narrow-range days, both bots.
+        // Variant filter (absent from V1; on in LIVE_PAPER_RULES): skip narrow-range days, both bots.
         if (R.minOrWidth && this.gap.direction !== 'NONE' && this.or.width < R.minOrWidth) {
           this.noTrade('narrow_or', `opening range ${r2(this.or.width)} pts < ${R.minOrWidth} pts minimum (rules ${R.version}) — no trade today`, bar.label);
           return;

@@ -2,10 +2,10 @@
 import { useState } from "react";
 import { useState as useStateR } from "react";
 import { Play, Prohibit, Skull, LockOpen, Lock, Power } from "@phosphor-icons/react";
-import { useAscent, ascent, defaultExec } from "./store.js";
+import { useAscent, ascent, defaultExec, btRules } from "./store.js";
 import { Card, WsHead, Badge, KV, Reason } from "./ui.jsx";
 import { num } from "./format.js";
-import { RESEARCH_RULES_V1 as R } from "../../nifty-ascent/core/rules.ts";
+import { RESEARCH_RULES_V1, LIVE_PAPER_RULES } from "../../nifty-ascent/core/rules.ts";
 import { COST_MODEL } from "../../nifty-ascent/core/costs.ts";
 
 const FIELDS = [
@@ -24,6 +24,8 @@ const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m %
 
 export default function RiskSettings() {
   const S = useAscent();
+  // Rules of the source on screen: live paper (V1 + owner-approved filters), backtest (V1 or its variant), simulation (V1).
+  const R = S.source === "LIVE" ? LIVE_PAPER_RULES : S.source === "BACKTEST" ? btRules() : RESEARCH_RULES_V1;
   const e = S.replay.engine;
   const [form, setForm] = useState(() => ({ ...S.exec }));
   const changed = FIELDS.some(([k]) => Number(form[k]) !== S.exec[k]);
@@ -59,7 +61,7 @@ export default function RiskSettings() {
       {S.source === "LIVE" && <LivePaperControls L={S.live} />}
       <LiveServiceCard L={S.live} />
       <div className="na-grid na-two">
-        <Card title={<span className="flex items-center gap-2"><Lock size={14} weight="bold" />Research rules {R.version}</span>} sub="Fixed research specification (OptionsBuyer.in data + your Q1–Q15 decisions). Changing any of these requires a new strategy version.">
+        <Card title={<span className="flex items-center gap-2"><Lock size={14} weight="bold" />Research rules {R.version}</span>} sub={`${S.source === "LIVE" ? "Live paper" : S.source === "BACKTEST" ? "Backtest" : "Simulation"} · fixed research specification (OptionsBuyer.in data + your Q1–Q15 decisions${R.minOrWidth || R.rollExpiryWithinDays ? " + the opening-range and expiry-roll filters" : ""}). Changing any of these requires a new strategy version.`}>
           <KV wide rows={[
             ["Opening range", `${R.orBarCount} one-minute closes ${hhmm(R.orFirstBar)}–${hhmm(R.orLastBar)}`],
             ["Gap-and-Go bands", `OR edge ± ${R.bandFraction * 100}% of OR width, strict close beyond`],
@@ -73,6 +75,8 @@ export default function RiskSettings() {
             ["Trail", `arms on a close > ${R.trailActivationFactor * 100}% · exits ≤ ${R.trailStopFactor * 100}% of the highest close`],
             ["Time exit", `${hhmm(R.timeExitMinute)}:00, first fresh bid (Q11)`],
             ["Positions per day", `${R.maxPositionsPerDay} across both bots`],
+            ["Minimum opening range", R.minOrWidth ? `${R.minOrWidth} pts — narrower days are skipped (both bots)` : "off"],
+            ["Day-before-expiry roll", R.rollExpiryWithinDays ? `nearest expiry ≤ ${R.rollExpiryWithinDays} day away → next expiry` : "off"],
           ]} />
         </Card>
         <Card title="Cost model & data policy">

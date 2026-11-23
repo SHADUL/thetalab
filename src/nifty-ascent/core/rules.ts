@@ -49,13 +49,13 @@ export interface ResearchRules {
   /** Q9: on expiry day use the next listed expiry (provisional research convention). */
   readonly expiryDayUsesNextExpiry: boolean;
   /**
-   * BACKTEST VARIANTS ONLY — absent from RESEARCH_RULES_V1, so live paper is
-   * unaffected. Skip the whole day (both bots) when the 09:15–09:45 opening
+   * Filter on top of V1 (absent from RESEARCH_RULES_V1; set in LIVE_PAPER_RULES
+   * and backtest variants). Skip the whole day (both bots) when the 09:15–09:45 opening
    * range is narrower than this many index points.
    */
   readonly minOrWidth?: number;
   /**
-   * BACKTEST VARIANTS ONLY — when the nearest listed expiry is this many
+   * Filter on top of V1 (as above) — when the nearest listed expiry is this many
    * calendar days away or fewer (but not today), trade the next listed expiry.
    */
   readonly rollExpiryWithinDays?: number;
@@ -83,7 +83,7 @@ export const RESEARCH_RULES_V1: ResearchRules = Object.freeze({
   expiryDayUsesNextExpiry: true,
 });
 
-/** Backtest-only rule variant on top of V1. Never used by live paper. */
+/** Rule variant on top of V1 (backtest variants and LIVE_PAPER_RULES). */
 export interface RuleVariant { minOrWidth: number; rollExpiryWithinDays: number }
 export const NO_VARIANT: RuleVariant = Object.freeze({ minOrWidth: 0, rollExpiryWithinDays: 0 });
 
@@ -94,6 +94,13 @@ export function variantRules(v: RuleVariant): ResearchRules {
   const tag = [or ? `OR${or}` : '', roll ? `ROLL${roll}` : ''].filter(Boolean).join('+');
   return Object.freeze({ ...RESEARCH_RULES_V1, version: `${RESEARCH_RULES_V1.version}+${tag}`, ...(or ? { minOrWidth: or } : {}), ...(roll ? { rollExpiryWithinDays: roll } : {}) });
 }
+
+/**
+ * Live paper research rules (owner decision 23 Nov 2026): V1 plus a 60-point
+ * minimum opening-range width and the 1-day-to-expiry roll. V1 itself is unchanged.
+ */
+export const LIVE_PAPER_VARIANT: RuleVariant = Object.freeze({ minOrWidth: 60, rollExpiryWithinDays: 1 });
+export const LIVE_PAPER_RULES: ResearchRules = variantRules(LIVE_PAPER_VARIANT);
 
 /** Adjustable execution / risk settings (Q13 defaults). Not research rules. */
 export interface ExecutionSettings {

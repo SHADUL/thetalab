@@ -53,8 +53,13 @@ test('variant: 1-day-to-expiry rolls to the next listed expiry; further out and 
   assert.ok(!selectContract(mkInst(['2026-11-24']), '2026-11-23', 'CE', 25300, roll).ok, 'no next expiry → rejected, never substituted');
 });
 
-test('variant: live paper code never references the backtest-only variant', () => {
+test('live paper uses LIVE_PAPER_RULES = V1 + OR60 + ROLL1; V1 stays frozen and is the service default', async () => {
+  const { LIVE_PAPER_RULES: L } = await import('../core/rules.ts');
+  assert.equal(L.version, 'NIFTY_ASCENT_V1.0+OR60+ROLL1');
+  assert.deepEqual([L.minOrWidth, L.rollExpiryWithinDays], [60, 1]);
+  assert.equal(V1.version, 'NIFTY_ASCENT_V1.0');
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
-  const files = ['server/niftyAscent.ts', ...readdirSync(path.join(root, 'src/nifty-ascent/live')).filter((f) => f.endsWith('.ts')).map((f) => `src/nifty-ascent/live/${f}`)];
-  for (const f of files) assert.ok(!/variantRules|minOrWidth|rollExpiryWithinDays/.test(readFileSync(path.join(root, f), 'utf8')), f);
+  assert.match(readFileSync(path.join(root, 'server/niftyAscent.ts'), 'utf8'), /rules: LIVE_PAPER_RULES/);
+  assert.match(readFileSync(path.join(root, 'src/nifty-ascent/live/service.ts'), 'utf8'), /rules: this\.d\.rules \?\? RESEARCH_RULES_V1/);
+  for (const f of readdirSync(path.join(root, 'src/nifty-ascent/live')).filter((x) => x.endsWith('.ts'))) assert.ok(!/minOrWidth|rollExpiryWithinDays/.test(readFileSync(path.join(root, 'src/nifty-ascent/live', f), 'utf8')), f);
 });

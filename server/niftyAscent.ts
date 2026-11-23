@@ -17,7 +17,7 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { marketStream } from './marketStream.ts';
 import { isTradingDay } from '../src/nifty-alpha-ladder/calendar/signalCalendar.ts';
-import { LIVE_PAPER_EXECUTION } from '../src/nifty-ascent/core/rules.ts';
+import { LIVE_PAPER_EXECUTION, LIVE_PAPER_RULES } from '../src/nifty-ascent/core/rules.ts';
 import { LiveAscentService, type InstrumentPort } from '../src/nifty-ascent/live/service.ts';
 import type { Instrument } from '../src/nifty-ascent/core/contracts.ts';
 import { ObserveArchive, archiveOptionsFromEnv } from './niftyAscentArchive.ts';
@@ -99,6 +99,7 @@ export async function startNiftyAscent(): Promise<void> {
     mode, store: store ?? undefined, holder: `web-${process.pid}-${Math.random().toString(36).slice(2, 10)}`,
     stream: marketStream,
     exec: LIVE_PAPER_EXECUTION,
+    rules: LIVE_PAPER_RULES,
     fetchData,
     instruments: instrumentPort(sb),
     isTradingDay: (d) => isTradingDay(new Date(`${d}T06:00:00Z`)),

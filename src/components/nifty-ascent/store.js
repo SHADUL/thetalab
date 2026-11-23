@@ -7,7 +7,7 @@ import { useSyncExternalStore } from "react";
 import { FIXTURES } from "../../nifty-ascent/sim/fixtures.ts";
 import { Replay } from "../../nifty-ascent/sim/market.ts";
 import { histReplay } from "../../nifty-ascent/sim/historical.ts";
-import { DEFAULT_EXECUTION, LIVE_PAPER_EXECUTION, NO_VARIANT, RESEARCH_RULES_V1, variantRules, barStart } from "../../nifty-ascent/core/rules.ts";
+import { DEFAULT_EXECUTION, LIVE_PAPER_EXECUTION, LIVE_PAPER_VARIANT, NO_VARIANT, RESEARCH_RULES_V1, variantRules, barStart } from "../../nifty-ascent/core/rules.ts";
 import { AscentEngine } from "../../nifty-ascent/core/engine.ts";
 
 export const SPEEDS = [1, 10, 60, 300];
@@ -44,7 +44,7 @@ export const S = {
   /** BACKTEST: real NIFTY 1-minute data (Kite) with MODELLED option prices. Never mixed with sim or live. */
   bt: { month: null, days: [], daysError: null, loadingDays: false, date: null, data: null, loading: false, error: null, results: {}, running: false, progress: null,
     /** Backtest-only rule variant (OFF = locked V1 rules). `baseline` holds V1 results for the same days when a variant is on. */
-    variant: cleanVariant(prefs.btVariant), baseline: {} },
+    variant: cleanVariant(prefs.btVariant ?? LIVE_PAPER_VARIANT), baseline: {} },
   mirror: null,
   mirrorError: null,
   liveHistory: null,
@@ -247,6 +247,7 @@ export const ascent = {
     emit(true);
   },
   btResetVariant() { ascent.btSetVariant({ ...NO_VARIANT }); },
+  btLiveVariant() { ascent.btSetVariant({ ...LIVE_PAPER_VARIANT }); },
   liveControl: (action) => post("control", { action }),
   setAutoStart: (enabled) => post("auto-start", { enabled }),
   async loadLiveHistory() {

@@ -16,7 +16,7 @@
  */
 import { AscentEngine, type AuditEvent, type PrevSession } from '../core/engine.ts';
 import { validateInstruments, selectContract, type Instrument, type InstrumentReport, type ContractSelection } from '../core/contracts.ts';
-import { DEFAULT_EXECUTION, RESEARCH_RULES_V1, istDateOf, type ExecutionSettings } from '../core/rules.ts';
+import { DEFAULT_EXECUTION, RESEARCH_RULES_V1, istDateOf, type ExecutionSettings, type ResearchRules } from '../core/rules.ts';
 import { QuoteAdapter, NIFTY_INDEX_TOKEN, type StreamQuote, type TradeMeta } from './adapter.ts';
 import { loadPrevSession, type FetchData, type PrevReport } from './history.ts';
 import { ObservationRecorder, type StreamStatus } from './observation.ts';
@@ -42,6 +42,8 @@ export interface LiveDeps {
   now?: () => number;
   log?: (msg: string) => void;
   exec?: ExecutionSettings;
+  /** Research rules for the live engine (default RESEARCH_RULES_V1). */
+  rules?: ResearchRules;
   /** Receives the end-of-session observation report (e.g. writes it to disk). */
   saveReport?: (date: string, report: unknown) => void | Promise<void>;
   /** Optional raw evidence sink: one row per accepted index/option quote (compact arrays, no credentials). */
@@ -387,7 +389,7 @@ export class LiveAscentService {
 
   private engineOptions(date: string) {
     const prev = this.prep?.prev && this.prep.prev.bars.length ? this.prep.prev : { date: this.prep?.prevReport?.date ?? 'unavailable', bars: [] };
-    return { date, prev, instruments: this.prep?.instruments ?? [], rules: RESEARCH_RULES_V1, exec: this.d.exec ?? DEFAULT_EXECUTION, startRunning: false };
+    return { date, prev, instruments: this.prep?.instruments ?? [], rules: this.d.rules ?? RESEARCH_RULES_V1, exec: this.d.exec ?? DEFAULT_EXECUTION, startRunning: false };
   }
 
   private createEngine(date: string) {

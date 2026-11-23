@@ -188,7 +188,40 @@ The report also includes total last-traded quantity versus total volume increase
 - **Limits:** a 1 GB size cap (oldest tick days are deleted first, never today's); events and ticks pause when less than 5 GB is free.
 - **Never written:** credentials.
 
-## 6. Next phases (each needs approval)
+## 6. Phase 4 — live PAPER mode (deployed 23 Nov 2026, PAUSED)
+
+`NIFTY_ASCENT=paper` runs the same engine with **paper fills against real Kite bid/ask quotes**. There is no order code anywhere, and tests scan every ASCENT file for order endpoints.
+
+**Starting:**
+- The engine starts **PAUSED** every trading day.
+- It trades only after **START** (Risk & Settings → Live paper), or automatically when the owner turns **auto-start** ON. Auto-start is stored in `nifty_ascent_control.auto_start` and is OFF by default.
+
+**Safety:**
+- **Single-engine lease:** `nifty_ascent_control.lease_holder`, 30 s, renewed every 10 s.
+- **No lease, or a database write failure:** new entries are blocked, and any open paper position keeps being managed.
+- **One trade per day:** the `nifty_ascent_trades` primary key on `session_date`. Orders are limited to one ENTRY and one EXIT per day by primary key.
+
+**Recovery:** the engine snapshot is saved to `nifty_ascent_sessions` on every state change and at least once a minute. After a restart:
+- The session resumes from the snapshot.
+- Minutes the process didn't see count as missing data.
+- A position already filled is never re-entered.
+- If the restart is after 09:14, the engine waits for the previous session to load before being created.
+- Today's reference is taken only from a tick inside the 09:15 minute.
+
+**Controls** (login required; refused in observe mode):
+- START.
+- STOP NEW ENTRIES — keeps managing an open position.
+- KILL / FLATTEN — persistent kill switch.
+- RELEASE.
+- Auto-start ON/OFF.
+
+**UI:** a Simulation / Live paper switch. The live view is a read-only copy of the server engine. The live journal and analytics read only from `nifty_ascent_trades` and are never mixed with replay results.
+
+**Migration:** `src/nifty-ascent/migrations/001_nifty_ascent.sql`, applied 23 Nov 2026. Rollback: `001_nifty_ascent_down.sql`.
+
+**To enable live paper (owner only):** Risk & Settings → Live paper → *Auto-start each trading day: ON*, or press START on the day. **To stop:** KILL / FLATTEN, or set `NIFTY_ASCENT=observe` and redeploy.
+
+## 7. Next phases (each needs approval)
 
 1. **Phase 4:**
    - Server service `NIFTY_ASCENT=on`, OFF by default; the engine starts PAUSED daily.

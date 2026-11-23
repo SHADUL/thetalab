@@ -1,5 +1,5 @@
 import { useState, useEffect, lazy, Suspense } from "react";
-import { Pulse } from "@phosphor-icons/react";
+import { Pulse, TrendUp } from "@phosphor-icons/react";
 import App from "./App.jsx";
 import SwingScanner from "./components/SwingScanner.jsx";
 import IntradayTrader from "./components/IntradayTrader.jsx";
@@ -16,6 +16,13 @@ import Login from "./components/Login.jsx";
 const NiftyPulse = lazy(() => import("./components/nifty-pulse/NiftyPulse.jsx"));
 const PULSE_PATH = "/nifty-pulse";
 const isPulsePath = () => typeof window !== "undefined" && (window.location.pathname === PULSE_PATH || window.location.pathname.startsWith(`${PULSE_PATH}/`));
+// NIFTY ASCENT (Gap-and-Go → Williams) follows the same full-screen pattern at /nifty-ascent/<workspace>.
+const NiftyAscent = lazy(() => import("./components/nifty-ascent/NiftyAscent.jsx"));
+const ASCENT_PATH = "/nifty-ascent";
+const isAscentPath = () => typeof window !== "undefined" && (window.location.pathname === ASCENT_PATH || window.location.pathname.startsWith(`${ASCENT_PATH}/`));
+/** Sections that own a full-screen terminal and a URL. */
+const TERMINAL_PATHS = { "nifty-pulse": PULSE_PATH, "nifty-ascent": ASCENT_PATH };
+const terminalFromPath = () => (isPulsePath() ? "nifty-pulse" : isAscentPath() ? "nifty-ascent" : null);
 
 /**
  * Options Desk and Swing Scanner are two genuinely separate products that
@@ -42,6 +49,7 @@ const ALL_SECTIONS = [
   { value: "swing-trading", label: "Swing Trading" },
   { value: "naked-sell", label: "Naked Sell" },
   { value: "nifty-pulse", label: "NIFTY PULSE" },
+  { value: "nifty-ascent", label: "NIFTY ASCENT" },
 ];
 
 // TEMPORARY, per explicit request — every other section stays fully intact
@@ -50,32 +58,35 @@ const ALL_SECTIONS = [
 // while this flag is on, since it's a new, actively-worked-on strategy —
 // not one of the "other sections" the original request meant to hide.
 const ONLY_OPTIONS_AUTO = true;
-const VISIBLE_WHILE_ONLY_OPTIONS_AUTO = new Set(["options-auto", "nifty-alpha-ladder", "nifty-alpha-edge", "swing-trading", "naked-sell", "nifty-pulse"]);
+const VISIBLE_WHILE_ONLY_OPTIONS_AUTO = new Set(["options-auto", "nifty-alpha-ladder", "nifty-alpha-edge", "swing-trading", "naked-sell", "nifty-pulse", "nifty-ascent"]);
 const SECTIONS = ONLY_OPTIONS_AUTO ? ALL_SECTIONS.filter((s) => VISIBLE_WHILE_ONLY_OPTIONS_AUTO.has(s.value)) : ALL_SECTIONS;
 
 export default function Root() {
   const [section, setSectionState] = useState(() => {
-    if (isPulsePath()) return "nifty-pulse";
+    const term = terminalFromPath();
+    if (term) return term;
     const saved = localStorage.getItem(SECTION_KEY);
     if (ONLY_OPTIONS_AUTO) return VISIBLE_WHILE_ONLY_OPTIONS_AUTO.has(saved) ? saved : "options-auto";
     return saved ?? "options";
   });
   const [lastNonPulse, setLastNonPulse] = useState(() => {
     const saved = localStorage.getItem(SECTION_KEY);
-    return saved && saved !== "nifty-pulse" && (!ONLY_OPTIONS_AUTO || VISIBLE_WHILE_ONLY_OPTIONS_AUTO.has(saved)) ? saved : ONLY_OPTIONS_AUTO ? "options-auto" : "options";
+    return saved && !TERMINAL_PATHS[saved] && (!ONLY_OPTIONS_AUTO || VISIBLE_WHILE_ONLY_OPTIONS_AUTO.has(saved)) ? saved : ONLY_OPTIONS_AUTO ? "options-auto" : "options";
   });
   const setSection = (s) => {
     setSectionState(s);
-    if (s !== "nifty-pulse") setLastNonPulse(s);
+    if (!TERMINAL_PATHS[s]) setLastNonPulse(s);
     try { localStorage.setItem(SECTION_KEY, s); } catch { /* private browsing, etc. — just won't persist */ }
-    // Only NIFTY PULSE owns a URL; leaving it returns the address bar to "/".
-    if (s === "nifty-pulse" && !isPulsePath()) window.history.pushState({}, "", PULSE_PATH);
-    else if (s !== "nifty-pulse" && isPulsePath()) window.history.pushState({}, "", "/");
+    // Only the full-screen terminals own a URL; leaving one returns the address bar to "/".
+    const cur = terminalFromPath();
+    if (TERMINAL_PATHS[s] && cur !== s) window.history.pushState({}, "", TERMINAL_PATHS[s]);
+    else if (!TERMINAL_PATHS[s] && cur) window.history.pushState({}, "", "/");
   };
   useEffect(() => {
     const onPop = () => {
-      if (isPulsePath()) setSectionState("nifty-pulse");
-      else setSectionState((cur) => (cur === "nifty-pulse" ? lastNonPulse : cur));
+      const term = terminalFromPath();
+      if (term) setSectionState(term);
+      else setSectionState((cur) => (TERMINAL_PATHS[cur] ? lastNonPulse : cur));
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -90,6 +101,14 @@ export default function Root() {
   // hook call so Root's hook order never depends on which path this is.
   if (typeof window !== "undefined" && window.location.pathname === "/login") {
     return <Login />;
+  }
+
+  if (section === "nifty-ascent") {
+    return (
+      <Suspense fallback={<div className="min-h-screen" style={{ background: "var(--c-bg)" }} />}>
+        <NiftyAscent onExit={() => setSection(lastNonPulse)} />
+      </Suspense>
+    );
   }
 
   if (section === "nifty-pulse") {
@@ -141,7 +160,7 @@ export default function Root() {
                 {SECTIONS.map((s) => (
                   <button key={s.value} role="tab" aria-selected={section === s.value} data-on={section === s.value}
                     onClick={() => setSection(s.value)} className="seg">
-                    {s.value === "nifty-pulse" && <Pulse size={13} weight="bold" />}{s.label}
+                    {s.value === "nifty-pulse" && <Pulse size={13} weight="bold" />}{s.value === "nifty-ascent" && <TrendUp size={13} weight="bold" />}{s.label}
                   </button>
                 ))}
               </div>

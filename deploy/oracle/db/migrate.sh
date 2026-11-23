@@ -10,7 +10,9 @@ DUMP=data/migration/supabase-public.dump
 read -rsp "Supabase session-pooler connection string: " SRC; echo
 export SRC
 echo "dumping public schema from Supabase…"
-sudo docker run --rm -e SRC postgres:17-alpine sh -c 'pg_dump "$SRC" --schema=public --no-owner --no-privileges --format=custom' > "$DUMP"
+[ -n "${SRC:-}" ] || { echo "no connection string entered — nothing done"; exit 1; }
+# sudo drops environment variables by default: pass ONLY SRC through (never on the command line).
+sudo --preserve-env=SRC docker run --rm -e SRC postgres:17-alpine sh -c '[ -n "$SRC" ] || { echo "connection string did not reach pg_dump" >&2; exit 1; }; pg_dump "$SRC" --schema=public --no-owner --no-privileges --format=custom' > "$DUMP"
 unset SRC
 chmod 600 "$DUMP"
 echo "dump: $(du -h "$DUMP" | cut -f1)"

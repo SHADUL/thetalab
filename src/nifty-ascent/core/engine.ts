@@ -161,6 +161,7 @@ export interface EngineSnapshot {
   signal: AscentEngine['signal']; entryOrder: PaperOrder | null; exitOrder: PaperOrder | null;
   position: Position | null; trade: Trade | null; realizedToday: number; positionsToday: number;
   pendingInstrument: Instrument | null;
+  referenceMissed?: boolean;
   indexBars: Bar[]; indexNext: number;
   premium: { token: number; bars: Bar[]; next: number } | null;
 }
@@ -207,6 +208,8 @@ export class AscentEngine {
   standDown: { reason: StandDown; bar: number; close: number; at: number } | null = null;
   handover: { bar: number; reason: StandDown; at: number } | null = null;
   williamsStartBar: number | null = null;
+  /** True when the first observed tick came after the 09:15 minute (opening reference unobserved). */
+  referenceMissed = false;
   signal: { bot: Bot; right: Right; bar: number; close: number; at: number; level: number } | null = null;
   entryOrder: PaperOrder | null = null;
   exitOrder: PaperOrder | null = null;
@@ -322,8 +325,14 @@ export class AscentEngine {
     if (res === 'late') this.log({ kind: 'DATA', bar: barLabelOf(this.date, t.exchTs), bot: null, trigger: 'late_tick', reason: 'tick for an already-confirmed bar — logged, not applied' });
     if (res !== 'ok') return;
 
-    // Q1: today's reference = first valid tick at or after 09:15:00.
-    if (!this.reference && t.exchTs >= barStart(this.date, this.rules.orFirstBar)) {
+    // Q1: today's reference = first valid tick at or after 09:15:00 — which must fall INSIDE the
+    // 09:15 minute. If the first tick we observe is later (late start / outage), the opening tick was
+    // not observed: the reference stays unknown (the missing 09:15 bar already means no trade today).
+    if (!this.reference && !this.referenceMissed && t.exchTs >= barStart(this.date, this.rules.orFirstBar) && t.exchTs >= barStart(this.date, this.rules.orFirstBar + 1)) {
+      this.referenceMissed = true;
+      this.log({ kind: 'DATA', bar: barLabelOf(this.date, t.exchTs), bot: null, trigger: 'reference_missed', reason: `first observed NIFTY tick is at ${new Date(t.exchTs).toISOString()}, after the 09:15 minute — today's opening reference was not observed (no gap is computed)` });
+    }
+    if (!this.reference && !this.referenceMissed && t.exchTs >= barStart(this.date, this.rules.orFirstBar)) {
       this.reference = { price: t.price, exchTs: t.exchTs, recvTs: t.recvTs };
       if (this.state === 'WAITING_FOR_MARKET') this.go('COLLECTING_OPENING_RANGE', 'first_tick', `today's reference ${t.price} at ${new Date(t.exchTs).toISOString()}`, this.rules.orFirstBar, { reference: t.price });
       if (this.prevCloseOk && this.prevClose != null) {
@@ -692,7 +701,7 @@ export class AscentEngine {
       williams: this.williams, williamsEligible: this.williamsEligible, standDown: this.standDown, handover: this.handover,
       williamsStartBar: this.williamsStartBar, signal: this.signal, entryOrder: this.entryOrder, exitOrder: this.exitOrder,
       position: this.position, trade: this.trade, realizedToday: this.realizedToday, positionsToday: this.positionsToday,
-      pendingInstrument: this.pendingInstrument,
+      pendingInstrument: this.pendingInstrument, referenceMissed: this.referenceMissed,
       indexBars: this.index.bars.map((b) => ({ ...b })), indexNext: this.index.nextLabel,
       premium: tok != null && pb ? { token: tok, bars: pb.bars.map((b) => ({ ...b })), next: pb.nextLabel } : null,
     };
@@ -715,7 +724,7 @@ export class AscentEngine {
       now: Math.max(snap.now, 0), seq: snap.seq, sessionClosed: snap.sessionClosed, reference: snap.reference, gap: snap.gap, gapFill: snap.gapFill,
       or: snap.or, orCollected: snap.orCollected, williams: snap.williams, williamsEligible: snap.williamsEligible, standDown: snap.standDown,
       handover: snap.handover, williamsStartBar: snap.williamsStartBar, signal: snap.signal, entryOrder: snap.entryOrder, exitOrder: snap.exitOrder,
-      position: snap.position, trade: snap.trade, realizedToday: snap.realizedToday, positionsToday: snap.positionsToday, pendingInstrument: snap.pendingInstrument,
+      position: snap.position, trade: snap.trade, realizedToday: snap.realizedToday, positionsToday: snap.positionsToday, pendingInstrument: snap.pendingInstrument, referenceMissed: !!snap.referenceMissed,
     });
     e.index.restore(snap.indexBars, snap.indexNext);
     if (snap.premium) e.optionBars(snap.premium.token).restore(snap.premium.bars, snap.premium.next);

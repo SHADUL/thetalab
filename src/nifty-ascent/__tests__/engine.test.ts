@@ -385,3 +385,14 @@ test('stale index ticks (> 5 s old on receipt) are rejected; late ticks never ch
   assert.equal(e.index.get(555)!.close, 25200);
   assert.ok(e.events.some((x) => x.trigger === 'late_tick'));
 });
+
+test('Q1: if the first observed tick is after the 09:15 minute, the opening reference is NOT taken from it', () => {
+  const e = engine();
+  e.onIndexTick({ exchTs: at(D, '14:59:03'), recvTs: at(D, '14:59:03') + 100, price: 25380 });
+  assert.equal(e.reference, null);
+  assert.equal(e.gap, null);
+  assert.ok(e.events.some((x) => x.trigger === 'reference_missed'));
+  const ok = engine();
+  ok.onIndexTick({ exchTs: at(D, '09:15:59'), recvTs: at(D, '09:15:59') + 100, price: 25210 });
+  assert.equal(ok.reference!.price, 25210, 'a first tick late inside the 09:15 minute is still the reference');
+});

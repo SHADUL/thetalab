@@ -13,6 +13,7 @@ import { installKiteThrottle } from './kiteThrottle.ts';
 import { startNakedSellScheduler } from './nakedSellScheduler.ts';
 import { startLogRetention } from './logRetention.ts';
 import { startNiftyPulse } from './niftyPulse.ts';
+import { startNiftyAscent } from './niftyAscent.ts';
 
 // Before any handler loads: every Kite GET in this process shares one pacing queue.
 installKiteThrottle();
@@ -104,4 +105,5 @@ app.listen(PORT, () => {
   startNakedSellScheduler();
   startLogRetention();
   startNiftyPulse().catch((e) => console.error(`[nifty-pulse] failed to start: ${e?.message ?? e}`));
+  startNiftyAscent().catch((e) => console.error(`[nifty-ascent] failed to start: ${e?.message ?? e}`));
 });

@@ -96,16 +96,29 @@ export function simExpiries(date: string): string[] {
   return out;
 }
 
+const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+/**
+ * Kite/NSE option symbol convention (SIMULATION instruments only — live
+ * symbols always come from the instrument master): the month's last weekly
+ * expiry is the monthly contract, NIFTY{YY}{MON}{strike}{CE|PE}; other
+ * weeklies are NIFTY{YY}{M}{DD}{strike}{CE|PE} with M = 1–9, O, N, D.
+ */
+export function kiteOptionSymbol(root: string, expiry: string, strike: number, right: 'CE' | 'PE'): string {
+  const d = new Date(`${expiry}T00:00:00Z`);
+  const monthly = new Date(d.getTime() + 7 * 864e5).getUTCMonth() !== d.getUTCMonth();
+  const yy = expiry.slice(2, 4), m = d.getUTCMonth();
+  return monthly ? `${root}${yy}${MONTHS[m]}${strike}${right}` : `${root}${yy}${'123456789OND'[m]}${expiry.slice(8)}${strike}${right}`;
+}
+
 export function simInstruments(sc: Scenario): Instrument[] {
   const open = sc.anchors[0][1];
   const lo = Math.floor((open - 2000) / 50) * 50, hi = Math.ceil((open + 2000) / 50) * 50;
   const out: Instrument[] = [];
   let tok = 9_000_001;
   for (const expiry of simExpiries(sc.date)) {
-    const yy = expiry.slice(2, 4), mon = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'][Number(expiry.slice(5, 7)) - 1];
     for (let k = lo; k <= hi; k += 50) {
       for (const right of ['CE', 'PE'] as const) {
-        out.push({ token: tok++, tradingsymbol: `NIFTY${yy}${mon}${expiry.slice(8)}${k}${right}`, strike: k, right, expiry, lotSize: sc.lotSize ?? 65 });
+        out.push({ token: tok++, tradingsymbol: kiteOptionSymbol('NIFTY', expiry, k, right), strike: k, right, expiry, lotSize: sc.lotSize ?? 65 });
       }
     }
   }

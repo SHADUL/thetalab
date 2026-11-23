@@ -124,14 +124,42 @@ They are synthetic and prove nothing about profitability.
 
 ---
 
-## 5. Next phases (each needs approval)
+## 5. Phase 3 — live market data (observe only, built 23 Nov 2026, not deployed)
 
-1. **Phase 3:** bar builder on the shared `marketStream` (`onQuote`, no new connection), Kite historical previous-day loader, contract selector over `options_instruments`. Verified first in observe-only mode.
-2. **Phase 4:**
+```
+src/nifty-ascent/core/contracts.ts   instrument-master validation + 150-ITM selector (shared by live and replay)
+src/nifty-ascent/live/adapter.ts     shared-stream quote → engine event (exchange time required; trade = volume increase)
+src/nifty-ascent/live/history.ts     previous trading day's NIFTY minute bars from Kite historical (holiday fallback)
+src/nifty-ascent/live/service.ts     LiveAscentService — OBSERVE ONLY: engine created PAUSED, no start path
+server/niftyAscent.ts                wiring; inert unless NIFTY_ASCENT=observe; reuses marketStream + kite_session
+server/index.ts                      one startNiftyAscent() call (no-op without the flag)
+```
+
+**Live day (observe only):**
+- **08:50** — the service loads the previous session (one Kite historical GET) and the instrument master. The master covers the next 3 expiries, with strikes within ±2,500 of the previous close. Failures retry every minute.
+- **09:14** — if preparation still hasn't succeeded, the engine is created anyway, the day is marked `DATA_ERROR` and nothing trades.
+- **From 09:00** — it registers interest in NIFTY 256265 on the shared stream.
+- **Each second** — the clock runs and every confirmed bar is processed.
+- **On a signal** — the signal is recorded. The service logs the contract it *would* select, and the engine refuses the entry (`entries_disabled`).
+
+**Data quality:**
+- Ticks with no exchange timestamp are dropped. Bars are never timed by when a tick was received.
+- The first option packet after a subscription is never treated as a trade.
+- A drop in cumulative volume is treated as a feed reset, not a trade.
+
+**Verification:** every fixture was encoded as real Kite binary packets and decoded by `server/marketStream.ts`'s own `splitPackets` / `decodePacket` / `packetExchangeTs`. The live path then reached identical decisions to deterministic replay, both paused and running. That covers bars, levels, stand-downs, signals, contracts, fills, exits, P&L and premium bars.
+
+**Remaining before live paper (Phase 4):**
+- Run observe-only on the VM for at least one session (needs your approval to set `NIFTY_ASCENT=observe` and redeploy).
+- The option contract is subscribed only after a signal, so its quotes must arrive within the next minute or the entry is rejected (`no_executable_quote`). Pre-subscribing the likely strikes from 09:46 can be added in Phase 4.
+
+## 6. Next phases (each needs approval)
+
+1. **Phase 4:**
    - Server service `NIFTY_ASCENT=on`, OFF by default; the engine starts PAUSED daily.
    - DB lease, Supabase store and migration (you apply it), API.
    - Live-paper source in the UI.
-3. **Phase 5–6:** failure simulations, then deployment after market hours with the flag off.
+2. **Phase 5–6:** failure simulations, then deployment after market hours with the flag off.
 
 **Open items:**
 - Verify the source's expiry-day convention (Q9). Until then, next week's expiry on expiry day stays a PROVISIONAL convention, unverified against the original OptionsBuyer.in research.

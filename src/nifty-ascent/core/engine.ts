@@ -16,7 +16,9 @@ import {
   RESEARCH_RULES_V1, DEFAULT_EXECUTION, STRATEGY_ID, SESSION_FIRST_BAR, SESSION_LAST_BAR,
   barStart, barLabelOf, hhmm, type ResearchRules, type ExecutionSettings,
 } from './rules.ts';
-import { computeGap, openingRange, williamsLevels, williamsGapEligible, itmStrike, strikeStep, paise, type Gap, type OpeningRange, type WilliamsLevels, type Right } from './levels.ts';
+import { computeGap, openingRange, williamsLevels, williamsGapEligible, paise, type Gap, type OpeningRange, type WilliamsLevels, type Right } from './levels.ts';
+import { selectContract, type Instrument } from './contracts.ts';
+export type { Instrument } from './contracts.ts';
 import { MinuteBarBuilder, type Bar } from './bars.ts';
 import { buyFees, sellFees, COST_MODEL_VERSION } from './costs.ts';
 
@@ -36,15 +38,6 @@ export type NoTradeReason =
 export type ExitReason = 'FIXED_STOP' | 'TRAILING_STOP' | 'TIME_EXIT' | 'KILL_FLATTEN';
 export type EngineStatus = 'PAUSED' | 'RUNNING' | 'ENTRIES_STOPPED' | 'KILLED';
 export type EventKind = 'TRANSITION' | 'DATA' | 'ORDER' | 'FILL' | 'RISK' | 'CONTROL' | 'SIGNAL' | 'STOP';
-
-export interface Instrument {
-  token: number;
-  tradingsymbol: string;
-  strike: number;
-  right: Right;
-  expiry: string;
-  lotSize: number;
-}
 
 export interface PrevSession {
   date: string;
@@ -509,16 +502,9 @@ export class AscentEngine {
     if (this.realizedToday <= -Math.abs(this.exec.dailyLossCutoff)) { this.rejectSignal('daily_loss_cutoff', `daily realized loss cutoff ₹${this.exec.dailyLossCutoff} reached`); return; }
 
     // Contract (Q7, Q8, Q9) from the instrument master — never invented.
-    const expiries = [...new Set(this.instruments.map((i) => i.expiry))].filter((e) => e >= this.date).sort();
-    let expiry = expiries[0];
-    if (expiry === this.date && this.rules.expiryDayUsesNextExpiry) expiry = expiries[1];
-    if (!expiry) { this.rejectSignal('expiry_missing', 'no listed NIFTY expiry available'); return; }
-    const chain = this.instruments.filter((i) => i.expiry === expiry && i.right === sig.right);
-    const step = strikeStep(chain.map((i) => i.strike), sig.close);
-    if (step == null) { this.rejectSignal('contract_missing', `no listed ${sig.right} strikes near ${sig.close} for ${expiry}`); return; }
-    const strike = itmStrike(sig.close, sig.right, this.rules.itmPoints, step);
-    const inst = chain.find((i) => paise(i.strike) === paise(strike));
-    if (!inst) { this.rejectSignal('contract_missing', `${sig.right} ${strike} (${expiry}) is not in the instrument master`); return; }
+    const sel = selectContract(this.instruments, this.date, sig.right, sig.close, this.rules);
+    if (!sel.ok) { this.rejectSignal(sel.code, sel.detail); return; }
+    const { instrument: inst, strike, expiry } = sel;
     if (!(inst.lotSize > 0)) { this.rejectSignal('contract_missing', `${inst.tradingsymbol} has no valid lot size`); return; }
 
     const ws = barStart(this.date, bar.label + 1);
@@ -527,7 +513,7 @@ export class AscentEngine {
       signalBar: bar.label, windowStart: ws, windowEnd: ws + 60_000, status: 'PENDING', late: false, skipped: {},
     };
     this.pendingInstrument = inst;
-    this.go('ENTRY_PENDING', 'order_created', `BUY ${this.exec.lots} lot ${inst.tradingsymbol} (strike ${strike}, ${(sig.right === 'CE' ? sig.close - strike : strike - sig.close).toFixed(2)} pts ITM, expiry ${expiry}) at the first fresh ask in ${hhmm(bar.label + 1)}`, bar.label);
+    this.go('ENTRY_PENDING', 'order_created', `BUY ${this.exec.lots} lot ${inst.tradingsymbol} (strike ${strike}, ${sel.itmPoints.toFixed(2)} pts ITM, expiry ${expiry}${sel.expiryRolled ? ' — expiry-day roll, PROVISIONAL Q9 convention' : ''}) at the first fresh ask in ${hhmm(bar.label + 1)}`, bar.label);
     this.log({ kind: 'ORDER', bar: bar.label, bot, trigger: 'entry_order', reason: `paper BUY ${inst.tradingsymbol} × ${inst.lotSize * this.exec.lots}`, prices: { signalClose: sig.close, strike } });
     // A quote already observed may fill only if it is inside the window and fresh now.
     const q = this.lastQuote.get(inst.token);

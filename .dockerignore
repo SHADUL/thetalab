@@ -8,3 +8,4 @@ dist
 *.pine
 scripts_tmp_*
 data/nifty-pulse-ticks
+data/nifty-ascent-observe

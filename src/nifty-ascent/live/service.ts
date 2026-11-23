@@ -208,7 +208,9 @@ export class LiveAscentService {
     }
     if (this.mode === 'PAPER') this.renewLease(now);
     const ready = this.prep && !this.prep.errors.length;
-    if (!this.engine && !this.creating && (ready || minute >= ENGINE_DEADLINE_MIN)) {
+    // After the 09:14 deadline the engine is created even if preparation failed — but never before
+    // the first preparation attempt has finished (a mid-session restart must load the previous session first).
+    if (!this.engine && !this.creating && (ready || (minute >= ENGINE_DEADLINE_MIN && this.prep && !this.preparing))) {
       if (this.mode === 'PAPER') this.creating = this.createPaperEngine(date, now).catch((err) => { this.log(`engine creation failed: ${(err as Error).message}`); }).finally(() => { this.creating = null; });
       else this.createEngine(date);
     }
@@ -399,8 +401,15 @@ export class LiveAscentService {
       if (this.mode === 'PAPER' && e.engineStatus === 'RUNNING') { /* the engine itself selects and logs the contract */ } else
       this.log(`observe-only signal ${e.signal.bot} ${e.signal.right} at close ${e.signal.close}: would select ${w.ok ? `${w.instrument.tradingsymbol} (strike ${w.strike}, ${w.itmPoints} pts ITM, expiry ${w.expiry}${w.expiryRolled ? ', PROVISIONAL expiry-day roll' : ''}, lot ${w.instrument.lotSize})` : `nothing — ${w.code}: ${w.detail}`} — no order, no paper fill`);
     }
+    // Missed minutes arrive in a burst after a late start or an outage: log them as one summary line.
+    const missing = e.events.slice(this.logged).filter((x) => x.trigger === 'missing_bar');
+    if (missing.length > 3) {
+      const lab = (b: number | null) => (b == null ? '?' : `${String(Math.floor(b / 60)).padStart(2, '0')}:${String(b % 60).padStart(2, '0')}`);
+      this.log(`DATA missing_bar: ${missing.length} minutes without a valid NIFTY tick (${lab(missing[0].bar)}–${lab(missing[missing.length - 1].bar)})`);
+    }
     for (; this.logged < e.events.length; this.logged++) {
       const ev: AuditEvent = e.events[this.logged];
+      if (missing.length > 3 && ev.trigger === 'missing_bar') continue;
       if (ev.kind === 'TRANSITION' || ev.kind === 'RISK' || (ev.kind === 'DATA' && ev.trigger !== 'late_tick') || ev.trigger === 'gap_measured' || ev.trigger === 'gap_filled' || ev.trigger === 'opening_range_final') {
         this.log(`${ev.kind} ${ev.trigger}${ev.to ? ` → ${ev.to}` : ''}: ${ev.reason}`);
       }

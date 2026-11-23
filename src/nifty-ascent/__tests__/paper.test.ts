@@ -148,3 +148,24 @@ test('observe mode refuses every control and auto-start', async () => {
   assert.equal((await s.setAutoStart(true)).ok, false);
   assert.throws(() => new LiveAscentService({ ...deps(store, 'A'), store: undefined }), /requires the database/);
 });
+
+test('late start mid-session: waits for the previous session to load, then logs missed minutes as one summary line', async () => {
+  const store = new MemoryAscentStore();
+  const logs: string[] = [];
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => { release = r; });
+  const d = deps(store, 'A');
+  const slowFetch = async (p: string) => { await gate; return d.fetchData(p); };
+  const s = new LiveAscentService({ ...d, fetchData: slowFetch, log: (m) => logs.push(m) });
+  s.tick(at(D, '14:48:00')); await flush();
+  s.tick(at(D, '14:48:01')); await flush();
+  assert.equal(s.engine == null, true, 'no engine before the first preparation attempt finishes');
+  release(); await flush(); await flush(); await flush();
+  for (let t = at(D, '14:48:02'); t <= at(D, '14:48:06'); t += 1000) { s.tick(t); await flush(); await flush(); }
+  assert.ok(s.engine);
+  assert.equal(s.engine!.prevClose, 25100, 'previous session loaded — not a false DATA_ERROR from missing history');
+  assert.equal(s.engine!.state, 'DATA_ERROR', 'unobserved opening range → no trade today');
+  const lines = logs.filter((l) => l.includes('missing_bar'));
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /\d+ minutes without a valid NIFTY tick \(09:15–14:47\)/);
+});

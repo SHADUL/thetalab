@@ -174,7 +174,7 @@ test('service: history failures retry every minute; still unavailable at 09:14 â
   const D = '2026-11-23';
   const f = fakes({ failHistory: 1000 });
   const s = new LiveAscentService({ ...f, isTradingDay: weekday });
-  for (let t = at(D, '08:50:00'); t <= at(D, '09:14:00'); t += 1000) { s.tick(t); await flush(); }
+  for (let t = at(D, '08:50:00'); t <= at(D, '09:14:05'); t += 1000) { s.tick(t); await flush(); } // engine follows the 09:14 attempt's result
   assert.ok(s.engine);
   assert.equal(s.engine!.state, 'DATA_ERROR');
   const s2 = new LiveAscentService({ ...fakes({ failHistory: 1 }), isTradingDay: weekday });

@@ -132,7 +132,7 @@ function LiveBand() {
   return (
     <div className="na-simband na-liveband" data-down={!L?.enabled} role="note">
       <span className="na-simtag na-livetag">{L?.mode === "PAPER" ? "LIVE PAPER" : "LIVE · OBSERVE"}</span>
-      <span className="na-long">Real NIFTY data from the shared Kite stream · {L?.mode === "PAPER" ? <>paper fills only — <b>no real order can ever be sent</b></> : <><b>LIVE PAPER — NOT ENABLED</b> (observe only)</>} · status: <b>{lp.text}</b>{L?.date ? <> · session {L.date}</> : null}</span>
+      <span className="na-long">Real NIFTY data from the shared Kite stream · {L?.mode === "PAPER" ? <>paper fills — real orders only if you arm <b>Live trading</b> in Risk &amp; Settings</> : <><b>LIVE PAPER — NOT ENABLED</b> (observe only)</>} · status: <b>{lp.text}</b>{L?.date ? <> · session {L.date}</> : null}</span>
       <span className="na-short">Real data · <b>{lp.text}</b></span>
       <span className="n na-muted">{L?.serverTime ? `${istTime(L.serverTime)} IST` : ""}</span>
       <div className="na-simctl"><SourceSwitch /></div>

@@ -24,6 +24,8 @@ import { ObserveArchive, archiveOptionsFromEnv } from './niftyAscentArchive.ts';
 import { makeAscentStore, type SupabaseAscentStore } from './niftyAscentStore.ts';
 import { AscentHistory } from './niftyAscentHistory.ts';
 import { LiveSettingsStore } from './niftyAscentLiveSettings.ts';
+import { AscentLiveMirror } from '../src/live-orders/ascentMirror.ts';
+import { getLive, liveEnabled } from './liveOrders/index.ts';
 
 const KITE_REST = 'https://api.kite.trade';
 let service: LiveAscentService | null = null;
@@ -31,8 +33,9 @@ let archive: ObserveArchive | null = null;
 let store: SupabaseAscentStore | null = null;
 let history: AscentHistory | null = null;
 let settings: LiveSettingsStore | null = null;
+let liveMirror: AscentLiveMirror | null = null;
 
-export function getNiftyAscent(): { service: LiveAscentService | null; archive: ObserveArchive | null; store: SupabaseAscentStore | null; history: AscentHistory | null; settings: LiveSettingsStore | null } { return { service, archive, store, history, settings }; }
+export function getNiftyAscent(): { service: LiveAscentService | null; archive: ObserveArchive | null; store: SupabaseAscentStore | null; history: AscentHistory | null; settings: LiveSettingsStore | null; liveMirror: AscentLiveMirror | null } { return { service, archive, store, history, settings, liveMirror }; }
 
 function instrumentPort(sb: SupabaseClient<any>): InstrumentPort {
   return {
@@ -98,6 +101,17 @@ export async function startNiftyAscent(): Promise<void> {
   // Backtest data (real NIFTY candles, cached on the persistent archive disk).
   // Owner-editable live settings (defaults = LIVE_PAPER_EXECUTION + LIVE_PAPER_RULES); pinned per session.
   settings = new LiveSettingsStore(archiveOptionsFromEnv().dir);
+  // LIVE (real orders) mirror of live paper — inert unless LIVE_ORDERS=on AND the owner arms it.
+  const live = mode === 'PAPER' ? getLive() : null;
+  if (live) {
+    liveMirror = new AscentLiveMirror({
+      runner: live.runner('NIFTY_ASCENT'), store: live.store,
+      liveEnabled, control: () => live.cached('NIFTY_ASCENT'),
+      quote: (sym) => live.broker.quote('NFO', sym).catch(() => null),
+      log: (m) => { console.log(m); a.event(m); },
+    });
+  }
+  const m = liveMirror;
   history = new AscentHistory({ dir: `${archiveOptionsFromEnv().dir}/history`, fetchData, isTradingDay: (d) => isTradingDay(new Date(`${d}T06:00:00Z`)) });
   service = new LiveAscentService({
     mode, store: store ?? undefined, holder: `web-${process.pid}-${Math.random().toString(36).slice(2, 10)}`,
@@ -111,6 +125,7 @@ export async function startNiftyAscent(): Promise<void> {
     log: (m) => { console.log(`[nifty-ascent] ${m}`); a.event(m); },
     saveReport: (date, report) => a.report(date, report),
     recordTick: (row, exchTs) => a.tick(row, exchTs),
+    onEngineTick: m ? (engine, leaseOk, now) => { void m.step(engine, leaseOk, now); } : undefined,
   });
   service.start();
   console.log(mode === 'PAPER'

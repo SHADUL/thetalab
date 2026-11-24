@@ -221,7 +221,8 @@ export function liquidityProblems(q: OptionQuote, maxSpreadPct: number, minVolum
 /* Fills, levels, exits                                                 */
 /* ------------------------------------------------------------------ */
 
-export type Mode = 'PAPER' | 'SHADOW';
+/** LIVE = real Zerodha orders (owner-armed); priced like SHADOW (bid in, ask out). */
+export type Mode = 'PAPER' | 'SHADOW' | 'LIVE';
 
 /** Price a SELL entry fills at: PAPER mid, SHADOW the bid. */
 export function entryFill(mode: Mode, q: OptionQuote): number | null {

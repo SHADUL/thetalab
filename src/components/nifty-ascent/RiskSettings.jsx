@@ -7,6 +7,7 @@ import { Card, WsHead, Badge, KV, Reason } from "./ui.jsx";
 import { num } from "./format.js";
 import { RESEARCH_RULES_V1, LIVE_PAPER_RULES } from "../../nifty-ascent/core/rules.ts";
 import { COST_MODEL } from "../../nifty-ascent/core/costs.ts";
+import LiveOrdersPanel from "../LiveOrdersPanel.jsx";
 
 const FIELDS = [
   ["paperCapital", "Paper capital ₹", "independent of NIFTY PULSE", 1000],
@@ -57,6 +58,7 @@ export default function RiskSettings() {
         </Card>
       </div>
       </>)}
+      {S.source === "LIVE" && <div style={{ marginBottom: 12 }}><LiveOrdersPanel strategy="NIFTY_ASCENT" title="Live trading · real Zerodha orders (mirrors live paper)" /></div>}
       {S.source === "LIVE" && <LiveSettingsCard L={S.live} />}
       {S.source === "LIVE" && <LivePaperControls L={S.live} />}
       <LiveServiceCard L={S.live} />
@@ -104,7 +106,7 @@ function LiveServiceCard({ L }) {
   const fmt = (v, dp = 2) => (v == null ? "—" : Number(v).toLocaleString("en-IN", { maximumFractionDigits: dp, minimumFractionDigits: dp }));
   return (
     <Card title={`Live server · real Kite data (${L?.mode === "PAPER" ? "live paper" : "observe only"})`}
-      sub={L?.mode === "PAPER" ? "Read-only status. Paper fills only — no real order can ever be sent." : "Read-only. LIVE PAPER — NOT ENABLED: the live engine records signals but cannot place paper or real orders."} style={{ marginBottom: 12 }}
+      sub={L?.mode === "PAPER" ? "Read-only status. Paper fills — real orders only through the separately armed Live trading panel." : "Read-only. LIVE PAPER — NOT ENABLED: the live engine records signals but cannot place paper or real orders."} style={{ marginBottom: 12 }}
       tools={<Badge tone={L?.mode === "PAPER" ? "accent" : "warn"}>{L?.mode === "PAPER" ? `LIVE PAPER · ${L.livePaper === "RUNNING" ? "RUNNING" : "READY · PAUSED"}` : "LIVE PAPER — NOT ENABLED"}</Badge>}>
       {!L ? <div className="na-note">Checking the server…</div> : !L.enabled ? (
         <Reason tone="warn" tag="NOT OBSERVING">{L.reason}</Reason>
@@ -145,12 +147,12 @@ function LivePaperControls({ L }) {
     setMsg(r); setBusy(false);
   };
   return (
-    <Card title="Live paper engine · server" sub="Real Kite quotes, PAPER fills only — no real Zerodha order can ever be sent" glow style={{ marginBottom: 12 }}
+    <Card title="Live paper engine · server" sub="Real Kite quotes, PAPER fills — these controls never send a real order (Live trading is armed separately above)" glow style={{ marginBottom: 12 }}
       tools={<Badge tone={paper ? (L.engine?.engineStatus === "RUNNING" ? "gain" : "accent") : "warn"}>{paper ? (L.engine?.engineStatus ?? "NO ENGINE YET") : "LIVE PAPER — NOT ENABLED"}</Badge>}>
       {!paper ? <Reason tone="warn" tag="OBSERVE ONLY">The server runs NIFTY ASCENT in observe mode. Live paper mode is switched on separately on the server, only after your approval.</Reason> : (
         <div className="na-grid na-two" style={{ gap: 16 }}>
           <div style={{ display: "grid", gap: 8 }}>
-            <button className="na-stop" data-kind="start" disabled={busy} onClick={() => act(() => ascent.liveControl("START"), "START the live PAPER engine for today? It will paper-trade NIFTY ASCENT on real Kite quotes. No real orders are ever placed.")}><Play size={18} weight="fill" />START LIVE PAPER</button>
+            <button className="na-stop" data-kind="start" disabled={busy} onClick={() => act(() => ascent.liveControl("START"), "START the live PAPER engine for today? It will paper-trade NIFTY ASCENT on real Kite quotes. This button never places a real order; real orders happen only if Live trading is armed.")}><Play size={18} weight="fill" />START LIVE PAPER</button>
             <button className="na-chipbtn" style={{ height: 40, justifyContent: "center" }} disabled={busy} onClick={() => act(() => ascent.liveControl("STOP_ENTRIES"))}><Prohibit size={15} />STOP NEW ENTRIES — keep managing the open position</button>
             <button className="na-stop" disabled={busy} onClick={() => act(() => ascent.liveControl("KILL"), "KILL / FLATTEN: block entries and close any open PAPER position at the first fresh bid?")}><Skull size={18} weight="fill" />KILL / FLATTEN</button>
             <button className="na-chipbtn" style={{ height: 34, justifyContent: "center" }} disabled={busy || !P?.killSwitch} onClick={() => act(() => ascent.liveControl("RELEASE"))}><LockOpen size={14} />Release kill switch</button>
@@ -198,7 +200,7 @@ function LiveSettingsCard({ L }) {
     const execPatch = Object.fromEntries(FIELDS.map(([k]) => [k, Number(f[k])]));
     const variant = { minOrWidth: Number(f.minOrWidth), rollExpiryWithinDays: Number(f.rollExpiryWithinDays) };
     const lines = Object.keys(base).filter((k) => Number(f[k]) !== Number(base[k])).map((k) => `${k}: ${base[k]} → ${f[k]}`).join("\n");
-    if (!window.confirm(`Save these LIVE PAPER settings?\n\n${lines}\n\nThey apply from the next session that has not started yet${sess ? ` (today's ${sess.date} session keeps ${sess.configVersion})` : ""}. Paper only — no real orders.`)) return;
+    if (!window.confirm(`Save these LIVE PAPER settings?\n\n${lines}\n\nThey apply from the next session that has not started yet${sess ? ` (today's ${sess.date} session keeps ${sess.configVersion})` : ""}. These are the live paper settings; an armed Live trading mirror uses the same ones.`)) return;
     setBusy(true);
     const r = await ascent.saveLiveSettings({ exec: execPatch, variant });
     setMsg(r); setBusy(false);

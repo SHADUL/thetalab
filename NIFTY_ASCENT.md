@@ -6,7 +6,7 @@
 
 | | |
 |---|---|
-| **Status** | Phase 2 complete (23 Nov 2026), not committed or deployed |
+| **Status** | Live paper deployed 23 Nov 2026 (rules V1.0+OR60+ROLL1, settings editable in Risk & Settings). Live trading with real orders built 24 Nov 2026 (see LIVE_ORDERS.md); it is off unless the server switch is on and the owner arms it. |
 | **What runs** | The UI and a deterministic strategy engine on SIMULATION replay fixtures |
 | **What is not connected yet** | Kite, the server and the database |
 
@@ -221,7 +221,11 @@ The report also includes total last-traded quantity versus total volume increase
 
 **To enable live paper (owner only):** Risk & Settings → Live paper → *Auto-start each trading day: ON*, or press START on the day. **To stop:** KILL / FLATTEN, or set `NIFTY_ASCENT=observe` and redeploy.
 
-## 7. Next phases (each needs approval)
+## 7. Live trading — real orders (built 24 Nov 2026)
+
+A separate, owner-armed mirror of live paper sends real Zerodha orders. When the paper entry fills it sends the same contract and quantity, and it exits when paper exits. A stop-loss order at Zerodha is the crash guard. The live paper engine itself still has no order code. Details, switches and rollback are in `LIVE_ORDERS.md`.
+
+## 8. Earlier phase plan (historical)
 
 1. **Phase 4:**
    - Server service `NIFTY_ASCENT=on`, OFF by default; the engine starts PAUSED daily.

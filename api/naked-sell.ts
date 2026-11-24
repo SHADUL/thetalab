@@ -1,5 +1,12 @@
 /**
- * Intraday Naked Sell — PAPER + SHADOW only. Never places a real order.
+ * Intraday Naked Sell — PAPER + SHADOW, plus an owner-armed LIVE mode.
+ *
+ * LIVE sends REAL Zerodha orders (src/live-orders, server/liveOrders) and is
+ * off unless the server runs with LIVE_ORDERS=on AND the owner has armed it
+ * (POST /api/live-orders). LIVE has its own limits (lots, entries/day across
+ * both indices, daily loss), checks Kite margin against real available funds,
+ * places a broker-side stop-loss right after the entry fills, squares off by
+ * 15:15, and records only real broker fills. PAPER / SHADOW are unchanged.
  *
  *   GET  ?resource=dashboard   settings, live trend per index, open + recent positions, stats
  *   GET  ?resource=log         recent activity
@@ -24,6 +31,8 @@ import {
   type NakedSellSettings, type Candle, type OptionQuote, type Mode, type Right, type Trend, type ExitReason, type PendingExit,
 } from '../src/naked-sell/engine.ts';
 import { marketStream, type LiveQuote } from '../server/marketStream.ts';
+import { getLive, liveEnabled } from '../server/liveOrders/index.ts';
+import { DONE, type LivePosition, type Quote } from '../src/live-orders/runner.ts';
 
 type Req = { method?: string; query: Record<string, unknown>; body?: any; headers: Record<string, string | undefined> };
 type Res = { status(code: number): Res; json(b: unknown): void; setHeader(k: string, v: string): void };
@@ -36,6 +45,9 @@ const INDEX: Record<string, { quoteKey: string; optExchange: 'NFO' | 'BFO' }> = 
 /** SHADOW's notional capital for the margin sanity check (same figure the main engine uses for SHADOW). */
 const SHADOW_CAPITAL = 500_000;
 const STRIKE_WINDOW_PCT = 4;
+/** LIVE squares off no later than 15:15 — before Zerodha's own MIS auto square-off. */
+const LIVE_SQUARE_OFF_MIN = 15 * 60 + 15;
+const squareOffFor = (p: { mode: string }, s: NakedSellSettings) => (p.mode === 'LIVE' ? Math.min(s.square_off_min, LIVE_SQUARE_OFF_MIN) : s.square_off_min);
 
 class HttpError extends Error {
   status: number; code: string;
@@ -149,6 +161,8 @@ export async function runTick(sb: SupabaseClient, nowMs = Date.now(), opts: { fo
   }
   // 2. Exits — every tick.
   result.monitor = await monitor(sb, s, k, nowMs, minute);
+  // 3. LIVE housekeeping: resolve real positions left half-done by a restart.
+  if (getLive()) result.live = await liveHousekeeping(sb, nowMs).catch((e: any) => `error: ${e.message}`);
   return { ok: true, ...result };
 }
 
@@ -185,6 +199,8 @@ async function tryEntries(sb: SupabaseClient, s: NakedSellSettings, k: KiteCtx, 
   const right = sideForTrend(trend);
   if (!right) return 'no_trend';
   const modes = ([['PAPER', s.paper_enabled], ['SHADOW', s.shadow_enabled]] as const).filter(([, on]) => on).map(([m]) => m as Mode);
+  const liveGate = await liveEntryGate(sb, nowMs);
+  if (liveGate.ok) modes.push('LIVE');
   if (!modes.length) return 'no_modes';
 
   // Expiry: nearest weekly; on its own expiry day, roll to the next one unless allowed.
@@ -204,6 +220,20 @@ async function tryEntries(sb: SupabaseClient, s: NakedSellSettings, k: KiteCtx, 
   const { data: todays } = await sb.from('naked_sell_positions').select('mode,status,closed_at,net_pnl').eq('symbol', symbol).gte('opened_at', since);
   const { data: actives } = await sb.from('naked_sell_positions').select('mode').eq('symbol', symbol).eq('status', 'ACTIVE');
   const openModes = modes.filter((mode) => {
+    if (mode === 'LIVE') {
+      // LIVE limits are across both indices; one open LIVE position per index.
+      const L = liveGate.ok ? liveGate.L : null;
+      if (!L) return false;
+      const lastExit = L.today.filter((p: any) => p.closed_at && p.symbol === symbol).map((p: any) => Date.parse(p.closed_at)).sort((a, b) => b - a)[0];
+      return entryBlocker({ ...s, lots: L.lots, max_entries_per_day: L.maxEntriesPerDay, max_daily_loss: L.maxDailyLoss }, {
+        minuteIst: minute,
+        isExpiryDay: expiry === today,
+        hasOpenPosition: (actives ?? []).some((p: any) => p.mode === 'LIVE'),
+        entriesToday: L.today.length,
+        realizedToday: L.today.reduce((a: number, p: any) => a + Number(p.net_pnl ?? 0), 0),
+        minutesSinceLastExit: lastExit ? (nowMs - lastExit) / 60_000 : null,
+      }) === null;
+    }
     const mine = (todays ?? []).filter((p: any) => p.mode === mode);
     const lastExit = mine.filter((p: any) => p.closed_at).map((p: any) => Date.parse(p.closed_at)).sort((a, b) => b - a)[0];
     const block = entryBlocker(s, {
@@ -234,6 +264,10 @@ async function tryEntries(sb: SupabaseClient, s: NakedSellSettings, k: KiteCtx, 
 
   const opened: string[] = [];
   for (const mode of openModes) {
+    if (mode === 'LIVE') {
+      if (liveGate.ok && await openLive(sb, s, liveGate.L, { symbol, exch, expiry, pick, lotSize, spot, right, trend, trendDetail, nowMs })) opened.push('LIVE');
+      continue;
+    }
     if (mode === 'SHADOW') {
       const liq = liquidityProblems(pick.quote, s.max_spread_pct, s.min_volume);
       if (liq) { await log(sb, `SHADOW: ${symbol} ${pick.quote.tradingsymbol} too illiquid (${liq.join('; ')}) — skipping.`, { mode, symbol }); continue; }
@@ -337,9 +371,14 @@ async function monitor(sb: SupabaseClient, s: NakedSellSettings, k: KiteCtx, now
 
   let closed = 0;
   for (const p of open) {
+    if (p.mode === 'LIVE') {
+      const r = await liveMonitor(sb, p, nowMs);
+      if (r === 'closed') { closed++; continue; }
+      if (r === 'busy') continue;
+    }
     const oq = live.get(p.id) ?? (q[keyOf(p)] ? toOptionQuote(q[keyOf(p)], { strike: Number(p.strike), right: p.option_right, tradingsymbol: p.tradingsymbol }) : null);
     const price = oq ? exitFill(p.mode as Mode, oq) : null;
-    const check = checkExit({ right: p.option_right, tp_price: Number(p.tp_price), sl_price: Number(p.sl_price) }, price, freshTrend(p.symbol, nowMs), minute, s.square_off_min);
+    const check = checkExit({ right: p.option_right, tp_price: Number(p.tp_price), sl_price: Number(p.sl_price) }, price, freshTrend(p.symbol, nowMs), minute, squareOffFor(p, s));
     // The 1-second loop owns price exits while the stream is live; this tick only
     // backs it up (stream down) and always enforces square-off / trend flip.
     const priceExit = check.reason === 'SL' || check.reason === 'TP';
@@ -377,11 +416,18 @@ export async function runFastExitCheck(sb: SupabaseClient, nowMs = Date.now()) {
       const lq = token ? marketStream.get(token) : null;
       if (!lq) continue;
       const price = exitFill(p.mode as Mode, liveToOptionQuote(lq, p));
-      const check = checkExit({ right: p.option_right, tp_price: Number(p.tp_price), sl_price: Number(p.sl_price) }, price, freshTrend(p.symbol, nowMs), minute, book.settings.square_off_min);
+      const check = checkExit({ right: p.option_right, tp_price: Number(p.tp_price), sl_price: Number(p.sl_price) }, price, freshTrend(p.symbol, nowMs), minute, squareOffFor(p, book.settings));
       const { fire, pending } = confirmExit(book.pending.get(p.id), check);
       if (pending) book.pending.set(p.id, pending); else book.pending.delete(p.id);
       if (fire) {
         const exitPx = price ?? midOf(liveToOptionQuote(lq, p)) ?? Number(p.last_price ?? p.entry_price);
+        if (p.mode === 'LIVE') {
+          // Real exits can take seconds: never hold up the 1-second loop for the other positions.
+          book.positions = book.positions.filter((x) => x.id !== p.id);
+          book.pending.delete(p.id);
+          void closePosition(sb, p, exitPx, check.reason!, `${check.detail} (live tick)`, nowMs).catch((e: any) => console.error(`[naked-sell] LIVE close failed: ${e?.message}`));
+          continue;
+        }
         const ok = await closePosition(sb, p, exitPx, check.reason!, `${check.detail} (live tick)`, nowMs);
         book.positions = book.positions.filter((x) => x.id !== p.id);
         book.pending.delete(p.id);
@@ -397,6 +443,7 @@ export async function runFastExitCheck(sb: SupabaseClient, nowMs = Date.now()) {
 }
 
 async function closePosition(sb: SupabaseClient, p: any, exitPx: number, reason: ExitReason, detail: string, nowMs: number): Promise<boolean> {
+  if (p.mode === 'LIVE') return closeLive(sb, p, reason, detail, nowMs, { bid: null, ask: exitPx, ltp: exitPx });
   const gross = shortPnl(Number(p.entry_price), exitPx, p.qty);
   const charges = roundTripCharges(Number(p.entry_price), exitPx, p.qty, p.exchange);
   const net = Math.round((gross - charges) * 100) / 100;
@@ -413,6 +460,156 @@ async function closePosition(sb: SupabaseClient, p: any, exitPx: number, reason:
 }
 
 /* ------------------------------------------------------------------ */
+/* LIVE — real Zerodha orders (owner-armed)                             */
+/* ------------------------------------------------------------------ */
+
+interface LiveLimits { lots: number; maxEntriesPerDay: number; maxDailyLoss: number; stopBufferPct: number; today: any[] }
+type LiveGate = { ok: true; L: LiveLimits } | { ok: false; why: string };
+let lastLiveSkip = '';
+
+/** May a NEW LIVE entry be considered at all right now? (Open LIVE positions are managed regardless.) */
+async function liveEntryGate(sb: SupabaseClient, nowMs: number): Promise<LiveGate> {
+  const live = getLive();
+  if (!live || !liveEnabled()) return { ok: false, why: 'server switch LIVE_ORDERS is off' };
+  const c = live.cached('NAKED_SELL');
+  if (!c.armed) return { ok: false, why: 'not armed' };
+  const why = await (async () => {
+    // Any real position in an unresolved state blocks new real entries until it is resolved.
+    const act = await live.store.active('NAKED_SELL');
+    const stuck = act.find((x) => x.status !== 'OPEN');
+    if (stuck) return `live position ${stuck.tradingsymbol} is ${stuck.status} — resolve it first`;
+    return null;
+  })().catch((e: any) => `live store unavailable (${e.message})`);
+  if (why) { if (why !== lastLiveSkip) await log(sb, `LIVE: no new entries — ${why}`, { mode: 'LIVE', level: 'warn' }); lastLiveSkip = why; return { ok: false, why }; }
+  const { data: today, error } = await sb.from('naked_sell_positions').select('symbol,status,closed_at,net_pnl').eq('mode', 'LIVE').gte('opened_at', istDayStartUtc(nowMs));
+  if (error) return { ok: false, why: `cannot read LIVE positions (${error.message}) — migration applied?` };
+  const st = c.settings;
+  return { ok: true, L: { lots: Number(st.lots), maxEntriesPerDay: Number(st.maxEntriesPerDay), maxDailyLoss: Number(st.maxDailyLoss), stopBufferPct: Number(st.stopBufferPct), today: today ?? [] } };
+}
+
+async function openLive(sb: SupabaseClient, s: NakedSellSettings, L: LiveLimits, a: { symbol: string; exch: 'NFO' | 'BFO'; expiry: string; pick: NonNullable<ReturnType<typeof pickStrike>>; lotSize: number; spot: number; right: Right; trend: Trend; trendDetail: unknown; nowMs: number }): Promise<boolean> {
+  const live = getLive()!;
+  const q = a.pick.quote, mode = 'LIVE';
+  const liq = liquidityProblems(q, s.max_spread_pct, s.min_volume);
+  if (liq) { await log(sb, `LIVE: ${a.symbol} ${q.tradingsymbol} too illiquid (${liq.join('; ')}) — skipping.`, { mode, symbol: a.symbol }); return false; }
+  if (!(q.bid != null && q.bid > 0)) { await log(sb, `LIVE: ${q.tradingsymbol} has no bid — skipping.`, { mode, symbol: a.symbol }); return false; }
+  const qty = a.lotSize * L.lots;
+  let margin: number | null = null, cash: number | null = null;
+  try { [margin, cash] = await Promise.all([live.broker.orderMargin({ exchange: a.exch, tradingsymbol: q.tradingsymbol, side: 'SELL', qty, price: q.bid }), live.broker.availableCash()]); }
+  catch (e: any) { await log(sb, `LIVE: margin/funds check failed (${e.message}) — skipping.`, { level: 'error', mode, symbol: a.symbol }); return false; }
+  if (margin == null || cash == null) { await log(sb, 'LIVE: could not read the margin requirement or available funds — skipping.', { level: 'error', mode, symbol: a.symbol }); return false; }
+  if (margin > cash) { await log(sb, `LIVE: ${q.tradingsymbol} needs margin ₹${Math.round(margin)} but only ₹${Math.round(cash)} is available — skipping.`, { mode, symbol: a.symbol }); return false; }
+
+  const runner = live.runner('NAKED_SELL');
+  const date = istDateOf(a.nowMs);
+  const lp = await runner.open({ date, exchange: a.exch, tradingsymbol: q.tradingsymbol, lotSize: a.lotSize, side: 'SELL', qty, quote: { bid: q.bid, ask: q.ask, ltp: q.last }, ref: { symbol: a.symbol, strike: q.strike, expiry: a.expiry } });
+  if (lp.status !== 'OPEN') { await log(sb, `LIVE: ${q.tradingsymbol} entry not filled — ${lp.log[lp.log.length - 1]?.msg ?? lp.status}.`, { level: 'warn', mode, symbol: a.symbol, detail: { id: lp.id } }); return false; }
+
+  const price = lp.entryPrice!;
+  const { tp, sl } = levels(price, s.tp_pct, s.sl_pct);
+  const { data: row, error } = await sb.from('naked_sell_positions').insert({
+    mode, symbol: a.symbol, exchange: a.exch, expiry: a.expiry, strike: q.strike, option_right: a.right, tradingsymbol: q.tradingsymbol,
+    lot_size: a.lotSize, lots: lp.qty / a.lotSize, qty: lp.qty, entry_price: price, entry_spot: a.spot, entry_iv: a.pick.iv, entry_delta: a.pick.delta,
+    entry_trend: a.trendDetail, tp_price: tp, sl_price: sl, margin_required: margin, live_position_id: lp.id,
+    last_price: price, last_quoted_at: new Date(a.nowMs).toISOString(), unrealized_pnl: 0,
+  }).select('id').single();
+  if (error || !row) {
+    // Never leave a real position without its strategy record: close it now.
+    await log(sb, `LIVE: RISK could not record ${q.tradingsymbol} (${error?.message ?? 'no row'}) — closing the real position immediately.`, { level: 'error', mode, symbol: a.symbol });
+    const c = await runner.close(lp, 'could not record the LIVE position', () => live.broker.quote(a.exch, q.tradingsymbol));
+    await log(sb, `LIVE: emergency close of ${q.tradingsymbol}: ${c.status}${c.status === 'CLOSED' ? ` @ ₹${c.exitPrice}, net ₹${c.net}` : ' — CHECK ZERODHA NOW'}.`, { level: 'error', mode, symbol: a.symbol, detail: { id: lp.id } });
+    return false;
+  }
+  lp.ref = { ...lp.ref, nakedSellId: row.id };
+  const guarded = await runner.protect(lp, sl * (1 + L.stopBufferPct / 100));
+  await log(sb, `LIVE: SOLD ${lp.qty} ${q.tradingsymbol} @ ₹${price} (real fill; ${a.trend} → sell ${a.right}, Δ${a.pick.delta}). TP ₹${tp} · SL ₹${sl} · broker stop ${guarded.stop?.orderId ? `trigger ₹${guarded.stop.trigger}` : 'NOT PLACED'}.`,
+    { mode, symbol: a.symbol, level: guarded.stop?.orderId ? 'info' : 'error', detail: { id: row.id, live: lp.id, margin, cash } });
+  return true;
+}
+
+/** Fresh stream quote for a LIVE row (REST is the runner's own fallback). */
+function streamQuote(p: any): Quote | null {
+  const t = book.tokenOf.get(p.id);
+  const lq = t ? marketStream.get(t) : null;
+  return lq && Date.now() - lq.receivedAt <= 5_000 ? { bid: lq.bid, ask: lq.ask, ltp: lq.ltp } : null;
+}
+
+/** Write the real result onto the naked_sell_positions row. */
+async function finishLiveRow(sb: SupabaseClient, p: any, lp: LivePosition, reason: ExitReason, detail: string, nowMs: number): Promise<boolean> {
+  const { data, error } = await sb.from('naked_sell_positions').update({
+    status: 'CLOSED', exit_price: lp.exitPrice, exit_reason: reason, exit_detail: `${detail} (real fill${lp.closedBy === 'BROKER_STOP' ? ', broker stop' : ''})`,
+    closed_at: new Date(lp.exitAt ?? nowMs).toISOString(), gross_pnl: lp.gross, charges: lp.charges, net_pnl: lp.net, last_price: lp.exitPrice, unrealized_pnl: null,
+  }).eq('id', p.id).eq('status', 'ACTIVE').select('id');
+  book.positions = book.positions.filter((x) => x.id !== p.id);
+  book.pending.delete(p.id);
+  if (error || !data?.length) { if (error) await log(sb, `LIVE: closed ${p.tradingsymbol} at the broker but could not update its row: ${error.message}`, { level: 'error', mode: 'LIVE', symbol: p.symbol }); return false; }
+  const net = Number(lp.net);
+  await log(sb, `LIVE: closed ${p.tradingsymbol} @ ₹${lp.exitPrice} — ${reason} (${detail}). Net ${net >= 0 ? '+' : ''}₹${net} (real fills).`, { mode: 'LIVE', symbol: p.symbol, level: net < 0 ? 'warn' : 'info', detail: { id: p.id, live: lp.id, gross: lp.gross, charges: lp.charges, net } });
+  return true;
+}
+
+async function closeLive(sb: SupabaseClient, p: any, reason: ExitReason, detail: string, nowMs: number, hint?: Quote): Promise<boolean> {
+  const live = getLive();
+  if (!live || !p.live_position_id) { await log(sb, `LIVE: RISK cannot close ${p.tradingsymbol} — live order service unavailable. Close it in Zerodha.`, { level: 'error', mode: 'LIVE', symbol: p.symbol }); return false; }
+  const runner = live.runner('NAKED_SELL');
+  if (runner.isBusy(p.live_position_id)) return false;
+  const lp = await live.store.get(p.live_position_id);
+  if (!lp) { await log(sb, `LIVE: RISK no order record ${p.live_position_id} for ${p.tradingsymbol} — close it in Zerodha.`, { level: 'error', mode: 'LIVE', symbol: p.symbol }); return false; }
+  if (lp.status === 'CLOSED') return finishLiveRow(sb, p, lp, reason, detail, nowMs);
+  // Price source: live stream → fresh REST quote → the price the caller just used to decide the exit.
+  const out = await runner.close(lp, `${reason}: ${detail}`, async () => streamQuote(p) ?? (await live.broker.quote(lp.exchange, lp.tradingsymbol).catch(() => null)) ?? hint ?? null);
+  if (out.status === 'CLOSED') return finishLiveRow(sb, p, out, out.closedBy === 'BROKER_STOP' ? 'SL' : reason, detail, nowMs);
+  await log(sb, `LIVE: RISK exit of ${p.tradingsymbol} incomplete (${out.status}) — retrying every tick. ${out.log[out.log.length - 1]?.msg ?? ''}`, { level: 'error', mode: 'LIVE', symbol: p.symbol, detail: { live: lp.id } });
+  return false;
+}
+
+/** Per tick for each ACTIVE LIVE row: did the broker stop fill? Is a close half-done? */
+async function liveMonitor(sb: SupabaseClient, p: any, nowMs: number): Promise<'closed' | 'busy' | 'none'> {
+  const live = getLive();
+  if (!live || !p.live_position_id) return 'none';
+  const runner = live.runner('NAKED_SELL');
+  if (runner.isBusy(p.live_position_id)) return 'busy';
+  let lp = await live.store.get(p.live_position_id).catch(() => null);
+  if (!lp) return 'none';
+  if (lp.status === 'OPEN') lp = await runner.syncStop(lp);
+  if (lp.status === 'CLOSED') return (await finishLiveRow(sb, p, lp, 'SL', lp.closedBy === 'BROKER_STOP' ? 'broker stop-loss filled at Zerodha' : 'closed', nowMs)) ? 'closed' : 'busy';
+  if (lp.status === 'CLOSING' || lp.status === 'CLOSE_FAILED') {
+    const reason = (['TP', 'SL', 'TREND_FLIP', 'SQUARE_OFF', 'MANUAL'].find((r) => (lp!.exitReason ?? '').startsWith(r)) ?? 'MANUAL') as ExitReason;
+    return (await closeLive(sb, p, reason, 'retrying an unfinished real exit', nowMs)) ? 'closed' : 'busy';
+  }
+  return 'none';
+}
+
+/** Real positions with no ACTIVE strategy row (crash between fill and record): resolve or close them. */
+async function liveHousekeeping(sb: SupabaseClient, nowMs: number) {
+  const live = getLive()!;
+  const runner = live.runner('NAKED_SELL');
+  const act = await live.store.active('NAKED_SELL');
+  let fixed = 0;
+  for (let lp of act) {
+    if (runner.isBusy(lp.id)) continue;
+    if (lp.status === 'OPENING' && nowMs - lp.createdAt > 60_000) lp = await runner.recover(lp);
+    if (DONE.has(lp.status) || lp.status === 'OPENING') continue;
+    const { data: row } = await sb.from('naked_sell_positions').select('id,status').eq('live_position_id', lp.id).maybeSingle();
+    if (row?.status === 'ACTIVE') continue; // the monitor manages it
+    await log(sb, `LIVE: RISK real position ${lp.tradingsymbol} (${lp.status}) has no active strategy record — closing it.`, { level: 'error', mode: 'LIVE' });
+    const out = await runner.close(lp, 'no active strategy record (restart recovery)', () => live.broker.quote(lp.exchange, lp.tradingsymbol));
+    await log(sb, `LIVE: recovery close of ${lp.tradingsymbol}: ${out.status}${out.status === 'CLOSED' ? ` @ ₹${out.exitPrice}, net ₹${out.net}` : ' — CHECK ZERODHA NOW'}.`, { level: out.status === 'CLOSED' ? 'warn' : 'error', mode: 'LIVE' });
+    fixed++;
+  }
+  return { active: act.length, fixed };
+}
+
+/** Owner FLATTEN LIVE: close every open LIVE position at the broker now. */
+export async function flattenLive(sb: SupabaseClient): Promise<string> {
+  const { data: open, error } = await sb.from('naked_sell_positions').select('*').eq('status', 'ACTIVE').eq('mode', 'LIVE');
+  if (error) throw error;
+  const res: string[] = [];
+  for (const p of open ?? []) res.push(`${p.tradingsymbol}: ${(await closeLive(sb, p, 'MANUAL', 'owner FLATTEN LIVE', Date.now())) ? 'closed' : 'NOT closed — retrying, check Zerodha'}`);
+  return res.length ? res.join('; ') : 'no open LIVE positions';
+}
+
+/* ------------------------------------------------------------------ */
 /* Browser-facing                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -426,7 +623,7 @@ async function dashboard(sb: SupabaseClient) {
   ]);
   for (const r of [trends, active, recent]) if (r.error) throw r.error;
   const since = istDayStartUtc(nowMs);
-  const stats = (['PAPER', 'SHADOW'] as const).map((mode) => {
+  const stats = (['PAPER', 'SHADOW', 'LIVE'] as const).map((mode) => {
     const rows = (recent.data ?? []).filter((p: any) => p.mode === mode);
     const today = rows.filter((p: any) => p.closed_at >= since);
     const wins = rows.filter((p: any) => Number(p.net_pnl) > 0).length;

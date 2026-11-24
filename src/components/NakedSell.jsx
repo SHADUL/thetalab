@@ -5,11 +5,13 @@ import {
 } from "@phosphor-icons/react";
 import { OAT_VARS, EASE, signed } from "./alphaFormat.js";
 import { Card, Pill, Stat, Toggle } from "./alphaUi.jsx";
+import LiveOrdersPanel from "./LiveOrdersPanel.jsx";
 
 // Intraday Naked Sell: reads the 5-min intraday trend per index and sells one
 // ~0.30-delta option in that direction (bullish → PE, bearish → CE). PAPER +
-// SHADOW only — no real orders. The server runs the engine every 20 s; this
-// page only reads it and edits settings.
+// SHADOW simulate; LIVE (real Zerodha orders) runs only when the server switch
+// is on and the owner arms it in the Live trading panel. The server runs the
+// engine every 20 s; this page reads it and edits settings.
 
 const API = "/api/naked-sell";
 const POLL_MS = 10_000;
@@ -106,7 +108,7 @@ function OpenCard({ positions, onClose, busyId }) {
             <div key={p.id} className="rounded-[12px] p-3" style={{ border: "1px solid var(--c-line)", background: "var(--c-surface)" }}>
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2 min-w-0">
-                  <Pill tone={p.mode === "SHADOW" ? "accent" : "neutral"}>{p.mode}</Pill>
+                  <Pill tone={p.mode === "LIVE" ? "loss" : p.mode === "SHADOW" ? "accent" : "neutral"}>{p.mode === "LIVE" ? "LIVE · REAL" : p.mode}</Pill>
                   {p.live ? <Pill tone="gain">LIVE</Pill> : <Pill tone="warn">DELAYED</Pill>}
                   <span className="font-semibold text-[13px] truncate">SELL {p.lots} × {p.tradingsymbol}</span>
                 </div>
@@ -263,7 +265,7 @@ export default function NakedSell() {
   useEffect(() => { load(); const t = setInterval(load, hasOpen ? POLL_OPEN_MS : POLL_MS); return () => clearInterval(t); }, [load, hasOpen]);
 
   const close = (p) => {
-    if (!window.confirm(`Close ${p.mode} ${p.tradingsymbol} at the current price?`)) return;
+    if (!window.confirm(p.mode === "LIVE" ? `REAL ORDER: buy back ${p.tradingsymbol} at Zerodha now?` : `Close ${p.mode} ${p.tradingsymbol} at the current price?`)) return;
     setBusyId(p.id);
     post("close", { id: p.id }).then(() => { setNotice(`${p.tradingsymbol} closed.`); load(); }).catch((e) => setNotice(e.message)).finally(() => setBusyId(null));
   };
@@ -300,7 +302,7 @@ export default function NakedSell() {
             </span>
             <div>
               <h1 className="font-display text-[20px] sm:text-[22px] font-bold tracking-[-0.02em] leading-tight">Naked Sell</h1>
-              <div className="text-[11.5px] text-muted">Intraday trend-following option selling · NIFTY &amp; SENSEX · PAPER + SHADOW</div>
+              <div className="text-[11.5px] text-muted">Intraday trend-following option selling · NIFTY &amp; SENSEX · PAPER + SHADOW + LIVE (armed separately)</div>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -309,15 +311,15 @@ export default function NakedSell() {
               ? <Pill tone="gain">LIVE PRICES · {data.stream.subscribed} subscribed</Pill>
               : <Pill tone="neutral">{data.stream.wanted ? "LIVE PRICES CONNECTING" : "LIVE PRICES IDLE"}</Pill>)}
             {s && <Pill tone="accent" icon={Target}>TP −{s.tp_pct}% · SL +{s.sl_pct}%</Pill>}
-            <Pill tone="neutral">NO REAL ORDERS</Pill>
+            {st.LIVE && (data?.active ?? []).some((p) => p.mode === "LIVE") ? <Pill tone="loss">LIVE POSITION OPEN</Pill> : <Pill tone="neutral">LIVE: see panel</Pill>}
           </div>
         </div>
-        <div className="relative grid grid-cols-2 sm:grid-cols-4 gap-4 sm:gap-6 mt-5 pt-4" style={{ borderTop: "1px solid var(--oat-hairline)" }}>
-          {["PAPER", "SHADOW"].map((m) => (
+        <div className="relative grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 sm:gap-6 mt-5 pt-4" style={{ borderTop: "1px solid var(--oat-hairline)" }}>
+          {["PAPER", "SHADOW", "LIVE"].map((m) => (
             <Stat key={m} label={`${m} TODAY`} value={st[m] ? signed(st[m].todayPnl + st[m].openPnl) : "—"} tone={st[m] ? tone(st[m].todayPnl + st[m].openPnl) : undefined}
               sub={st[m] ? `${st[m].todayTrades} closed · ${signed(st[m].openPnl)} open` : ""} />
           ))}
-          {["PAPER", "SHADOW"].map((m) => (
+          {["PAPER", "SHADOW", "LIVE"].map((m) => (
             <Stat key={`${m}-all`} label={`${m} ALL-TIME`} value={st[m]?.trades ? signed(st[m].netPnl) : "—"} tone={st[m]?.trades ? tone(st[m].netPnl) : undefined}
               sub={st[m]?.trades ? `${st[m].trades} trades · ${st[m].winRate}% win · ${st[m].byReason.SL} SL` : "no closed trades"} />
           ))}
@@ -339,6 +341,7 @@ export default function NakedSell() {
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
           <div className="lg:col-span-7 flex flex-col gap-4 min-w-0">
             <TrendCard trends={data.trends} symbols={s.symbols} nowMs={Date.parse(data.serverTime)} />
+            <LiveOrdersPanel strategy="NAKED_SELL" title="Live trading · real Zerodha orders" note="LIVE sells with its own limits below, checks margin against your real funds, places a stop-loss order at Zerodha right after each fill, and squares off by 15:15. Off unless the server switch is on AND you arm it." />
             <OpenCard positions={data.active} onClose={close} busyId={busyId} />
             <HistoryCard recent={data.recent} />
           </div>

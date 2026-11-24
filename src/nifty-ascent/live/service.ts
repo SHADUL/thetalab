@@ -67,6 +67,11 @@ export interface LiveDeps {
   store?: AscentStorePort;
   /** Unique id of this process for the single-engine lease. */
   holder?: string;
+  /**
+   * Called once a second after the engine has processed the clock (PAPER mode only).
+   * Read-only view for an outside observer; nothing here changes the paper engine.
+   */
+  onEngineTick?: (engine: AscentEngine, leaseOk: boolean, now: number) => void;
 }
 
 export type ControlAction = 'START' | 'STOP_ENTRIES' | 'KILL' | 'RELEASE';
@@ -241,7 +246,10 @@ export class LiveAscentService {
     }
     if (this.engine) {
       this.engine.onClock(now); this.flushLog(); this.observe(now, minute);
-      if (this.mode === 'PAPER') { this.enforceSafety(); this.persist(now); }
+      if (this.mode === 'PAPER') {
+        this.enforceSafety(); this.persist(now);
+        try { this.d.onEngineTick?.(this.engine, this.leaseOk, now); } catch (err) { this.log(`engine observer failed: ${(err as Error).message}`); }
+      }
     }
   }
 

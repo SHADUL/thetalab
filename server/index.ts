@@ -40,6 +40,7 @@ const API_MODULES: Record<string, string> = {
   'nifty-pulse': 'api/nifty-pulse.ts',
   'nifty-ascent': 'api/nifty-ascent.ts',
   'live-orders': 'api/live-orders.ts',
+  'kite-status': 'api/kite-status.ts',
 };
 const loaded = new Map<string, (req: any, res: any) => unknown>();
 async function handlerFor(name: string) {

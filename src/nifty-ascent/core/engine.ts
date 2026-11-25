@@ -134,6 +134,8 @@ export interface Trade {
   returnPct: number;
   strategyVersion: string;
   costModel: string;
+  /** Set (journal only) when the session was rebuilt after a late start. */
+  lateStart?: string | null;
 }
 
 export interface EngineOptions {
@@ -145,7 +147,14 @@ export interface EngineOptions {
   /** Engine starts PAUSED unless told otherwise (replay auto-starts). */
   startRunning?: boolean;
   realizedToday?: number;
+  /** Why the previous session could not be loaded (shown instead of the generic message). */
+  prevError?: string;
+  /** Continue the audit event numbering of an engine this one replaces (late-start recovery). */
+  seqStart?: number;
 }
+
+/** Set when the session was rebuilt after a late start (minutes before 09:46 filled from Kite candles). */
+export interface Recovery { at: number; candleMinutes: number[]; liveMinutes: number[]; note: string }
 
 /** Everything needed to resume a session after a process restart (JSON-safe). */
 export interface EngineSnapshot {
@@ -162,6 +171,7 @@ export interface EngineSnapshot {
   position: Position | null; trade: Trade | null; realizedToday: number; positionsToday: number;
   pendingInstrument: Instrument | null;
   referenceMissed?: boolean;
+  recovery?: Recovery | null;
   indexBars: Bar[]; indexNext: number;
   premium: { token: number; bars: Bar[]; next: number } | null;
 }
@@ -210,6 +220,8 @@ export class AscentEngine {
   williamsStartBar: number | null = null;
   /** True when the first observed tick came after the 09:15 minute (opening reference unobserved). */
   referenceMissed = false;
+  /** Late-start recovery marker (null on a normally observed session). */
+  recovery: Recovery | null = null;
   signal: { bot: Bot; right: Right; bar: number; close: number; at: number; level: number } | null = null;
   entryOrder: PaperOrder | null = null;
   exitOrder: PaperOrder | null = null;
@@ -229,12 +241,15 @@ export class AscentEngine {
     this.configVersion = `${STRATEGY_ID}:${this.rules.version}/${this.exec.version}`;
     this.engineStatus = o.startRunning ? 'RUNNING' : 'PAUSED';
     this.realizedToday = o.realizedToday ?? 0;
+    this.seq = o.seqStart ?? 0;
+    this.prevError = o.prevError ?? null;
     this.index = new MinuteBarBuilder(o.date, SESSION_FIRST_BAR, SESSION_LAST_BAR, 'MISSING');
     this.loadPrevSession();
   }
 
   /* ---------------- previous session (Q2, Q5) ---------------- */
 
+  private prevError: string | null = null;
   private loadPrevSession() {
     const bars = this.prev.bars.filter((b) => Number.isFinite(b.close) && b.close > 0);
     this.prevBarsCount = bars.length;
@@ -242,7 +257,9 @@ export class AscentEngine {
     this.prevClose = pc ? pc.close : null;
     this.prevCloseOk = pc != null && bars.length >= this.exec.minPrevDayBars;
     if (!this.prevCloseOk) {
-      this.dataError(null, pc == null
+      this.dataError(null, this.prevError && !bars.length
+        ? `previous session could not be loaded — ${this.prevError}`
+        : pc == null
         ? `previous session ${this.prev.date}: the ${hhmm(this.rules.prevCloseBar)} bar is missing from Kite historical data`
         : `previous session ${this.prev.date}: only ${bars.length} valid minute bars (need ${this.exec.minPrevDayBars})`);
     }
@@ -273,6 +290,12 @@ export class AscentEngine {
   private noTrade(reason: NoTradeReason, detail: string, bar: number | null, prices?: Record<string, number | null>) {
     this.outcome = { kind: 'NO_TRADE', reason, detail };
     this.go('NO_TRADE', reason, detail, bar, prices);
+  }
+
+  /** Mark this session as rebuilt after a late start (audit event + marker). */
+  noteRecovery(r: Recovery) {
+    this.recovery = r;
+    this.log({ kind: 'DATA', bar: null, bot: null, trigger: 'late_start_recovered', reason: r.note, at: r.at });
   }
 
   private dataError(bar: number | null, reason: string) {
@@ -712,7 +735,7 @@ export class AscentEngine {
       williams: this.williams, williamsEligible: this.williamsEligible, standDown: this.standDown, handover: this.handover,
       williamsStartBar: this.williamsStartBar, signal: this.signal, entryOrder: this.entryOrder, exitOrder: this.exitOrder,
       position: this.position, trade: this.trade, realizedToday: this.realizedToday, positionsToday: this.positionsToday,
-      pendingInstrument: this.pendingInstrument, referenceMissed: this.referenceMissed,
+      pendingInstrument: this.pendingInstrument, referenceMissed: this.referenceMissed, recovery: this.recovery,
       indexBars: this.index.bars.map((b) => ({ ...b })), indexNext: this.index.nextLabel,
       premium: tok != null && pb ? { token: tok, bars: pb.bars.map((b) => ({ ...b })), next: pb.nextLabel } : null,
     };
@@ -735,7 +758,7 @@ export class AscentEngine {
       now: Math.max(snap.now, 0), seq: snap.seq, sessionClosed: snap.sessionClosed, reference: snap.reference, gap: snap.gap, gapFill: snap.gapFill,
       or: snap.or, orCollected: snap.orCollected, williams: snap.williams, williamsEligible: snap.williamsEligible, standDown: snap.standDown,
       handover: snap.handover, williamsStartBar: snap.williamsStartBar, signal: snap.signal, entryOrder: snap.entryOrder, exitOrder: snap.exitOrder,
-      position: snap.position, trade: snap.trade, realizedToday: snap.realizedToday, positionsToday: snap.positionsToday, pendingInstrument: snap.pendingInstrument, referenceMissed: !!snap.referenceMissed,
+      position: snap.position, trade: snap.trade, realizedToday: snap.realizedToday, positionsToday: snap.positionsToday, pendingInstrument: snap.pendingInstrument, referenceMissed: !!snap.referenceMissed, recovery: snap.recovery ?? null,
     });
     e.index.restore(snap.indexBars, snap.indexNext);
     if (snap.premium) e.optionBars(snap.premium.token).restore(snap.premium.bars, snap.premium.next);

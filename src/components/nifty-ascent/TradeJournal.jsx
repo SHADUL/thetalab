@@ -108,7 +108,7 @@ function LiveJournal() {
           <thead><tr><th>Date</th><th>Bot</th><th className="r">Gap %</th><th>Signal</th><th>Entry</th><th>Exit</th><th>CE/PE</th><th>Contract</th><th className="r">Qty</th><th className="r">Entry ₹</th><th className="r">Exit ₹</th><th className="r">Gross</th><th className="r">Costs</th><th className="r">Net</th><th className="r">Return</th><th>Exit reason</th><th>Version</th></tr></thead>
           <tbody>{trades.map((t) => (
             <tr key={t.date}>
-              <td>{t.date}</td><td>{BOT_LABEL[t.bot]}</td><td className="r">{pct(t.gapPct, 3, { sign: false })}</td><td>{hm(t.signalBar)}</td>
+              <td>{t.date}{t.lateStart ? <> <span title={t.lateStart}><Badge tone="warn">LATE START</Badge></span></> : null}</td><td>{BOT_LABEL[t.bot]}</td><td className="r">{pct(t.gapPct, 3, { sign: false })}</td><td>{hm(t.signalBar)}</td>
               <td>{istTime(t.entryAt).slice(0, 5)}</td><td>{istTime(t.exitAt).slice(0, 5)}</td><td><Badge tone={t.right === "CE" ? "gain" : "loss"}>{t.right}</Badge></td>
               <td>{t.tradingsymbol}</td><td className="r">{t.qty}</td><td className="r">{num(t.entryPremium, 2)}</td><td className="r">{num(t.exitPremium, 2)}</td>
               <td className="r"><PnL value={t.gross} /></td><td className="r">{num(t.costs, 2)}</td><td className="r"><PnL value={t.net} /></td><td className="r">{pct(t.returnPct, 1)}</td>

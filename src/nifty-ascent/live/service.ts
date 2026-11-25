@@ -21,6 +21,9 @@ import { QuoteAdapter, NIFTY_INDEX_TOKEN, type StreamQuote, type TradeMeta } fro
 import { loadPrevSession, type FetchData, type PrevReport } from './history.ts';
 import { ObservationRecorder, type StreamStatus } from './observation.ts';
 import { planPresubscription } from './presubscribe.ts';
+import { parseKiteCandles, planCatchUp } from './lateStart.ts';
+import { barStart, hhmm } from '../core/rules.ts';
+import type { IndexTick } from '../core/engine.ts';
 import type { AscentStorePort, AscentControl } from './store.ts';
 
 export interface LiveConfig { exec: ExecutionSettings; rules: ResearchRules }
@@ -86,6 +89,13 @@ const STREAM_FROM_MIN = 9 * 60;
 const STREAM_TO_MIN = 15 * 60 + 35;
 const WANT_EVERY_MS = 30_000, WANT_TTL_MS = 180_000, PREP_RETRY_MS = 60_000;
 const STRIKE_BAND = 2_500;
+/** Late-start recovery is attempted every 15 s while it can still succeed (before the 09:46 minute ends). */
+const RECOVER_EVERY_MS = 15_000;
+const RECOVER_LAST_MIN = 9 * 60 + 46;
+const NIFTY_HIST_TOKEN = 256265;
+/** Kite rejects an expired / missing login with 403 TokenException. */
+export const kiteLoginProblem = (msg: string) => /TokenException|\b403\b/.test(msg);
+const friendly = (msg: string) => (kiteLoginProblem(msg) ? 'Kite login expired or missing — log in to Kite' : msg);
 const minuteOf = (t: number) => { const d = new Date(t + 330 * 60_000); return d.getUTCHours() * 60 + d.getUTCMinutes(); };
 
 interface Prep { prev: PrevSession | null; prevReport: PrevReport | null; instruments: Instrument[]; instrumentReport: InstrumentReport | null; errors: string[] }
@@ -132,6 +142,14 @@ export class LiveAscentService {
   readonly subscriptionLog: Array<{ at: number; tokens: number[]; reason: string }> = [];
   private reported = false;
   private lastHealth = 0;
+  /** Live NIFTY ticks before 09:47 (for late-start recovery). */
+  private earlyTicks: IndexTick[] = [];
+  private recovering = false;
+  private lastRecovery = 0;
+  private recoveryGaveUp = false;
+  private recoveryWhy = '';
+  /** Latest late-start recovery status, for the UI. */
+  recoveryStatus: { state: 'IDLE' | 'WAITING' | 'DONE' | 'NOT_POSSIBLE'; detail: string } = { state: 'IDLE', detail: '' };
 
   constructor(deps: LiveDeps) {
     this.d = deps;
@@ -208,6 +226,7 @@ export class LiveAscentService {
     const wanted = new Set([...e.wantedTokens(), ...this.presubscribed]);
     const ev = this.adapter.adapt(q, exchTs, (t) => wanted.has(t), meta);
     if (ev.kind === 'INDEX') {
+      if (ev.tick.exchTs < barStart(e.date, RECOVER_LAST_MIN + 1) && this.earlyTicks.length < 20_000) this.earlyTicks.push({ ...ev.tick });
       e.onIndexTick(ev.tick); this.observation?.onIndexTick(ev.tick.exchTs, ev.tick.recvTs);
       this.d.recordTick?.(['I', q.token, ev.tick.exchTs, ev.tick.recvTs, ev.tick.price], ev.tick.exchTs);
     } else if (ev.kind === 'OPTION') {
@@ -220,13 +239,13 @@ export class LiveAscentService {
   /** One second of the live clock. Public for deterministic tests. */
   tick(now: number) {
     const date = istDateOf(now), minute = minuteOf(now);
-    if (date !== this.date) { this.date = date; this.engine = null; this.wouldSelect = null; this.presubscribed = []; this.presubKey = ''; this.observation = new ObservationRecorder(date); this.orLogged = false; this.reported = false; this.lastHealth = 0; this.prep = null; this.preparing = null; this.lastPrepAttempt = 0; this.logged = 0; }
+    if (date !== this.date) { this.date = date; this.engine = null; this.wouldSelect = null; this.presubscribed = []; this.presubKey = ''; this.observation = new ObservationRecorder(date); this.orLogged = false; this.reported = false; this.lastHealth = 0; this.prep = null; this.preparing = null; this.lastPrepAttempt = 0; this.logged = 0; this.earlyTicks = []; this.recovering = false; this.lastRecovery = 0; this.recoveryGaveUp = false; this.recoveryWhy = ''; this.recoveryStatus = { state: 'IDLE', detail: '' }; }
     if (!this.d.isTradingDay(date)) return;
     if (minute < PREP_FROM_MIN) return;
 
     if (!this.engine && !this.preparing && (!this.prep || this.prep.errors.length) && now - this.lastPrepAttempt >= PREP_RETRY_MS) {
       this.lastPrepAttempt = now;
-      this.preparing = this.prepare(date).finally(() => { this.preparing = null; });
+      this.preparing = this.prepare(date).then(() => {}).finally(() => { this.preparing = null; });
     }
     if (this.mode === 'PAPER') this.renewLease(now);
     const ready = this.prep && !this.prep.errors.length;
@@ -243,6 +262,10 @@ export class LiveAscentService {
       // Index + the engine's own contracts + pre-subscribed options, refreshed every 30 s with a 180 s expiry.
       // Contracts no longer listed are simply not re-requested and the shared stream releases them on expiry.
       this.d.stream.want([NIFTY_INDEX_TOKEN, ...new Set([...(this.engine?.wantedTokens() ?? []), ...this.presubscribed])], WANT_TTL_MS);
+    }
+    if (this.engine && this.recoverable(minute) && now - this.lastRecovery >= RECOVER_EVERY_MS) {
+      this.lastRecovery = now; this.recovering = true;
+      this.recoverLateStart(date, now).catch((err) => this.log(`late-start recovery failed: ${(err as Error).message}`)).finally(() => { this.recovering = false; });
     }
     if (this.engine) {
       this.engine.onClock(now); this.flushLog(); this.observe(now, minute);
@@ -388,13 +411,13 @@ export class LiveAscentService {
   }
 
   /** Previous session + instrument master. Retries every minute until 09:14. */
-  async prepare(date: string): Promise<void> {
+  async prepare(date: string, quiet = false): Promise<Prep> {
     const p: Prep = { prev: null, prevReport: null, instruments: [], instrumentReport: null, errors: [] };
     try {
       const { prev, report } = await loadPrevSession(date, this.d.fetchData, this.d.isTradingDay);
       p.prev = prev; p.prevReport = report;
       if (report.error) p.errors.push(report.error);
-    } catch (e) { p.errors.push(`previous session: ${(e as Error).message}`); }
+    } catch (e) { p.errors.push(`previous session: ${friendly((e as Error).message)}`); }
     try {
       const expiries = await this.d.instruments.nearestExpiries(date, 3);
       const mid = p.prevReport?.close1515 ?? null;
@@ -406,9 +429,72 @@ export class LiveAscentService {
         p.instruments = valid; p.instrumentReport = report;
         if (!valid.length) p.errors.push('instrument master: no valid NIFTY option rows');
       }
-    } catch (e) { p.errors.push(`instrument master: ${(e as Error).message}`); }
+    } catch (e) { p.errors.push(`instrument master: ${friendly((e as Error).message)}`); }
     if (this.date === date && !this.engine) this.prep = p;
-    this.log(p.errors.length ? `prepare ${date}: ${p.errors.join('; ')}` : `prepare ${date}: previous session ${p.prevReport!.date} (${p.prevReport!.bars} bars, 15:15 close ${p.prevReport!.close1515}), ${p.instruments.length} contracts`);
+    if (!quiet) this.log(p.errors.length ? `prepare ${date}: ${p.errors.join('; ')}` : `prepare ${date}: previous session ${p.prevReport!.date} (${p.prevReport!.bars} bars, 15:15 close ${p.prevReport!.close1515}), ${p.instruments.length} contracts`);
+    return p;
+  }
+
+  /* ---------------- late-start recovery (owner decision 25 Nov 2026) ---------------- */
+
+  /** A session that failed only because the start was missed, while recovery can still succeed. */
+  private recoverable(minute: number): boolean {
+    const e = this.engine!;
+    return !this.recovering && !this.recoveryGaveUp && !this.creating && e.state === 'DATA_ERROR' && !e.recovery
+      && e.positionsToday === 0 && !e.entryOrder && !e.signal && minute >= e.rules.orFirstBar && minute <= RECOVER_LAST_MIN;
+  }
+
+  private recoveryNote(state: 'WAITING' | 'NOT_POSSIBLE' | 'DONE', why: string) {
+    this.recoveryStatus = { state, detail: why };
+    if (why !== this.recoveryWhy) this.log(`late-start recovery ${state === 'WAITING' ? 'waiting' : state === 'DONE' ? 'DONE' : 'NOT POSSIBLE'}: ${why}`);
+    this.recoveryWhy = why;
+  }
+
+  /**
+   * Rebuild today's engine: reload the previous session, fill the minutes before 09:46 that were not
+   * observed live from Kite 1-minute candles, replay everything through a fresh engine (same pinned
+   * settings, same START / KILL state), and swap it in. Never fills a minute from 09:46 on.
+   */
+  private async recoverLateStart(date: string, now: number) {
+    const old = this.engine!;
+    const p = await this.prepare(date, true); // recovery logs its own (de-duplicated) status
+    if (p.errors.length) return this.recoveryNote('WAITING', p.errors.join('; '));
+    const to = new Date(now + 330 * 60_000).toISOString().slice(11, 19);
+    let candles;
+    try { candles = parseKiteCandles(date, await this.d.fetchData(`/instruments/historical/${NIFTY_HIST_TOKEN}/minute?from=${date}+09:15:00&to=${date}+${to}`)); }
+    catch (err) { return this.recoveryNote('WAITING', `Kite candles: ${friendly((err as Error).message)}`); }
+    const plan = planCatchUp(date, now, this.earlyTicks, candles, old.rules);
+    if (!plan.ok) {
+      if (!plan.retry) this.recoveryGaveUp = true;
+      return this.recoveryNote(plan.retry ? 'WAITING' : 'NOT_POSSIBLE', plan.why);
+    }
+    if (this.engine !== old || this.date !== date) return;
+    this.prep = p;
+    const cfg = this.sessionConfig(date);
+    const ne = new AscentEngine({ date, prev: p.prev!, instruments: p.instruments, rules: cfg.rules, exec: cfg.exec, startRunning: false, seqStart: (old.serialize().seq ?? 0) });
+    if (ne.configVersion !== old.configVersion) return this.recoveryNote('WAITING', `settings differ (${ne.configVersion} vs ${old.configVersion})`);
+    // Replay the clock second by second with every tick at its exchange time, up to now.
+    let t = barStart(date, 9 * 60 + 10);
+    ne.onClock(t);
+    if (old.killed) ne.control('KILL', t);
+    else if (old.engineStatus === 'RUNNING') ne.control('START', t);
+    else if (old.engineStatus === 'ENTRIES_STOPPED') { ne.control('START', t); ne.control('STOP_ENTRIES', t); }
+    const end = now;
+    for (const tk of plan.ticks) {
+      while (t <= tk.recvTs && t <= end) { ne.onClock(t); t += 1000; }
+      ne.onIndexTick(tk);
+    }
+    while (t <= end) { ne.onClock(t); t += 1000; }
+    ne.onClock(end);
+    if (ne.state === 'DATA_ERROR') return this.recoveryNote('WAITING', `rebuilt session still has a data error: ${ne.outcome?.detail}`);
+    const note = `session rebuilt after a late start: ${plan.candleMinutes.length} minute(s) before 09:46 filled from Kite 1-minute candles (${plan.candleMinutes.length ? `${hhmm(plan.candleMinutes[0])}–${hhmm(plan.candleMinutes[plan.candleMinutes.length - 1])}` : 'none'}), ${plan.liveMinutes.length} observed live; previous session ${p.prevReport?.date} reloaded. Signals from 09:46 use live prices only.`;
+    ne.noteRecovery({ at: end, candleMinutes: plan.candleMinutes, liveMinutes: plan.liveMinutes, note });
+    if (this.engine !== old) return;
+    this.engine = ne;
+    this.logged = ne.events.length; this.snapKey = ''; this.orderKeys.clear(); this.tradeSaved = false; this.wouldSelect = null;
+    this.persistSoon();
+    this.recoveryNote('DONE', note);
+    this.log(`engine for ${date} now in state ${ne.state} (${ne.engineStatus})`);
   }
 
   /** The settings this session runs with: pinned for the day if its engine was already created. */
@@ -427,7 +513,8 @@ export class LiveAscentService {
   private engineOptions(date: string) {
     const cfg = this.sessionConfig(date);
     const prev = this.prep?.prev && this.prep.prev.bars.length ? this.prep.prev : { date: this.prep?.prevReport?.date ?? 'unavailable', bars: [] };
-    return { date, prev, instruments: this.prep?.instruments ?? [], rules: cfg.rules, exec: cfg.exec, startRunning: false };
+    const prevError = prev.bars.length ? undefined : this.prep?.errors.find((x) => x.startsWith('previous session'))?.replace(/^previous session: /, '');
+    return { date, prev, instruments: this.prep?.instruments ?? [], rules: cfg.rules, exec: cfg.exec, startRunning: false, prevError };
   }
 
   private createEngine(date: string) {
@@ -464,6 +551,7 @@ export class LiveAscentService {
     const e = this.engine;
     return {
       mode: this.mode, date: this.date,
+      recovery: { ...this.recoveryStatus, marker: e?.recovery ?? null },
       paper: this.mode === 'PAPER' ? { leaseOk: this.leaseOk, storeOk: this.storeOk, store: this.store!.status(), autoStart: this.control_.autoStart, killSwitch: this.control_.killSwitch, blockedReason: this.blockedReason } : null,
       prep: this.prep ? { prev: this.prep.prevReport, instruments: this.prep.instrumentReport, errors: this.prep.errors } : null,
       stream: this.d.stream.status(),

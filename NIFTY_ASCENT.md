@@ -221,6 +221,20 @@ The report also includes total last-traded quantity versus total volume increase
 
 **To enable live paper (owner only):** Risk & Settings → Live paper → *Auto-start each trading day: ON*, or press START on the day. **To stop:** KILL / FLATTEN, or set `NIFTY_ASCENT=observe` and redeploy.
 
+## 6a. Late-start recovery (owner decision 25 Nov 2026 — amends Q5)
+
+If the live engine missed the start of the session, it can still be rebuilt. This typically happens when Kite is logged in late; the first case was 25 Nov, when the Kite login expired and the first price arrived at 09:33.
+
+- **Every 15 s until the 09:46 minute ends**, the service reloads the previous session and fetches today's Kite 1-minute candles.
+- **Each minute before 09:46 that was not observed live is filled from its Kite candle.** The candle becomes four ticks inside the minute: open, low/high, close.
+- **Minutes the stream observed in full replay their own live ticks.** "In full" means the stream was already delivering when the minute began.
+- **The whole day is replayed through a fresh engine**, with the same pinned settings and the same START / STOP / KILL state, which then replaces the failed one.
+- **Why this is safe:** those minutes only set today's reference (the 09:15 open), the gap, the gap-fill check and the opening range. No trade can come from them.
+- **Any minute from 09:46 on that was not observed live ⇒ no recovery.** Signals are never rebuilt from history.
+- **Marking:** the session carries a `recovery` marker plus a `late_start_recovered` audit event. The live journal shows **LATE START** on that day.
+- **Clearer message:** a Kite 403 TokenException is now reported as "Kite login expired or missing — log in to Kite", instead of "15:15 bar missing".
+- **Site-wide red banner** on trading days 08:30–15:30 when the Kite login is invalid. The login is checked with `/user/profile` at most once a minute. The banner has a *Log in to Kite* button.
+
 ## 7. Live trading — real orders (built 24 Nov 2026)
 
 A separate, owner-armed mirror of live paper sends real Zerodha orders. When the paper entry fills it sends the same contract and quantity, and it exits when paper exits. A stop-loss order at Zerodha is the crash guard. The live paper engine itself still has no order code. Details, switches and rollback are in `LIVE_ORDERS.md`.

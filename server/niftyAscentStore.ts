@@ -90,12 +90,19 @@ export class SupabaseAscentStore implements AscentStorePort {
 
   async history(limit: number): Promise<Trade[]> {
     const rows = await this.run<any[]>('history', this.sb.from('nifty_ascent_trades').select('*').order('session_date', { ascending: false }).limit(limit));
+    // Sessions rebuilt after a late start (marker in the session snapshot).
+    const late = new Map<string, string>();
+    if (rows?.length) {
+      const { data } = await this.sb.from('nifty_ascent_sessions').select('session_date,recovery:snapshot->recovery').in('session_date', rows.map((r) => r.session_date));
+      for (const s of (data as any[] | null) ?? []) if (s.recovery?.note) late.set(String(s.session_date), String(s.recovery.note));
+    }
     return (rows ?? []).map((r) => ({
       date: String(r.session_date), bot: r.bot, right: r.option_right, tradingsymbol: r.tradingsymbol, strike: Number(r.strike), expiry: String(r.expiry),
       lotSize: r.lot_size, qty: r.qty, gapPct: Number(r.gap_pct), gapDirection: r.gap_direction, signalBar: r.signal_bar, signalClose: Number(r.signal_close),
       entryAt: Date.parse(r.entry_at), entryPremium: Number(r.entry_premium), exitAt: Date.parse(r.exit_at), exitPremium: Number(r.exit_premium),
       exitReason: r.exit_reason, exitSignalBar: r.exit_signal_bar, highest: r.highest == null ? null : Number(r.highest), trailActivated: r.trail_activated,
       gross: Number(r.gross), costs: Number(r.costs), net: Number(r.net), returnPct: Number(r.return_pct), strategyVersion: r.strategy_version, costModel: r.cost_model,
+      lateStart: late.get(String(r.session_date)) ?? null,
     }));
   }
 

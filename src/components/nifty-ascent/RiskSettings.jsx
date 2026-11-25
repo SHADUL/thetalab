@@ -119,6 +119,7 @@ function LiveServiceCard({ L }) {
             ["Instrument master", L.prep ? `${L.prep.contracts ?? 0} contracts · ${(L.prep.expiries ?? []).join(", ")}` : "—"],
             ["Live engine", e ? `${e.engineStatus} · ${e.state.replaceAll("_", " ")}` : "not created (non-trading day or before 08:50)"],
             ["Pre-subscribed options", (L.presubscribed ?? []).length ? L.presubscribed.join(", ") : "none"],
+            ["Late-start recovery", L.recovery?.marker ? `DONE — ${L.recovery.marker.candleMinutes.length} minute(s) before 09:46 filled from Kite candles` : L.recovery?.state === "WAITING" ? `waiting — ${L.recovery.detail}` : L.recovery?.state === "NOT_POSSIBLE" ? `not possible — ${L.recovery.detail}` : "not needed"],
           ]} />
           <KV rows={[
             ["Today's reference", fmt(e?.reference)],

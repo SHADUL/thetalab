@@ -96,7 +96,7 @@ function status(service: Svc, archive: ReturnType<typeof getNiftyAscent>['archiv
   const st = (s.stream ?? {}) as Record<string, unknown>;
   const livePaper = s.mode !== 'PAPER' ? 'NOT_ENABLED' : s.engine?.engineStatus === 'RUNNING' ? 'RUNNING' : 'READY_PAUSED';
   return {
-    enabled: true, mode: s.mode, livePaper, date: s.date, serverTime: Date.now(), paper: s.paper,
+    enabled: true, mode: s.mode, livePaper, date: s.date, serverTime: Date.now(), paper: s.paper, recovery: s.recovery,
     settings: settingsView(service, settings, s.date),
     stream: { connected: st.connected ?? null, subscribed: st.subscribed ?? null, wanted: st.wanted ?? null, lastMessageAgoMs: st.lastMessageAgoMs ?? null, reconnects: st.reconnects ?? null },
     prep: s.prep ? { prevDate: s.prep.prev?.date ?? null, prevBars: s.prep.prev?.bars ?? null, prevClose1515: s.prep.prev?.close1515 ?? null, contracts: s.prep.instruments?.valid ?? null, expiries: s.prep.instruments?.expiries ?? null, errors: s.prep.errors } : null,

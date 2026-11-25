@@ -10,6 +10,7 @@ import VwapScalper from "./components/VwapScalper.jsx";
 import SwingTrading from "./components/SwingTrading.jsx";
 import NakedSell from "./components/NakedSell.jsx";
 import Login from "./components/Login.jsx";
+import KiteLoginBanner from "./components/KiteLoginBanner.jsx";
 
 // NIFTY PULSE is its own full-screen terminal, loaded only when opened so
 // no other section's bundle grows. Addressable at /nifty-pulse/<workspace>.
@@ -105,22 +106,29 @@ export default function Root() {
 
   if (section === "nifty-ascent") {
     return (
-      <Suspense fallback={<div className="min-h-screen" style={{ background: "var(--c-bg)" }} />}>
-        <NiftyAscent onExit={() => setSection(lastNonPulse)} />
-      </Suspense>
+      <>
+        <KiteLoginBanner />
+        <Suspense fallback={<div className="min-h-screen" style={{ background: "var(--c-bg)" }} />}>
+          <NiftyAscent onExit={() => setSection(lastNonPulse)} />
+        </Suspense>
+      </>
     );
   }
 
   if (section === "nifty-pulse") {
     return (
-      <Suspense fallback={<div className="min-h-screen" style={{ background: "var(--c-bg)" }} />}>
-        <NiftyPulse onExit={() => setSection(lastNonPulse)} />
-      </Suspense>
+      <>
+        <KiteLoginBanner />
+        <Suspense fallback={<div className="min-h-screen" style={{ background: "var(--c-bg)" }} />}>
+          <NiftyPulse onExit={() => setSection(lastNonPulse)} />
+        </Suspense>
+      </>
     );
   }
 
   return (
     <div className="flex flex-col min-h-screen">
+      <KiteLoginBanner />
       {/* transform forces this bar onto its own compositing layer — Safari/
           WebKit has a known bug where content stacked directly above a
           `backdrop-filter: blur()` element (OptionsAutoTrader's own

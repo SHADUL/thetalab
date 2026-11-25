@@ -95,6 +95,12 @@ export default function LiveOrdersPanel({ strategy, title = "Live trading · rea
         {strategy === "NIFTY_ASCENT" && d.ascentMirror?.lastSkip && <div><div style={{ color: "var(--c-text-2)", fontSize: 10.5, fontWeight: 700 }}>LAST SKIP</div><b>{d.ascentMirror.lastSkip}</b></div>}
       </div>
 
+      {S?.halt && (
+        <div style={{ marginTop: 12, padding: "9px 11px", borderRadius: 8, border: "1px solid var(--c-loss)", color: "var(--c-loss)", fontSize: 12, fontWeight: 700 }}>
+          NEW LIVE ENTRIES STOPPED — {S.halt}
+        </div>
+      )}
+
       {form && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10, marginTop: 12 }}>
           {Object.keys(spec).map((k) => (

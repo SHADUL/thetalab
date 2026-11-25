@@ -4,7 +4,7 @@
  * LIVE_ORDERS=on. Disarmed (the default) ⇒ no new real entry is ever sent;
  * an open real position is still managed until it is closed.
  */
-import type { Strategy } from './runner.ts';
+import type { LivePosition, Strategy } from './runner.ts';
 
 export const ARM_PHRASE = 'ARM LIVE';
 
@@ -53,4 +53,28 @@ export class MemoryLiveControl implements LiveControlPort {
     this.rows.set(s, next);
     return JSON.parse(JSON.stringify(next));
   }
+}
+
+/** Consecutive broker REJECTIONS of new entries (since the last arm) that stop live entries for the day. */
+export const REJECTION_HALT_AFTER = 2;
+
+/**
+ * Stop new live entries after REJECTION_HALT_AFTER rejections in a row from the
+ * broker (e.g. a debit balance or margin block). Only entries since the last
+ * arm count, so disarming and arming again (after fixing the account) clears it.
+ * Returns the reason to show, or null.
+ */
+export function rejectionHalt(today: readonly LivePosition[], armedAt: string | null): string | null {
+  const since = armedAt ? Date.parse(armedAt) : 0;
+  const tries = today.filter((p) => p.createdAt >= since && p.status !== 'OPENING').sort((a, b) => a.createdAt - b.createdAt);
+  let run = 0;
+  for (let i = tries.length - 1; i >= 0; i--) {
+    const p = tries[i];
+    if (p.status === 'ENTRY_FAILED' && p.entry?.status === 'REJECTED') run++;
+    else break;
+  }
+  if (run < REJECTION_HALT_AFTER) return null;
+  const last = tries[tries.length - 1];
+  const why = String(last.entry?.message ?? 'no reason given').replace(/^Kite \d+ \w+: /, '').replace(/\s*\[Read more\.?\]\([^)]*\)?/g, '').trim();
+  return `Zerodha rejected the last ${run} entries (${why}) — live entries stopped for today. Fix the account, then Disarm and Arm again.`;
 }

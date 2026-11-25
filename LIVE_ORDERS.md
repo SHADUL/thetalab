@@ -58,6 +58,12 @@ Paper, shadow and live paper are unchanged. Live results come only from real bro
 
 ## Naked Sell (`api/naked-sell.ts`, mode `LIVE`)
 
+**Rejections (added 25 Nov 2026)**
+- If Zerodha rejects **2 entries in a row** (for example a debit balance or a margin block), new live entries stop for the rest of the day.
+- The Live trading panel shows "NEW LIVE ENTRIES STOPPED" with Zerodha's reason.
+- Fix the account, then click **Disarm** and **Arm live…** again. Only entries since the last arm count, so re-arming clears the stop.
+- A filled entry, or an entry that was not filled and was cancelled, resets the count.
+
 **Entry**
 - Same signal, strike choice, liquidity gate and TP/SL percentages as SHADOW.
 - Before selling, Kite's margin for the order is checked against real available funds.
@@ -75,5 +81,5 @@ Paper, shadow and live paper are unchanged. Live results come only from real bro
 ## Verified
 
 - Tests use a fake broker and a fake database only. No real order was sent while building this.
-- `src/live-orders/__tests__`: runner (19), ASCENT mirror (11), Naked Sell LIVE end to end (10).
+- `src/live-orders/__tests__`: runner (20), ASCENT mirror (11), Naked Sell LIVE end to end (11).
 - Full suite passes.

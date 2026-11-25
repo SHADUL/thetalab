@@ -261,3 +261,17 @@ test('KiteBroker refuses any ENTRY unless the server runs with LIVE_ORDERS=on', 
   await assert.rejects(kb2.place({ exchange: 'NFO', tradingsymbol: SYM, side: 'BUY', qty: 65, kind: 'LIMIT', price: 60, tag: 'NS1X1', purpose: 'EXIT' }), /no Kite session/);
   if (prev === undefined) delete process.env.LIVE_ORDERS; else process.env.LIVE_ORDERS = prev;
 });
+
+test('rejectionHalt: 2 rejections in a row since the arm halt; a fill or an unfilled cancel resets; re-arm clears', async () => {
+  const { rejectionHalt } = await import('../control.ts');
+  const mk = (t: number, status: string, entryStatus: string, message?: string) => ({ createdAt: t, status, entry: { status: entryStatus, message } }) as unknown as LivePosition;
+  const msg = 'Kite 400 InputException: Your account has an ageing debit balance of 8349.47. You can use collateral margin only after you clear this debit balance. [Read more.](https://support.zerodha.com/category/console/portfolio/pledging';
+  assert.equal(rejectionHalt([mk(1, 'ENTRY_FAILED', 'REJECTED', msg)], null), null, 'one rejection is not enough');
+  const two = [mk(1, 'ENTRY_FAILED', 'REJECTED', msg), mk(2, 'ENTRY_FAILED', 'REJECTED', msg)];
+  const why = rejectionHalt(two, null)!;
+  assert.match(why, /rejected the last 2 entries \(Your account has an ageing debit balance of 8349\.47\. .*debit balance\.\) — live entries stopped/);
+  assert.doesNotMatch(why, /Read more|https/);
+  assert.equal(rejectionHalt([...two, mk(3, 'CLOSED', 'COMPLETE')], null), null, 'a later fill resets');
+  assert.equal(rejectionHalt([mk(1, 'ENTRY_FAILED', 'REJECTED'), mk(2, 'ENTRY_FAILED', 'CANCELLED'), mk(3, 'ENTRY_FAILED', 'REJECTED')], null), null, 'unfilled-and-cancelled breaks the run');
+  assert.equal(rejectionHalt(two, new Date(2).toISOString()), null, 'only entries since the last arm count');
+});

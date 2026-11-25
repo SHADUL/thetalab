@@ -11,7 +11,7 @@
  */
 import { getLive, liveEnabled } from '../server/liveOrders/index.ts';
 import { liveOrdersOn } from '../server/liveOrders/kiteBroker.ts';
-import { ARM_PHRASE, LIVE_SETTINGS_SPEC, validateLiveSettings } from '../src/live-orders/control.ts';
+import { ARM_PHRASE, LIVE_SETTINGS_SPEC, rejectionHalt, validateLiveSettings } from '../src/live-orders/control.ts';
 import { expectedNet, type Strategy } from '../src/live-orders/runner.ts';
 import { getNiftyAscent } from '../server/niftyAscent.ts';
 
@@ -39,7 +39,7 @@ export default async function handler(req: Req, res: Res) {
             return { ...x, broker, match: broker === x.qty };
           }));
         }
-        out[s] = { control, spec: LIVE_SETTINGS_SPEC[s], today, recent, reconcile };
+        out[s] = { control, spec: LIVE_SETTINGS_SPEC[s], today, recent, reconcile, halt: control.armed ? rejectionHalt(today, control.armedAt) : null };
       }
       const asc = getNiftyAscent().liveMirror;
       res.status(200).json({ configured: true, serverSwitch: liveOrdersOn(), enabled: liveEnabled(), migration: live.store.migration, armPhrase: ARM_PHRASE, ascentMirror: asc ? { attemptedToday: asc.attempted, lastSkip: asc.lastSkip } : null, strategies: out });

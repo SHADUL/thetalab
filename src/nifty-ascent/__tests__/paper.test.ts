@@ -10,11 +10,14 @@ import { hhmm } from '../core/rules.ts';
 const D = '2026-11-25';
 const weekday = (d: string) => { const w = new Date(`${d}T00:00:00Z`).getUTCDay(); return w >= 1 && w <= 5; };
 const all = mkInst(['2026-12-01', '2026-12-08']);
+let simNow = at(D, '08:50:00');
 const deps = (store: MemoryAscentStore, holder: string) => ({
   stream: { want() {}, onQuote: () => () => {}, status: () => ({ connected: true, subscribed: 5 }) } as StreamPort,
   fetchData: async (p: string) => { const day = p.match(/from=(\d{4}-\d{2}-\d{2})/)![1]; const c = []; for (let m = 555; m <= 929; m++) c.push([`${day}T${hhmm(m)}:00+0530`, 0, 0, 0, m === 915 ? 25100 : m === 660 ? 25260 : m === 810 ? 25010 : 25120, 0]); return { candles: c }; },
   instruments: { nearestExpiries: async () => ['2026-12-01', '2026-12-08'], strikes: async (e: string, lo: number, hi: number) => all.filter((i) => i.expiry === e && i.strike >= lo && i.strike <= hi) } as InstrumentPort,
   isTradingDay: weekday, mode: 'PAPER' as const, store, holder,
+  // Simulated clock: owner controls are stamped with the same time as the ticks (not the wall clock).
+  now: () => simNow,
 });
 const flush = () => new Promise((r) => setTimeout(r, 0));
 /** Gap up 25,100 → 25,200, OR 25,180–25,230, upside breakout at 10:00. */
@@ -24,6 +27,7 @@ let vol = 100_000;
 /** Drive a service second by second with index ticks and real-shaped option quotes (+LTT metadata). */
 async function run(s: LiveAscentService, from: string, to: string, o: { premium?: (t: number) => number; onSecond?: (t: number) => void | Promise<void>; staleOptions?: boolean } = {}) {
   for (let t = at(D, from); t <= at(D, to); t += 1000) {
+    simNow = t;
     await o.onSecond?.(t);
     s.tick(t);
     await flush();

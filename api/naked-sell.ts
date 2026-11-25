@@ -33,6 +33,7 @@ import {
 import { marketStream, type LiveQuote } from '../server/marketStream.ts';
 import { getLive, liveEnabled } from '../server/liveOrders/index.ts';
 import { DONE, type LivePosition, type Quote } from '../src/live-orders/runner.ts';
+import { rejectionHalt } from '../src/live-orders/control.ts';
 
 type Req = { method?: string; query: Record<string, unknown>; body?: any; headers: Record<string, string | undefined> };
 type Res = { status(code: number): Res; json(b: unknown): void; setHeader(k: string, v: string): void };
@@ -478,7 +479,7 @@ async function liveEntryGate(sb: SupabaseClient, nowMs: number): Promise<LiveGat
     const act = await live.store.active('NAKED_SELL');
     const stuck = act.find((x) => x.status !== 'OPEN');
     if (stuck) return `live position ${stuck.tradingsymbol} is ${stuck.status} — resolve it first`;
-    return null;
+    return rejectionHalt(await live.store.forDate('NAKED_SELL', istDateOf(nowMs)), c.armedAt);
   })().catch((e: any) => `live store unavailable (${e.message})`);
   if (why) { if (why !== lastLiveSkip) await log(sb, `LIVE: no new entries — ${why}`, { mode: 'LIVE', level: 'warn' }); lastLiveSkip = why; return { ok: false, why }; }
   const { data: today, error } = await sb.from('naked_sell_positions').select('symbol,status,closed_at,net_pnl').eq('mode', 'LIVE').gte('opened_at', istDayStartUtc(nowMs));

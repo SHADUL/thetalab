@@ -226,3 +226,24 @@ test('a stuck LIVE close blocks new LIVE entries until resolved', async () => {
   assert.equal(positions('LIVE')[0].status, 'CLOSED');
   assert.equal(await broker.netQty('NFO', positions('LIVE')[0].tradingsymbol), 0);
 });
+
+test('two Zerodha rejections in a row stop LIVE entries for the day; Disarm + Arm clears it', async () => {
+  broker.next = [{ fill: 'reject' }, { fill: 'reject' }];
+  await runTick(sb as any, clock, { forceScan: true });
+  clock = istMs('11:46');
+  await runTick(sb as any, clock, { forceScan: true });
+  assert.equal(broker.orders.length, 2, 'two rejected entries');
+  clock = istMs('11:47');
+  await runTick(sb as any, clock, { forceScan: true });
+  clock = istMs('11:48');
+  await runTick(sb as any, clock, { forceScan: true });
+  assert.equal(broker.orders.length, 2, 'no third order after two rejections');
+  assert.ok(logs().some((m) => /rejected the last 2 entries \(RMS: simulated rejection\).*stopped for today/.test(m)), logs().join('\n'));
+  assert.equal(positions('PAPER').length, 1, 'paper unaffected');
+  // owner fixes the account, disarms and arms again
+  ctl = { ...ctl, armed: true, armedAt: new Date(clock).toISOString() };
+  clock = istMs('11:49');
+  await runTick(sb as any, clock, { forceScan: true });
+  assert.equal(broker.orders[2]?.side, 'SELL', 're-arming allows a new entry');
+  assert.equal(positions('LIVE').length, 1);
+});

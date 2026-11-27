@@ -43,3 +43,44 @@ also checked against ThetaLab's TypeScript engine on 300 random cases: identical
 - Fills are OpenAlgo's sandbox fills for MARKET orders, not ThetaLab's bid/ask model.
 - Exit checks run every 3 s on REST quotes (ThetaLab: 1 s on the live stream).
 - No margin check against capital (the sandbox applies its own margin).
+
+## nifty_ascent.py — ThetaLab NIFTY ASCENT, Gap-and-Go → Williams (Analyzer only)
+
+The live-paper rules **V1.0 + OR60 + ROLL1** with **EXEC-2** risk:
+- 1 lot of the 150-point ITM NIFTY option.
+- At most ₹20,000 outlay including fees. Entry needs spread ≤ 1.5% and day volume ≥ 500.
+- 70% fixed stop; trailing stop arms above 105% of entry and exits at 80% of the high; 15:15 time exit.
+- One trade a day.
+
+Signals come from NIFTY 1-minute candles, the same way ThetaLab's historical backtester feeds its engine.
+**Checked against ThetaLab's real engine on 400 random days: identical signal (bot, side, minute) or
+no-trade reason, and identical strike and expiry.**
+
+Same Analyzer-only safety as above. It also never takes a signal it did not see in real time: if it
+starts after a signal minute, the day is recorded as `missed_signal`.
+
+### Install
+Upload `nifty_ascent.py` in OpenAlgo → Python. Schedule Mon–Fri **09:10 → 15:35** IST. Analyzer ON, then Start.
+It must be running before 09:46 to trade that day. Its state is saved as `nifty_ascent_YYYY-MM-DD.json`.
+
+### Settings (optional environment variables)
+| Variable | Default | Meaning |
+|---|---|---|
+| `LOTS` | `1` | Lots |
+| `MAX_OUTLAY` / `MAX_LOSS` | `20000` / `20000` | ₹ (EXEC-2) |
+| `MAX_SPREAD_PCT` / `MIN_VOLUME` | `1.5` / `500` | Entry liquidity gate |
+| `MIN_OR_WIDTH` | `60` | OR60 filter (0 = off, plain V1) |
+| `ROLL_DAYS` | `1` | ROLL1 expiry roll (0 = off) |
+
+### Tests
+`python3 -m unittest test_nifty_ascent` — entry contract and timing, fixed and trailing stops, no-print
+minutes, time exit, liquidity and budget rejections, Analyzer off, late start, restart, expiry roll and
+strike ties.
+
+### Differences from ThetaLab's live paper
+- Today's reference is the 09:15 candle's open, and a gap fill is any 1-minute low/high touching the
+  previous close up to the breakout minute. ThetaLab uses individual ticks, so a fill late in the
+  breakout minute could differ.
+- Entries and exits are MARKET orders filled by OpenAlgo's sandbox, not ThetaLab's
+  "first fresh ask/bid + 0.25%" model. The 2-second quote-age check is not applied.
+- Stops are decided on the option's 1-minute candles from OpenAlgo's history, a few seconds after each minute.

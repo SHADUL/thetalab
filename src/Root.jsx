@@ -9,6 +9,7 @@ import NiftyAlphaEdge from "./components/NiftyAlphaEdge.jsx";
 import VwapScalper from "./components/VwapScalper.jsx";
 import SwingTrading from "./components/SwingTrading.jsx";
 import NakedSell from "./components/NakedSell.jsx";
+import OpenAlgo from "./components/OpenAlgo.jsx";
 import Login from "./components/Login.jsx";
 import KiteLoginBanner from "./components/KiteLoginBanner.jsx";
 
@@ -51,6 +52,7 @@ const ALL_SECTIONS = [
   { value: "naked-sell", label: "Naked Sell" },
   { value: "nifty-pulse", label: "NIFTY PULSE" },
   { value: "nifty-ascent", label: "NIFTY ASCENT" },
+  { value: "openalgo", label: "OpenAlgo" },
 ];
 
 // TEMPORARY, per explicit request — every other section stays fully intact
@@ -59,7 +61,7 @@ const ALL_SECTIONS = [
 // while this flag is on, since it's a new, actively-worked-on strategy —
 // not one of the "other sections" the original request meant to hide.
 const ONLY_OPTIONS_AUTO = true;
-const VISIBLE_WHILE_ONLY_OPTIONS_AUTO = new Set(["options-auto", "nifty-alpha-ladder", "nifty-alpha-edge", "swing-trading", "naked-sell", "nifty-pulse", "nifty-ascent"]);
+const VISIBLE_WHILE_ONLY_OPTIONS_AUTO = new Set(["options-auto", "nifty-alpha-ladder", "nifty-alpha-edge", "swing-trading", "naked-sell", "nifty-pulse", "nifty-ascent", "openalgo"]);
 const SECTIONS = ONLY_OPTIONS_AUTO ? ALL_SECTIONS.filter((s) => VISIBLE_WHILE_ONLY_OPTIONS_AUTO.has(s.value)) : ALL_SECTIONS;
 
 export default function Root() {
@@ -185,6 +187,7 @@ export default function Root() {
           : section === "nifty-alpha-edge" ? <NiftyAlphaEdge />
           : section === "swing-trading" ? <SwingTrading />
           : section === "naked-sell" ? <NakedSell />
+          : section === "openalgo" ? <OpenAlgo />
           : <VwapScalper />}
       </div>
     </div>
